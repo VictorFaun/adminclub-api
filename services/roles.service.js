@@ -1,5 +1,7 @@
 const rolesRepository = require('../repositories/roles.repository');
 const functionsRepository = require('../repositories/functions.repository');
+const membersRepository = require('../repositories/members.repository');
+const memberGroupsRepository = require('../repositories/memberGroups.repository');
 const auditRepository = require('../repositories/audit.repository');
 const AppError = require('../helpers/AppError');
 const { withTransaction } = require('../config/database');
@@ -8,7 +10,7 @@ const { ROLE_SCOPE } = require('../config/constants');
 const { diffValue, diffArray, buildDiff } = require('../helpers/auditDiff');
 
 class RolesService {
-  toDto(role, functionCodes = []) {
+  toDto(role, functionCodes = [], memberScope = { memberIds: [], groupIds: [] }) {
     return {
       id: role.id,
       uuid: role.uuid,
@@ -19,8 +21,27 @@ class RolesService {
       color: role.color,
       isSystem: !!role.is_system,
       functions: functionCodes,
+      memberScope,
       createdAt: role.created_at,
     };
+  }
+
+  /** Valida que memberIds/groupIds (scope de VIEW_MEMBERS_SCOPED) pertenezcan al club del rol —
+   * mismo criterio que invitations.service.js validando defaultRoleId. */
+  async _resolveMemberScope(clubId, memberScope) {
+    if (!memberScope) return null;
+    const memberIds = memberScope.memberIds ?? [];
+    const groupIds = memberScope.groupIds ?? [];
+
+    if (memberIds.length) {
+      const found = await membersRepository.findByIds(memberIds, clubId);
+      if (found.length !== memberIds.length) throw AppError.badRequest('Uno o más miembros del alcance no pertenecen a este club.');
+    }
+    if (groupIds.length) {
+      const found = await memberGroupsRepository.findByIds(groupIds, clubId);
+      if (found.length !== groupIds.length) throw AppError.badRequest('Uno o más grupos del alcance no pertenecen a este club.');
+    }
+    return { memberIds, groupIds };
   }
 
   /** Crea el rol por defecto (Administrador) para un club recién creado. */
@@ -54,7 +75,7 @@ class RolesService {
   async listForClub(clubId) {
     const roles = await rolesRepository.findClubRoles(clubId);
     return Promise.all(
-      roles.map(async (r) => this.toDto(r, await rolesRepository.getFunctionCodes(r.id)))
+      roles.map(async (r) => this.toDto(r, await rolesRepository.getFunctionCodes(r.id), await rolesRepository.getMemberScope(r.id)))
     );
   }
 
@@ -66,15 +87,19 @@ class RolesService {
   async getById(roleId, clubId) {
     const role = await rolesRepository.findById(roleId);
     if (!role || role.club_id !== clubId) throw AppError.notFound('Rol no encontrado.');
-    const functionCodes = await rolesRepository.getFunctionCodes(roleId);
-    return this.toDto(role, functionCodes);
+    const [functionCodes, memberScope] = await Promise.all([
+      rolesRepository.getFunctionCodes(roleId),
+      rolesRepository.getMemberScope(roleId),
+    ]);
+    return this.toDto(role, functionCodes, memberScope);
   }
 
-  async create(clubId, { name, description, color, functionCodes }, actorId) {
+  async create(clubId, { name, description, color, functionCodes, memberScope }, actorId) {
     const existing = await rolesRepository.findByNameInScope(name, clubId);
     if (existing) throw AppError.conflict('Ya existe un rol con este nombre en el club.');
 
     const validFunctions = await this._resolveFunctionIds(functionCodes);
+    const resolvedScope = await this._resolveMemberScope(clubId, memberScope);
 
     const roleId = await withTransaction(async (conn) => {
       const id = await rolesRepository.createRole(
@@ -82,6 +107,7 @@ class RolesService {
         conn
       );
       await rolesRepository.setFunctions(id, validFunctions.ids, conn);
+      if (resolvedScope) await rolesRepository.setMemberScope(id, resolvedScope.memberIds, resolvedScope.groupIds, conn);
       return id;
     });
 
@@ -90,7 +116,7 @@ class RolesService {
     return this.getById(roleId, clubId);
   }
 
-  async update(roleId, clubId, { name, description, color, functionCodes }, actorId) {
+  async update(roleId, clubId, { name, description, color, functionCodes, memberScope }, actorId) {
     const role = await rolesRepository.findById(roleId);
     if (!role || role.club_id !== clubId) throw AppError.notFound('Rol no encontrado.');
 
@@ -107,12 +133,17 @@ class RolesService {
     // Se pide ANTES de aplicar los cambios: es la única forma de poder mostrar después
     // "de X a Y" en el detalle de auditoría en vez de solo el valor final.
     const previousFunctionCodes = functionCodes !== undefined ? await rolesRepository.getFunctionCodes(roleId) : undefined;
+    const previousMemberScope = memberScope !== undefined ? await rolesRepository.getMemberScope(roleId) : undefined;
+    const resolvedScope = memberScope !== undefined ? await this._resolveMemberScope(clubId, memberScope) : undefined;
 
     await withTransaction(async (conn) => {
       if (Object.keys(updates).length) await rolesRepository.updateById(roleId, updates, conn);
       if (functionCodes !== undefined) {
         const { ids } = await this._resolveFunctionIds(functionCodes);
         await rolesRepository.setFunctions(roleId, ids, conn);
+      }
+      if (resolvedScope !== undefined) {
+        await rolesRepository.setMemberScope(roleId, resolvedScope.memberIds, resolvedScope.groupIds, conn);
       }
     });
 
@@ -121,6 +152,8 @@ class RolesService {
       description: description !== undefined ? diffValue(role.description, description) : undefined,
       color: color !== undefined ? diffValue(role.color, color) : undefined,
       functionCodes: functionCodes !== undefined ? diffArray(previousFunctionCodes, functionCodes) : undefined,
+      memberScopeIds: resolvedScope !== undefined ? diffArray(previousMemberScope.memberIds, resolvedScope.memberIds) : undefined,
+      memberScopeGroupIds: resolvedScope !== undefined ? diffArray(previousMemberScope.groupIds, resolvedScope.groupIds) : undefined,
     });
     if (changes) {
       await auditRepository.logAction({ userId: actorId, clubId, action: 'ROLE_UPDATED', entityType: 'role', entityId: roleId, changes });
@@ -150,7 +183,10 @@ class RolesService {
     const original = await rolesRepository.findById(roleId);
     if (!original || original.club_id !== clubId) throw AppError.notFound('Rol no encontrado.');
 
-    const functionCodes = await rolesRepository.getFunctionCodes(roleId);
+    const [functionCodes, memberScope] = await Promise.all([
+      rolesRepository.getFunctionCodes(roleId),
+      rolesRepository.getMemberScope(roleId),
+    ]);
     let newName = `${original.name} (copia)`;
     let suffix = 2;
     // eslint-disable-next-line no-await-in-loop
@@ -159,7 +195,7 @@ class RolesService {
       suffix += 1;
     }
 
-    return this.create(clubId, { name: newName, description: original.description, color: original.color, functionCodes }, actorId);
+    return this.create(clubId, { name: newName, description: original.description, color: original.color, functionCodes, memberScope }, actorId);
   }
 
   /**

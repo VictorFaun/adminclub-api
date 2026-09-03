@@ -11,6 +11,8 @@ router.use('/settings', require('./settings.routes'));
 router.use('/notifications', require('./notifications.routes'));
 router.use('/dashboard', require('./dashboard.routes'));
 router.use('/platform-settings', require('./platformSettings.routes'));
+router.use('/members', require('./members.routes'));
+router.use('/member-groups', require('./memberGroups.routes'));
 
 router.get('/health', (req, res) => {
   res.json({ success: true, message: 'API operativa.', data: { uptime: process.uptime() } });

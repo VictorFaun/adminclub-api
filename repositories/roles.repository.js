@@ -54,6 +54,28 @@ class RolesRepository extends BaseRepository {
     await conn.query('INSERT INTO role_functions (role_id, function_id) VALUES ?', [values]);
   }
 
+  /** Scope de miembros/grupos de un rol con VIEW_MEMBERS_SCOPED (ver members.service.js). */
+  async getMemberScope(roleId, conn = pool) {
+    const [memberRows] = await conn.query('SELECT member_id FROM role_member_scope WHERE role_id = ?', [roleId]);
+    const [groupRows] = await conn.query('SELECT group_id FROM role_member_group_scope WHERE role_id = ?', [roleId]);
+    return { memberIds: memberRows.map((r) => r.member_id), groupIds: groupRows.map((r) => r.group_id) };
+  }
+
+  async setMemberScope(roleId, memberIds, groupIds, conn = pool) {
+    await conn.query('DELETE FROM role_member_scope WHERE role_id = ?', [roleId]);
+    await conn.query('DELETE FROM role_member_group_scope WHERE role_id = ?', [roleId]);
+    if (memberIds.length) {
+      await conn.query('INSERT INTO role_member_scope (role_id, member_id) VALUES ?', [
+        memberIds.map((memberId) => [roleId, memberId]),
+      ]);
+    }
+    if (groupIds.length) {
+      await conn.query('INSERT INTO role_member_group_scope (role_id, group_id) VALUES ?', [
+        groupIds.map((groupId) => [roleId, groupId]),
+      ]);
+    }
+  }
+
   async countUsersWithRole(roleId, conn = pool) {
     const [rows] = await conn.query('SELECT COUNT(DISTINCT user_id) AS total FROM user_roles WHERE role_id = ?', [
       roleId,

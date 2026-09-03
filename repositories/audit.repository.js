@@ -66,6 +66,22 @@ class AuditRepository {
       r.forEach((x) => names.set(`join_request:${x.id}`, x.username));
     }
 
+    const memberIds = [...(idsByType.member ?? [])];
+    if (memberIds.length) {
+      const [r] = await pool.query(
+        `SELECT id, CONCAT_WS(' ', first_name, middle_name, last_name, second_last_name) AS full_name
+         FROM members WHERE id IN (?)`,
+        [memberIds]
+      );
+      r.forEach((x) => names.set(`member:${x.id}`, x.full_name));
+    }
+
+    const memberGroupIds = [...(idsByType.member_group ?? [])];
+    if (memberGroupIds.length) {
+      const [r] = await pool.query('SELECT id, name FROM member_groups WHERE id IN (?)', [memberGroupIds]);
+      r.forEach((x) => names.set(`member_group:${x.id}`, x.name));
+    }
+
     return rows.map((row) => {
       const key = row.entity_type && row.entity_id ? `${row.entity_type}:${row.entity_id}` : null;
       const entityName = (key && names.get(key)) ?? this._fallbackNameFromChanges(row);
@@ -119,6 +135,19 @@ class AuditRepository {
       [clubId, limit]
     );
     return rows;
+  }
+
+  /** Igual que `recentActivity`, pero de `audit_logs` (acciones administrativas estructuradas)
+   * acotado a ciertos `entity_type` — lo usa el dashboard de un módulo puntual (p.ej. "miembros")
+   * para no mezclar actividad de todo el club. */
+  async recentActivityByEntityTypes(clubId, entityTypes, limit = 10, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT a.*, u.username, u.avatar_url FROM audit_logs a
+       LEFT JOIN users u ON u.id = a.user_id
+       WHERE a.club_id = ? AND a.entity_type IN (?) ORDER BY a.created_at DESC LIMIT ?`,
+      [clubId, entityTypes, limit]
+    );
+    return this._withEntityNames(rows);
   }
 }
 

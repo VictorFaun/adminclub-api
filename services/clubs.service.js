@@ -1,5 +1,6 @@
 const clubsRepository = require('../repositories/clubs.repository');
 const usersRepository = require('../repositories/users.repository');
+const membersRepository = require('../repositories/members.repository');
 const rolesRepository = require('../repositories/roles.repository');
 const settingsRepository = require('../repositories/settings.repository');
 const joinRequestsRepository = require('../repositories/joinRequests.repository');
@@ -191,15 +192,15 @@ class ClubsService {
   }
 
   async getStats(clubId) {
-    const [usersCount, rolesCount, invitationsCount, recentActivity] = await Promise.all([
+    const [usersCount, activeMembersCount, invitationsCount, recentActivity] = await Promise.all([
       clubsRepository.countUsers(clubId),
-      clubsRepository.countRoles(clubId),
+      membersRepository.countByClubAndStatus(clubId, 'active'),
       clubsRepository.countActiveInvitations(clubId),
       auditRepository.recentActivity(clubId, 10),
     ]);
     return {
       usersCount,
-      rolesCount,
+      activeMembersCount,
       invitationsCount,
       recentActivity: recentActivity.map((entry) => ({ ...entry, avatar_url: toAbsoluteMediaUrl(entry.avatar_url) })),
     };

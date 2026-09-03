@@ -97,11 +97,6 @@ class ClubsRepository extends BaseRepository {
     return rows[0].total;
   }
 
-  async countRoles(clubId, conn = pool) {
-    const [rows] = await conn.query('SELECT COUNT(*) AS total FROM roles WHERE club_id = ?', [clubId]);
-    return rows[0].total;
-  }
-
   async countActiveInvitations(clubId, conn = pool) {
     const [rows] = await conn.query(
       "SELECT COUNT(*) AS total FROM invitations WHERE club_id = ? AND status = 'active'",

@@ -62,8 +62,25 @@ CREATE TABLE IF NOT EXISTS `clubs` (
   CONSTRAINT `fk_clubs_created_by` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-ALTER TABLE `users`
-  ADD CONSTRAINT `fk_users_default_club` FOREIGN KEY (`default_club_id`) REFERENCES `clubs` (`id`) ON DELETE SET NULL;
+-- `users` y `clubs` se referencian mutuamente (clubs.created_by -> users.id,
+-- users.default_club_id -> clubs.id), así que esta FK no puede ir inline en el
+-- CREATE TABLE de `users` (clubs todavía no existe en ese punto). Al no ser un
+-- CREATE TABLE IF NOT EXISTS, correr migrate.js de nuevo (p. ej. tras arreglar
+-- un archivo posterior que falló) duplicaba esta constraint; se guarda con el
+-- mismo chequeo manual contra INFORMATION_SCHEMA usado en 003.
+SET @fk_exists = (
+  SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS
+  WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND CONSTRAINT_NAME = 'fk_users_default_club'
+);
+
+SET @ddl = IF(@fk_exists = 0,
+  'ALTER TABLE `users` ADD CONSTRAINT `fk_users_default_club` FOREIGN KEY (`default_club_id`) REFERENCES `clubs` (`id`) ON DELETE SET NULL',
+  'SELECT 1'
+);
+
+PREPARE stmt FROM @ddl;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 
 -- ----------------------------------------------------------------------------
 -- club_settings (clave/valor extensible por club)

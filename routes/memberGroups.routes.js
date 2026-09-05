@@ -9,9 +9,12 @@ const { FUNCTIONS } = require('../config/constants');
 
 router.use(authMiddleware, clubContextMiddleware);
 
+// Además de EDIT_ROLE (scope picker de roles) y VIEW_MEMBER_GROUPS, lo usa charge-form
+// (CREATE/EDIT_CHARGES) para poblar el picker de grupos sin exigirle el permiso completo del
+// módulo Grupos — mismo criterio que memberTags.routes.js.
 router.get(
   '/options',
-  requireFunction(FUNCTIONS.EDIT_ROLE, FUNCTIONS.VIEW_MEMBER_GROUPS),
+  requireFunction(FUNCTIONS.EDIT_ROLE, FUNCTIONS.VIEW_MEMBER_GROUPS, FUNCTIONS.CREATE_CHARGES, FUNCTIONS.EDIT_CHARGES),
   controller.options
 );
 

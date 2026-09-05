@@ -4,6 +4,8 @@ const tokensRepository = require('../repositories/tokens.repository');
 const rolesRepository = require('../repositories/roles.repository');
 const auditRepository = require('../repositories/audit.repository');
 const clubsRepository = require('../repositories/clubs.repository');
+const membersRepository = require('../repositories/members.repository');
+const chargesRepository = require('../repositories/charges.repository');
 const platformSettingsRepository = require('../repositories/platformSettings.repository');
 const { withTransaction } = require('../config/database');
 const AppError = require('../helpers/AppError');
@@ -153,7 +155,9 @@ class AuthService {
       selectedClubRow = activeClubs.find((c) => c.is_default) || activeClubs[0];
     }
 
-    const authorization = await permissionService.buildAuthorizationContext(userId, selectedClubRow ? selectedClubRow.id : null);
+    const clubId = selectedClubRow ? selectedClubRow.id : null;
+    const authorization = await permissionService.buildAuthorizationContext(userId, clubId);
+    authorization.hasResponsibleCharges = await this._hasResponsibleCharges(userId, clubId);
 
     return {
       clubs: activeClubs.map(toClubContextDto),
@@ -161,6 +165,21 @@ class AuthService {
       authorization,
       platformTimezone: await this.getPlatformTimezone(),
     };
+  }
+
+  /** `true` si el usuario está vinculado a un miembro (`members.user_id`, ver
+   * members.service.js#linkUser) que es responsable de al menos un cobro en este club — solo
+   * importa para armar el frontend (mostrar el ítem "Pagos" del menú y dejar pasar el guard de
+   * ruta aunque falte VIEW_CHARGES/VIEW_PAYMENTS(_SCOPED), ver treasury-payments-access.guard.ts
+   * y permission.middleware.js#requireFunctionOrResponsibleCharge, que hace el chequeo real en
+   * cada request — esto es solo para la UI). No se calcula dentro de
+   * `permissionService.buildAuthorizationContext` a propósito: ese método corre en CADA request
+   * autenticada (vía `requireFunction`), y esto solo hace falta en el bootstrap de sesión. */
+  async _hasResponsibleCharges(userId, clubId) {
+    if (!clubId) return false;
+    const member = await membersRepository.findByUserId(userId, clubId);
+    if (!member) return false;
+    return chargesRepository.existsResponsibleMember(clubId, member.id);
   }
 
   /**
@@ -279,6 +298,7 @@ class AuthService {
     const user = await usersRepository.findById(userId);
     const clubs = await usersRepository.findClubsForUser(userId);
     const authorization = await permissionService.buildAuthorizationContext(userId, clubId || null);
+    authorization.hasResponsibleCharges = await this._hasResponsibleCharges(userId, clubId || null);
 
     let selectedClubRow = clubId ? clubs.find((c) => c.id === Number(clubId)) : null;
     if (clubId && !selectedClubRow && permissionService.hasFunction(authorization, 'VIEW_CLUB')) {

@@ -57,6 +57,33 @@ module.exports = {
     RESET_PASSWORD: 'reset_password',
   },
 
+  CHARGE_RECURRENCE: {
+    ONCE: 'once',
+    MONTHLY: 'monthly',
+    YEARLY: 'yearly',
+  },
+
+  CHARGE_STATUS: {
+    ACTIVE: 'active',
+    INACTIVE: 'inactive',
+  },
+
+  CHARGE_INSTANCE_STATUS: {
+    PENDING: 'pending',
+    PARTIAL: 'partial',
+    PAID: 'paid',
+    EXEMPT: 'exempt',
+  },
+
+  /** Dos "sabores" de `charge_instances.status = 'exempt'` — ambos bloquean el registro de un
+   * pago igual, solo cambian la etiqueta/color mostrados: FROZEN ("congelado", ej. un jugador de
+   * licencia) vs NOT_APPLICABLE ("no aplica", ej. el entrenador un mes puntual). Guardado aparte
+   * en `exempt_type` en vez de inferirlo del texto libre de `exempt_reason`. */
+  CHARGE_EXEMPT_TYPE: {
+    FROZEN: 'frozen',
+    NOT_APPLICABLE: 'not_applicable',
+  },
+
   FUNCTIONS: {
     // Plataforma / global
     MANAGE_PLATFORM: 'MANAGE_PLATFORM',
@@ -113,10 +140,31 @@ module.exports = {
     LINK_MEMBER_USER: 'LINK_MEMBER_USER',
     VIEW_MEMBER_GROUPS: 'VIEW_MEMBER_GROUPS',
     MANAGE_MEMBER_GROUPS: 'MANAGE_MEMBER_GROUPS',
+    VIEW_MEMBER_TAGS: 'VIEW_MEMBER_TAGS',
+    MANAGE_MEMBER_TAGS: 'MANAGE_MEMBER_TAGS',
     VIEW_MEMBER_FIELDS: 'VIEW_MEMBER_FIELDS',
     CREATE_MEMBER_FIELDS: 'CREATE_MEMBER_FIELDS',
     EDIT_MEMBER_FIELDS: 'EDIT_MEMBER_FIELDS',
     DELETE_MEMBER_FIELDS: 'DELETE_MEMBER_FIELDS',
+
+    // Tesorería
+    VIEW_TREASURY_DASHBOARD: 'VIEW_TREASURY_DASHBOARD',
+    VIEW_CHARGES: 'VIEW_CHARGES',
+    CREATE_CHARGES: 'CREATE_CHARGES',
+    EDIT_CHARGES: 'EDIT_CHARGES',
+    DELETE_CHARGES: 'DELETE_CHARGES',
+    VIEW_PAYMENTS: 'VIEW_PAYMENTS',
+    VIEW_PAYMENTS_SCOPED: 'VIEW_PAYMENTS_SCOPED',
+    CREATE_PAYMENTS: 'CREATE_PAYMENTS',
+    EDIT_PAYMENTS: 'EDIT_PAYMENTS',
+    DELETE_PAYMENTS: 'DELETE_PAYMENTS',
+    EXEMPT_PAYMENTS: 'EXEMPT_PAYMENTS',
+    VIEW_TREASURY_SETTINGS: 'VIEW_TREASURY_SETTINGS',
+    EDIT_TREASURY_SETTINGS: 'EDIT_TREASURY_SETTINGS',
+    VIEW_EXPENSES: 'VIEW_EXPENSES',
+    CREATE_EXPENSES: 'CREATE_EXPENSES',
+    EDIT_EXPENSES: 'EDIT_EXPENSES',
+    DELETE_EXPENSES: 'DELETE_EXPENSES',
   },
 
   PAGINATION: {

@@ -12,6 +12,14 @@ const memberScopeRules = [
   body('memberScope.groupIds.*').optional().isInt({ min: 1 }),
 ];
 
+const paymentScopeRules = [
+  body('paymentScope').optional().isObject().withMessage('paymentScope debe ser un objeto.'),
+  body('paymentScope.memberIds').optional().isArray(),
+  body('paymentScope.memberIds.*').optional().isInt({ min: 1 }),
+  body('paymentScope.groupIds').optional().isArray(),
+  body('paymentScope.groupIds.*').optional().isInt({ min: 1 }),
+];
+
 const createRole = [
   body('name').trim().notEmpty().withMessage('El nombre del rol es obligatorio.').isLength({ max: 80 }),
   body('description').optional({ nullable: true }).trim().isLength({ max: 255 }),
@@ -19,6 +27,7 @@ const createRole = [
   body('functionCodes').isArray().withMessage('functionCodes debe ser un arreglo.'),
   body('functionCodes.*').isString(),
   ...memberScopeRules,
+  ...paymentScopeRules,
 ];
 
 const updateRole = [
@@ -29,6 +38,7 @@ const updateRole = [
   body('functionCodes').optional().isArray(),
   body('functionCodes.*').optional().isString(),
   ...memberScopeRules,
+  ...paymentScopeRules,
 ];
 
 module.exports = { roleId, createRole, updateRole };

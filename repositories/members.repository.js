@@ -88,11 +88,22 @@ class MembersRepository extends BaseRepository {
     return { rows, total: countRows[0].total };
   }
 
-  /** Lista liviana `{id, ...}` para pickers (scope de rol, selector de grupo) — sin paginar. */
+  /** Lista liviana `{id, ...}` para pickers (scope de rol, selector de grupo/etiqueta, miembros
+   * específicos de un cobro) — sin paginar. Incluye `group_ids`/`tag_ids` (CSV, se parsean en
+   * el service) para que los pickers de charge-form muestren de una a quién ya pertenece cada
+   * miembro sin una consulta aparte por cada uno — `DISTINCT` porque el doble LEFT JOIN arma un
+   * producto cruzado grupo×etiqueta por miembro, que repetiría ids sin él. */
   async findOptions(clubId, conn = pool) {
     const [rows] = await conn.query(
-      `SELECT id, first_name, middle_name, last_name, second_last_name FROM members
-       WHERE club_id = ? AND deleted_at IS NULL ORDER BY first_name ASC, last_name ASC`,
+      `SELECT m.id, m.first_name, m.middle_name, m.last_name, m.second_last_name,
+              GROUP_CONCAT(DISTINCT mgm.group_id) AS group_ids,
+              GROUP_CONCAT(DISTINCT mtm.tag_id) AS tag_ids
+       FROM members m
+       LEFT JOIN member_group_members mgm ON mgm.member_id = m.id
+       LEFT JOIN member_tag_members mtm ON mtm.member_id = m.id
+       WHERE m.club_id = ? AND m.deleted_at IS NULL
+       GROUP BY m.id
+       ORDER BY m.first_name ASC, m.last_name ASC`,
       [clubId]
     );
     return rows;
@@ -104,6 +115,19 @@ class MembersRepository extends BaseRepository {
       ids,
       clubId,
     ]);
+    return rows;
+  }
+
+  /** Igual que `findByIds` pero trayendo los campos de nombre — usado por
+   * payments.service.js#getChargeMatrix para armar las filas (una por miembro) sin tener que
+   * pedir la ficha completa de cada uno. */
+  async findNamesByIds(ids, clubId, conn = pool) {
+    if (!ids.length) return [];
+    const [rows] = await conn.query(
+      `SELECT id, first_name, middle_name, last_name, second_last_name FROM members
+       WHERE id IN (?) AND club_id = ? AND deleted_at IS NULL ORDER BY first_name ASC, last_name ASC`,
+      [ids, clubId]
+    );
     return rows;
   }
 
@@ -160,6 +184,38 @@ class MembersRepository extends BaseRepository {
     if (!groupIds.length) return;
     const values = groupIds.map((groupId) => [groupId, memberId]);
     await conn.query('INSERT INTO member_group_members (group_id, member_id) VALUES ?', [values]);
+  }
+
+  // --- Etiquetas de un miembro / de varios miembros (mismo patrón que Grupos arriba) ---
+
+  async getTagsForMember(memberId, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT t.id, t.name, t.color FROM member_tag_members mtm
+       INNER JOIN member_tags t ON t.id = mtm.tag_id WHERE mtm.member_id = ? ORDER BY t.name ASC`,
+      [memberId]
+    );
+    return rows;
+  }
+
+  async getTagsForMembers(memberIds, conn = pool) {
+    if (!memberIds.length) return {};
+    const [rows] = await conn.query(
+      `SELECT mtm.member_id, t.id, t.name, t.color FROM member_tag_members mtm
+       INNER JOIN member_tags t ON t.id = mtm.tag_id WHERE mtm.member_id IN (?)`,
+      [memberIds]
+    );
+    const byMember = {};
+    for (const row of rows) {
+      (byMember[row.member_id] ??= []).push({ id: row.id, name: row.name, color: row.color });
+    }
+    return byMember;
+  }
+
+  async setTags(memberId, tagIds, conn = pool) {
+    await conn.query('DELETE FROM member_tag_members WHERE member_id = ?', [memberId]);
+    if (!tagIds.length) return;
+    const values = tagIds.map((tagId) => [tagId, memberId]);
+    await conn.query('INSERT INTO member_tag_members (tag_id, member_id) VALUES ?', [values]);
   }
 
   // --- Valores de campos personalizados ---

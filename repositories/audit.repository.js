@@ -82,6 +82,32 @@ class AuditRepository {
       r.forEach((x) => names.set(`member_group:${x.id}`, x.name));
     }
 
+    const chargeIds = [...(idsByType.charge ?? [])];
+    if (chargeIds.length) {
+      const [r] = await pool.query('SELECT id, name FROM charges WHERE id IN (?)', [chargeIds]);
+      r.forEach((x) => names.set(`charge:${x.id}`, x.name));
+    }
+
+    const paymentIds = [...(idsByType.payment ?? [])];
+    if (paymentIds.length) {
+      const [r] = await pool.query(
+        `SELECT p.id, CONCAT_WS(' ', m.first_name, m.last_name) AS member_name FROM payments p
+         INNER JOIN members m ON m.id = p.member_id WHERE p.id IN (?)`,
+        [paymentIds]
+      );
+      r.forEach((x) => names.set(`payment:${x.id}`, x.member_name));
+    }
+
+    const chargeInstanceIds = [...(idsByType.charge_instance ?? [])];
+    if (chargeInstanceIds.length) {
+      const [r] = await pool.query(
+        `SELECT ci.id, CONCAT_WS(' ', c.name, ci.period_label) AS label FROM charge_instances ci
+         INNER JOIN charges c ON c.id = ci.charge_id WHERE ci.id IN (?)`,
+        [chargeInstanceIds]
+      );
+      r.forEach((x) => names.set(`charge_instance:${x.id}`, x.label));
+    }
+
     return rows.map((row) => {
       const key = row.entity_type && row.entity_id ? `${row.entity_type}:${row.entity_id}` : null;
       const entityName = (key && names.get(key)) ?? this._fallbackNameFromChanges(row);

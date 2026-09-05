@@ -13,6 +13,12 @@ router.use('/dashboard', require('./dashboard.routes'));
 router.use('/platform-settings', require('./platformSettings.routes'));
 router.use('/members', require('./members.routes'));
 router.use('/member-groups', require('./memberGroups.routes'));
+router.use('/member-tags', require('./memberTags.routes'));
+router.use('/charges', require('./charges.routes'));
+router.use('/payments', require('./payments.routes'));
+router.use('/treasury-settings', require('./treasurySettings.routes'));
+router.use('/expense-categories', require('./expenseCategories.routes'));
+router.use('/expenses', require('./expenses.routes'));
 
 router.get('/health', (req, res) => {
   res.json({ success: true, message: 'API operativa.', data: { uptime: process.uptime() } });

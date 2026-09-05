@@ -76,6 +76,29 @@ class RolesRepository extends BaseRepository {
     }
   }
 
+  /** Scope de miembros/grupos de un rol con VIEW_PAYMENTS_SCOPED (ver payments.service.js) —
+   * tablas paralelas a las de arriba, concepto distinto ("de quién puedo ver la plata"). */
+  async getPaymentScope(roleId, conn = pool) {
+    const [memberRows] = await conn.query('SELECT member_id FROM role_payment_scope WHERE role_id = ?', [roleId]);
+    const [groupRows] = await conn.query('SELECT group_id FROM role_payment_group_scope WHERE role_id = ?', [roleId]);
+    return { memberIds: memberRows.map((r) => r.member_id), groupIds: groupRows.map((r) => r.group_id) };
+  }
+
+  async setPaymentScope(roleId, memberIds, groupIds, conn = pool) {
+    await conn.query('DELETE FROM role_payment_scope WHERE role_id = ?', [roleId]);
+    await conn.query('DELETE FROM role_payment_group_scope WHERE role_id = ?', [roleId]);
+    if (memberIds.length) {
+      await conn.query('INSERT INTO role_payment_scope (role_id, member_id) VALUES ?', [
+        memberIds.map((memberId) => [roleId, memberId]),
+      ]);
+    }
+    if (groupIds.length) {
+      await conn.query('INSERT INTO role_payment_group_scope (role_id, group_id) VALUES ?', [
+        groupIds.map((groupId) => [roleId, groupId]),
+      ]);
+    }
+  }
+
   async countUsersWithRole(roleId, conn = pool) {
     const [rows] = await conn.query('SELECT COUNT(DISTINCT user_id) AS total FROM user_roles WHERE role_id = ?', [
       roleId,

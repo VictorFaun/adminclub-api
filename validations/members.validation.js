@@ -13,6 +13,8 @@ const commonFields = [
   body('userId').optional({ nullable: true }).isInt({ min: 1 }),
   body('groupIds').optional().isArray(),
   body('groupIds.*').optional().isInt({ min: 1 }),
+  body('tagIds').optional().isArray(),
+  body('tagIds.*').optional().isInt({ min: 1 }),
   body('customFields').optional().isObject().withMessage('customFields debe ser un objeto.'),
 ];
 

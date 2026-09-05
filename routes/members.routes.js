@@ -11,9 +11,12 @@ router.use(authMiddleware, clubContextMiddleware);
 
 // Rutas fijas ANTES de "/:id" — de lo contrario "options"/"dashboard"/"fields" caerían en el
 // parámetro :id (y fallarían la validación de que sea numérico).
+// Además de EDIT_ROLE (scope picker de roles) y VIEW_MEMBERS/_SCOPED, lo usa charge-form
+// (CREATE/EDIT_CHARGES) para poblar el picker de miembros específicos sin exigirle el permiso
+// completo del módulo Miembros — mismo criterio que memberGroups.routes.js/memberTags.routes.js.
 router.get(
   '/options',
-  requireFunction(FUNCTIONS.EDIT_ROLE, FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED),
+  requireFunction(FUNCTIONS.EDIT_ROLE, FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED, FUNCTIONS.CREATE_CHARGES, FUNCTIONS.EDIT_CHARGES),
   controller.options
 );
 router.get('/dashboard', requireFunction(FUNCTIONS.VIEW_MEMBERS_DASHBOARD), controller.dashboard);

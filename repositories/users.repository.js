@@ -65,8 +65,17 @@ class UsersRepository extends BaseRepository {
       params.push(status);
     }
     if (search) {
-      where.push('(u.username LIKE ? OR u.email LIKE ?)');
-      params.push(`%${search}%`, `%${search}%`);
+      // El EXISTS matchea por nombre de CUALQUIER club al que pertenezca el usuario, sin
+      // pisar el JOIN de arriba (que filtra por un club puntual cuando clubId viene con
+      // valor) — necesario en el listado de plataforma (clubId null) para poder buscar
+      // "Trawen" y encontrar a sus miembros sin tener que abrir el club primero.
+      where.push(
+        `(u.username LIKE ? OR u.email LIKE ? OR EXISTS (
+          SELECT 1 FROM user_clubs suc INNER JOIN clubs sc ON sc.id = suc.club_id
+          WHERE suc.user_id = u.id AND sc.name LIKE ?
+        ))`
+      );
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
     }
 
     const whereSql = where.join(' AND ');
@@ -93,6 +102,24 @@ class UsersRepository extends BaseRepository {
       [userId]
     );
     return rows;
+  }
+
+  /** Versión batch de findClubsForUser, para listados (evita N+1) — mismo patrón que roles.repository.js#findRolesForUsers. */
+  async findClubsForUsers(userIds, conn = pool) {
+    if (!userIds.length) return {};
+    const [rows] = await conn.query(
+      `SELECT uc.user_id AS user_id, c.id, c.name, uc.status AS membership_status, uc.is_default
+       FROM user_clubs uc INNER JOIN clubs c ON c.id = uc.club_id
+       WHERE uc.user_id IN (?) AND c.deleted_at IS NULL
+       ORDER BY uc.is_default DESC, c.name ASC`,
+      [userIds]
+    );
+    const byUser = {};
+    for (const row of rows) {
+      if (!byUser[row.user_id]) byUser[row.user_id] = [];
+      byUser[row.user_id].push({ id: row.id, name: row.name, status: row.membership_status, isDefault: !!row.is_default });
+    }
+    return byUser;
   }
 
   async findMembership(userId, clubId, conn = pool) {

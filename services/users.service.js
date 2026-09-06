@@ -303,6 +303,89 @@ class UsersService {
     return this.getDetail(userId, clubId);
   }
 
+  /** Listado de TODOS los usuarios de la plataforma, sin importar club (VIEW_ALL_USERS). */
+  async listAllPlatform(query) {
+    const { limit, offset, sortBy, sortOrder, page } = parsePagination(query, SORTABLE);
+    const { rows, total } = await usersRepository.paginate({
+      limit,
+      offset,
+      sortBy,
+      sortOrder,
+      search: query.search,
+      status: query.status,
+      clubId: null,
+    });
+    // A diferencia de listForClub, acá no hay un club activo del que listar roles, pero sí
+    // tiene sentido mostrar a qué clubes pertenece cada cuenta (vista de plataforma).
+    const clubsByUser = await usersRepository.findClubsForUsers(rows.map((r) => r.id));
+    return {
+      items: rows.map((r) => ({ ...this.sanitize(r), clubs: clubsByUser[r.id] || [] })),
+      meta: buildMeta({ page, limit, total }),
+    };
+  }
+
+  /** Edita datos básicos de cualquier usuario de la plataforma (EDIT_ALL_USERS), sin depender de membresía a un club. */
+  async updateGlobal(userId, data, actorId) {
+    const user = await usersRepository.findById(userId);
+    if (!user) throw AppError.notFound('Usuario no encontrado.');
+
+    if (data.email !== undefined && data.email !== user.email) {
+      const exists = await usersRepository.emailExists(data.email, userId);
+      if (exists) throw AppError.conflict('Ya existe una cuenta registrada con este correo electrónico.');
+    }
+
+    const updates = {};
+    if (data.username !== undefined) updates.username = data.username;
+    if (data.phone !== undefined) updates.phone = data.phone;
+    if (data.email !== undefined) updates.email = data.email;
+
+    if (Object.keys(updates).length) {
+      await usersRepository.updateById(userId, updates);
+    }
+
+    const changes = buildDiff({
+      username: diffValue(user.username, data.username !== undefined ? data.username : user.username),
+      phone: diffValue(user.phone, data.phone !== undefined ? data.phone : user.phone),
+      email: diffValue(user.email, data.email !== undefined ? data.email : user.email),
+    });
+    if (changes) {
+      await auditRepository.logAction({
+        userId: actorId,
+        clubId: null,
+        action: 'PLATFORM_USER_UPDATED',
+        entityType: 'user',
+        entityId: userId,
+        changes,
+      });
+    }
+
+    const updated = await usersRepository.findById(userId);
+    return this.sanitize(updated);
+  }
+
+  /** Suspende/reactiva la CUENTA global de un usuario (SUSPEND_ALL_USERS), a diferencia de updateStatusInClub que solo toca la membresía a un club puntual. */
+  async updateStatusGlobal(userId, status, actorId) {
+    if (userId === actorId) throw AppError.badRequest('No puedes cambiar tu propio estado.');
+    const user = await usersRepository.findById(userId);
+    if (!user) throw AppError.notFound('Usuario no encontrado.');
+
+    await usersRepository.updateById(userId, { status });
+    const changes = buildDiff({ status: diffValue(user.status, status) });
+    if (changes) {
+      await auditRepository.logAction({
+        userId: actorId,
+        clubId: null,
+        action: status === 'suspended' ? 'PLATFORM_USER_SUSPENDED' : 'PLATFORM_USER_REACTIVATED',
+        entityType: 'user',
+        entityId: userId,
+        changes,
+      });
+    }
+
+    const updated = await usersRepository.findById(userId);
+    return this.sanitize(updated);
+  }
+
   async getActivity(userId, clubId, limit = 20) {
     const membership = await usersRepository.findMembership(userId, clubId);
     if (!membership) throw AppError.notFound('El usuario no pertenece a este club.');

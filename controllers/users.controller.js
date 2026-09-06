@@ -54,6 +54,21 @@ const activity = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, rows, 'Actividad del usuario obtenida correctamente.');
 });
 
+const listAllPlatform = asyncHandler(async (req, res) => {
+  const { items, meta } = await usersService.listAllPlatform(req.query);
+  return ApiResponse.paginated(res, items, meta, 'Usuarios obtenidos correctamente.');
+});
+
+const updateGlobal = asyncHandler(async (req, res) => {
+  const user = await usersService.updateGlobal(Number(req.params.id), req.body, req.user.id);
+  return ApiResponse.ok(res, user, 'Usuario actualizado correctamente.');
+});
+
+const updateStatusGlobal = asyncHandler(async (req, res) => {
+  const user = await usersService.updateStatusGlobal(Number(req.params.id), req.body.status, req.user.id);
+  return ApiResponse.ok(res, user, 'Estado del usuario actualizado correctamente.');
+});
+
 const me = asyncHandler(async (req, res) => {
   const clubId = Number(req.headers['x-club-id']) || null;
   const user = await usersService.getDetail(req.user.id, clubId);
@@ -93,4 +108,7 @@ module.exports = {
   me,
   updateMe,
   updateMyAvatar,
+  listAllPlatform,
+  updateGlobal,
+  updateStatusGlobal,
 };

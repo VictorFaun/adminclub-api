@@ -56,6 +56,33 @@ const lookupByEmail = [
   query('email').trim().notEmpty().withMessage('El correo es obligatorio.').isEmail().withMessage('Correo electrónico inválido.').normalizeEmail(NORMALIZE_EMAIL_OPTIONS),
 ];
 
+const listAllUsers = [
+  query('page').optional().isInt({ min: 1 }),
+  query('limit').optional().isInt({ min: 1, max: 100 }),
+  query('search').optional().isString().trim().isLength({ max: 100 }),
+  // A diferencia de listUsers (club-scoped, filtra por user_clubs.status), acá se filtra
+  // por users.status directo, cuyo ENUM sí incluye 'blocked' (sql/001_schema.sql).
+  query('status').optional().isIn(['active', 'suspended', 'pending', 'blocked']),
+];
+
+const updateGlobalUser = [
+  ...userId,
+  body('username').optional().trim().isLength({ min: 1, max: 160 }),
+  body('phone').optional({ nullable: true }).trim().isLength({ max: 30 }),
+  body('email')
+    .optional()
+    .trim()
+    .isEmail()
+    .withMessage('Correo electrónico inválido.')
+    .normalizeEmail(NORMALIZE_EMAIL_OPTIONS)
+    .isLength({ max: 160 }),
+];
+
+const updateGlobalStatus = [
+  ...userId,
+  body('status').isIn(['active', 'suspended']).withMessage('Estado inválido.'),
+];
+
 const addExisting = [
   ...userId,
   body('roleIds').optional().isArray().withMessage('roleIds debe ser un arreglo.'),
@@ -72,4 +99,7 @@ module.exports = {
   createUser,
   lookupByEmail,
   addExisting,
+  listAllUsers,
+  updateGlobalUser,
+  updateGlobalStatus,
 };

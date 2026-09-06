@@ -16,6 +16,34 @@ router.get('/me', controller.me);
 router.put('/me', sanitizeBody, validation.updateMe, handleValidation, controller.updateMe);
 router.post('/me/avatar', uploadFor('avatars').single('avatar'), controller.updateMyAvatar);
 
+// --- administración de plataforma (todos los usuarios, sin club activo) ---
+// Prefijo literal '/platform' registrado ANTES de clubContextMiddleware y de las rutas
+// '/:id' de más abajo, mismo truco que '/lookup': si no, Express tomaría "platform"
+// como el parámetro :id de la ruta club-scoped.
+router.get(
+  '/platform',
+  requireFunction(FUNCTIONS.VIEW_ALL_USERS),
+  validation.listAllUsers,
+  handleValidation,
+  controller.listAllPlatform
+);
+router.put(
+  '/platform/:id',
+  requireFunction(FUNCTIONS.EDIT_ALL_USERS),
+  sanitizeBody,
+  validation.updateGlobalUser,
+  handleValidation,
+  controller.updateGlobal
+);
+router.put(
+  '/platform/:id/status',
+  requireFunction(FUNCTIONS.SUSPEND_ALL_USERS),
+  sanitizeBody,
+  validation.updateGlobalStatus,
+  handleValidation,
+  controller.updateStatusGlobal
+);
+
 // --- gestión de miembros del club activo ---
 router.use(clubContextMiddleware);
 

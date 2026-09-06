@@ -102,6 +102,9 @@ Prefijo base: `/api/v1`. Salvo que se indique "público", todos los endpoints re
 | `PUT /users/:id/status` | Suspende o reactiva a un usuario en el club | `SUSPEND_USERS` |
 | `PUT /users/:id/roles` | Reemplaza los roles asignados a un usuario en el club | `ASSIGN_USER_ROLES` |
 | `DELETE /users/:id` | Elimina (remueve) a un usuario del club activo | `DELETE_USERS` |
+| `GET /users/platform` | Lista TODOS los usuarios de la plataforma, sin importar club (búsqueda, filtros, paginación) | `VIEW_ALL_USERS` |
+| `PUT /users/platform/:id` | Edita los datos básicos de cualquier usuario de la plataforma | `EDIT_ALL_USERS` |
+| `PUT /users/platform/:id/status` | Suspende o reactiva la cuenta global de cualquier usuario de la plataforma | `SUSPEND_ALL_USERS` |
 
 ### Clubes (`/clubs`)
 

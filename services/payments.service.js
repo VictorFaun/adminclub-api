@@ -42,8 +42,9 @@ class PaymentsService {
       uuid: payment.uuid,
       clubId: payment.club_id,
       memberId: payment.member_id,
-      // `null` = pago directo a Tesorería (sin intermediario) — el único otro valor válido es
-      // el `responsible_member_id` del cobro al que pertenece este pago (ver create()/update()).
+      // `null` = pago directo a Tesorería (sin intermediario) — cualquier otro valor debe ser
+      // uno de los responsables configurados en el cobro al que pertenece este pago (ver
+      // _validatePaidToMemberId en create()/update()).
       paidToMemberId: payment.paid_to_member_id,
       paidToMemberName: payment.paid_to_member_name ?? null,
       amount: Number(payment.amount),
@@ -77,7 +78,15 @@ class PaymentsService {
     return row.status;
   }
 
-  _instanceToDto(row) {
+  /** `responsibleInfo`: `{resolved: {memberId,memberName}|null, all: {memberId,memberName}[]}` —
+   * `resolved` es el responsable RESUELTO (con prioridad de grupo) para el miembro dueño de esta
+   * instancia puntual (ya no "el" responsable del cobro, ver
+   * charges.repository.js#resolveResponsibles), usado para PRE-seleccionar "pagado a"; `all` son
+   * TODOS los responsables configurados en el cobro, para las demás opciones del selector (el
+   * usuario puede pagarle a cualquiera, no solo al sugerido — confirmado con el usuario). Lo arma
+   * `listForMember`, una sola vez por cobro distinto entre las instancias del miembro, no acá
+   * (este método no golpea la BD). */
+  _instanceToDto(row, responsibleInfo = null) {
     return {
       id: row.id,
       uuid: row.uuid,
@@ -86,8 +95,9 @@ class PaymentsService {
       chargeColor: row.charge_color,
       chargeRecurrence: row.charge_recurrence,
       chargePurpose: row.charge_purpose,
-      chargeResponsibleMemberId: row.charge_responsible_member_id,
-      chargeResponsibleMemberName: row.charge_responsible_member_name ?? null,
+      chargeResponsibleMemberId: responsibleInfo?.resolved?.memberId ?? null,
+      chargeResponsibleMemberName: responsibleInfo?.resolved?.memberName ?? null,
+      chargeResponsibles: responsibleInfo?.all ?? [],
       periodLabel: row.period_label,
       amount: Number(row.amount),
       dueDate: row.due_date,
@@ -139,8 +149,11 @@ class PaymentsService {
     return memberAccess.memberIds.filter((id) => paymentSet.has(id));
   }
 
-  _fullName(m) {
-    return [m.first_name, m.middle_name, m.last_name, m.second_last_name].filter(Boolean).join(' ');
+  /** "Primer nombre + primer apellido" — usado SOLO en la matriz de pagos (columna de miembro,
+   * espacio angosto) — mismo criterio que ya existe en audit.repository.js para su propia
+   * variante corta. */
+  _shortName(m) {
+    return [m.first_name, m.last_name].filter(Boolean).join(' ');
   }
 
   /** El primer período en que el cobro REALMENTE corresponde, comparando fechas completas (no
@@ -313,8 +326,8 @@ class PaymentsService {
 
   /** Misma idea que `_virtualCellToDto` pero con la forma de `_instanceToDto` (incluye nombre y
    * color del cobro) — usado por `listForMember`/la ficha de pagos de un miembro, no por la
-   * matriz. */
-  _virtualInstanceToDto(charge, periodKey, amount) {
+   * matriz. `responsibleInfo`: ver `_instanceToDto`. */
+  _virtualInstanceToDto(charge, periodKey, amount, responsibleInfo = null) {
     const dueDate = this._dueDateForPeriod(charge, periodKey);
     const isOverdue = dueDate < new Date();
     return {
@@ -325,8 +338,9 @@ class PaymentsService {
       chargeColor: charge.color,
       chargeRecurrence: charge.recurrence,
       chargePurpose: charge.purpose,
-      chargeResponsibleMemberId: charge.responsible_member_id,
-      chargeResponsibleMemberName: charge.responsible_member_name ?? null,
+      chargeResponsibleMemberId: responsibleInfo?.resolved?.memberId ?? null,
+      chargeResponsibleMemberName: responsibleInfo?.resolved?.memberName ?? null,
+      chargeResponsibles: responsibleInfo?.all ?? [],
       periodLabel: periodKey,
       amount: Number(amount),
       dueDate: dueDate.toISOString(),
@@ -350,8 +364,10 @@ class PaymentsService {
    * de la matriz (mismo cálculo de fecha de vencimiento) — mismo acotamiento razonable (36 meses
    * / 20 años desde el final del rango) por si un `start_date` quedó mal cargado hace mucho
    * tiempo, para no devolver cientos de filas. Un cobro `once` nunca tiene huecos (se genera
-   * completo para todos los targets al crearse). */
-  async _computeMissingPastInstances(instanceRows, memberId) {
+   * completo para todos los targets al crearse). `responsibleByCharge`: `Map<chargeId,
+   * {resolved,all}>` ya armado por `listForMember` (una vez por cobro distinto) — ver
+   * `_instanceToDto`. */
+  async _computeMissingPastInstances(instanceRows, memberId, responsibleByCharge) {
     const byCharge = new Map();
     for (const row of instanceRows) {
       if (!byCharge.has(row.charge_id)) byCharge.set(row.charge_id, []);
@@ -365,6 +381,7 @@ class PaymentsService {
       if (!charge || charge.recurrence === 'once') continue;
       // eslint-disable-next-line no-await-in-loop
       const amount = (await chargesRepository.resolveAmounts(chargeId, [memberId], charge.amount)).get(memberId);
+      const responsibleInfo = responsibleByCharge.get(chargeId) ?? null;
 
       if (charge.recurrence === 'monthly') {
         const existing = new Set(
@@ -385,7 +402,7 @@ class PaymentsService {
           if (existing.has(idx)) continue;
           const year = Math.floor((idx - 1) / 12);
           const month = idx - year * 12;
-          virtual.push(this._virtualInstanceToDto(charge, `${year}-${pad(month)}`, amount));
+          virtual.push(this._virtualInstanceToDto(charge, `${year}-${pad(month)}`, amount, responsibleInfo));
         }
       } else {
         const existing = new Set(periodLabels.map(Number));
@@ -398,57 +415,78 @@ class PaymentsService {
 
         for (let y = startYear; y <= endYear; y += 1) {
           if (existing.has(y)) continue;
-          virtual.push(this._virtualInstanceToDto(charge, String(y), amount));
+          virtual.push(this._virtualInstanceToDto(charge, String(y), amount, responsibleInfo));
         }
       }
     }
     return virtual;
   }
 
-  /** Cuánto le falta transferir el responsable del cobro a Tesorería, por período — `null` si el
-   * cobro no tiene responsable (no hay nada que "transferir": todo pago ya va directo).
-   * `owedByPeriod` es SIEMPRE sobre TODOS los miembros del cobro, no filtrado por el scope de
-   * quien consulta la matriz — es un número agregado de tesorería (cuánto tiene el responsable
-   * en la mano), no un detalle por miembro que haya que ocultar. Reusa el mismo set de 5
-   * estados/colores que ya existe para `charge_instances`
-   * (`pending`/`partial`/`paid`/`overdue`/`not_applicable`): `not_applicable` cuando no hay nada
-   * que transferir ese período (`owed<=0`, ej. todos pagaron directo a Tesorería). */
+  /** Cuánto le falta transferir a Tesorería CADA responsable del cobro, por período — `null` si
+   * el cobro no tiene ningún responsable (no hay nada que "transferir": todo pago ya va directo).
+   * Devuelve `{ [periodKey]: { [responsibleMemberId]: {memberId,memberName,owed,paid,remaining,
+   * status,dueDate} } }` — desglosado por responsable porque, con varios por cobro, cada uno
+   * junta y transfiere SU PROPIA plata de forma independiente (ver
+   * api/sql/032_charge_responsibles.sql). El desglose completo es SIEMPRE sobre TODOS los
+   * responsables del cobro, sin filtrar por el scope de quien consulta — `getChargeMatrix` recorta
+   * esto después a solo la fila del propio actor si entró como responsable sin rol real (ver
+   * `_filterSettlementsToResponsible`). Reusa el mismo set de 5 estados/colores que ya existe
+   * para `charge_instances` (`pending`/`partial`/`paid`/`overdue`/`not_applicable`):
+   * `not_applicable` cuando no hay nada que transferir ese período (`owed<=0`, ej. todos pagaron
+   * directo a Tesorería). */
   async _computeSettlements(charge, periods) {
-    if (!charge.responsible_member_id) return null;
+    const responsibles = await chargesRepository.getResponsibleMembers(charge.id);
+    if (!responsibles.length) return null;
     const periodKeys = periods.map((p) => p.key);
     const [owedByPeriod, paidByPeriod] = await Promise.all([
-      paymentsRepository.sumPaidToByChargeAndPeriods(charge.id, charge.responsible_member_id, periodKeys),
+      paymentsRepository.sumPaidToByChargeAndPeriods(charge.id, periodKeys),
       chargeSettlementsRepository.sumByChargeAndPeriods(charge.id, periodKeys),
     ]);
 
     const now = new Date();
     const result = {};
     for (const period of periods) {
-      const owed = owedByPeriod[period.key] ?? 0;
-      const paid = paidByPeriod[period.key] ?? 0;
-      const remaining = Math.max(0, owed - paid);
       const dueDate = this._dueDateForPeriod(charge, period.key);
-      let status;
-      if (owed <= 0.005) status = 'not_applicable';
-      else if (remaining <= 0.005) status = 'paid';
-      else if (paid > 0.005) status = 'partial';
-      else if (dueDate < now) status = 'overdue';
-      else status = 'pending';
-      result[period.key] = { owed, paid, remaining, status, dueDate: dueDate.toISOString() };
+      const byResponsible = {};
+      for (const r of responsibles) {
+        const owed = owedByPeriod[period.key]?.[r.memberId] ?? 0;
+        const paid = paidByPeriod[period.key]?.[r.memberId] ?? 0;
+        const remaining = Math.max(0, owed - paid);
+        let status;
+        if (owed <= 0.005) status = 'not_applicable';
+        else if (remaining <= 0.005) status = 'paid';
+        else if (paid > 0.005) status = 'partial';
+        else if (dueDate < now) status = 'overdue';
+        else status = 'pending';
+        byResponsible[r.memberId] = { memberId: r.memberId, memberName: r.memberName, owed, paid, remaining, status, dueDate: dueDate.toISOString() };
+      }
+      result[period.key] = byResponsible;
     }
     return result;
   }
 
-  /** Monto pendiente de transferir para UN período puntual — mismo cálculo que
-   * `_computeSettlements` pero para uno solo, usado al validar `createSettlement`/
-   * `updateSettlement` sin tener que armar toda la ventana de la matriz. */
-  async _remainingSettlement(charge, periodKey) {
+  /** Recorta un desglose de `_computeSettlements` a la fila de UN solo responsable — usado por
+   * `getChargeMatrix` cuando el actor entró como responsable sin rol real de Tesorería: solo debe
+   * ver SU PROPIO saldo, no el del resto de responsables del mismo cobro. */
+  _filterSettlementsToResponsible(settlements, memberId) {
+    if (!settlements) return settlements;
+    const result = {};
+    for (const [period, byResponsible] of Object.entries(settlements)) {
+      result[period] = byResponsible[memberId] ? { [memberId]: byResponsible[memberId] } : {};
+    }
+    return result;
+  }
+
+  /** Monto pendiente de transferir por UN responsable puntual en UN período — mismo cálculo que
+   * `_computeSettlements` pero acotado a uno solo, usado al validar `createSettlement`/
+   * `updateSettlement` sin tener que armar todo el desglose. */
+  async _remainingSettlement(charge, responsibleMemberId, periodKey) {
     const [owedByPeriod, paidByPeriod] = await Promise.all([
-      paymentsRepository.sumPaidToByChargeAndPeriods(charge.id, charge.responsible_member_id, [periodKey]),
+      paymentsRepository.sumPaidToByChargeAndPeriods(charge.id, [periodKey]),
       chargeSettlementsRepository.sumByChargeAndPeriods(charge.id, [periodKey]),
     ]);
-    const owed = owedByPeriod[periodKey] ?? 0;
-    const paid = paidByPeriod[periodKey] ?? 0;
+    const owed = owedByPeriod[periodKey]?.[responsibleMemberId] ?? 0;
+    const paid = paidByPeriod[periodKey]?.[responsibleMemberId] ?? 0;
     return Math.max(0, owed - paid);
   }
 
@@ -457,6 +495,7 @@ class PaymentsService {
       id: row.id,
       uuid: row.uuid,
       chargeId: row.charge_id,
+      responsibleMemberId: row.responsible_member_id,
       periodLabel: row.period_label,
       amount: Number(row.amount),
       transferredAt: row.transferred_at,
@@ -473,31 +512,35 @@ class PaymentsService {
     return charge;
   }
 
-  /** Todas las transferencias registradas para UN período de un cobro — mismo rol que
-   * `listForInstance` pero para settlements (editar/eliminar en el modal). */
-  async listSettlements(clubId, chargeId, periodKey, actorId, authContext) {
+  /** Todas las transferencias registradas para UN responsable + UN período de un cobro — mismo
+   * rol que `listForInstance` pero para settlements (editar/eliminar en el modal). */
+  async listSettlements(clubId, chargeId, periodKey, responsibleMemberId, actorId, authContext) {
     const charge = await this._findChargeInClub(clubId, chargeId);
-    if (!charge.responsible_member_id) throw AppError.badRequest('Este cobro no tiene responsable.');
-    await this.assertChargeMemberPaymentAccessible(charge, charge.responsible_member_id, actorId, authContext);
-    const rows = await chargeSettlementsRepository.findByChargeAndPeriod(chargeId, periodKey);
+    await this._assertSettlementAccessible(charge, responsibleMemberId, actorId, authContext);
+    const rows = await chargeSettlementsRepository.findByChargeResponsibleAndPeriod(chargeId, responsibleMemberId, periodKey);
     return rows.map((r) => this._settlementToDto(r));
   }
 
-  /** Una transferencia corresponde SIEMPRE a UN período de UN cobro — completa o parcial, mismo
-   * criterio que un pago de miembro (create() más arriba). */
+  /** Una transferencia corresponde SIEMPRE a UN período + UN responsable de UN cobro — completa
+   * o parcial, mismo criterio que un pago de miembro (create() más arriba). `data.responsibleMemberId`
+   * debe ser uno de los responsables YA configurados en el cobro (validado en
+   * charges.validation.js/acá solo se resuelve el acceso). */
   async createSettlement(clubId, chargeId, data, actorId, authContext) {
     const charge = await this._findChargeInClub(clubId, chargeId);
-    if (!charge.responsible_member_id) throw AppError.badRequest('Este cobro no tiene responsable.');
-    await this.assertChargeMemberPaymentAccessible(charge, charge.responsible_member_id, actorId, authContext);
+    if (!(await chargesRepository.isAnyResponsible(chargeId, data.responsibleMemberId))) {
+      throw AppError.badRequest('Ese responsable no está configurado en este cobro.');
+    }
+    await this._assertSettlementAccessible(charge, data.responsibleMemberId, actorId, authContext);
     if (data.amount <= 0) throw AppError.badRequest('El monto debe ser mayor a cero.');
 
-    const remaining = await this._remainingSettlement(charge, data.periodKey);
+    const remaining = await this._remainingSettlement(charge, data.responsibleMemberId, data.periodKey);
     if (data.amount > remaining + 0.005) {
       throw AppError.badRequest(`El monto excede lo pendiente de transferir ($${remaining.toFixed(2)}).`);
     }
 
     const id = await chargeSettlementsRepository.createSettlement({
       chargeId,
+      responsibleMemberId: data.responsibleMemberId,
       periodLabel: data.periodKey,
       amount: data.amount,
       transferredAt: data.transferredAt || new Date(),
@@ -511,7 +554,7 @@ class PaymentsService {
       action: 'CHARGE_SETTLEMENT_CREATED',
       entityType: 'charge_settlement',
       entityId: id,
-      changes: { chargeId, periodLabel: data.periodKey, amount: data.amount },
+      changes: { chargeId, responsibleMemberId: data.responsibleMemberId, periodLabel: data.periodKey, amount: data.amount },
     });
 
     const created = await chargeSettlementsRepository.findActiveById(id);
@@ -525,12 +568,12 @@ class PaymentsService {
     const settlement = await chargeSettlementsRepository.findActiveById(settlementId);
     if (!settlement) throw AppError.notFound('Transferencia no encontrada.');
     const charge = await this._findChargeInClub(clubId, settlement.charge_id);
-    await this.assertMemberPaymentsAccessible(clubId, charge.responsible_member_id, actorId, authContext);
+    await this.assertMemberPaymentsAccessible(clubId, settlement.responsible_member_id, actorId, authContext);
 
     const updates = {};
     if (data.amount !== undefined) {
       if (data.amount <= 0) throw AppError.badRequest('El monto debe ser mayor a cero.');
-      const remaining = await this._remainingSettlement(charge, settlement.period_label);
+      const remaining = await this._remainingSettlement(charge, settlement.responsible_member_id, settlement.period_label);
       const maxAllowed = remaining + Number(settlement.amount);
       if (data.amount > maxAllowed + 0.005) {
         throw AppError.badRequest(`El monto excede lo pendiente de transferir ($${maxAllowed.toFixed(2)}).`);
@@ -557,8 +600,8 @@ class PaymentsService {
   async removeSettlement(clubId, settlementId, actorId, authContext) {
     const settlement = await chargeSettlementsRepository.findActiveById(settlementId);
     if (!settlement) throw AppError.notFound('Transferencia no encontrada.');
-    const charge = await this._findChargeInClub(clubId, settlement.charge_id);
-    await this.assertMemberPaymentsAccessible(clubId, charge.responsible_member_id, actorId, authContext);
+    await this._findChargeInClub(clubId, settlement.charge_id);
+    await this.assertMemberPaymentsAccessible(clubId, settlement.responsible_member_id, actorId, authContext);
 
     await chargeSettlementsRepository.deleteById(settlementId);
     await auditRepository.logAction({
@@ -587,20 +630,26 @@ class PaymentsService {
       amount: Number(charge.amount),
       status: charge.status,
       purpose: charge.purpose,
-      responsibleMemberId: charge.responsible_member_id,
-      responsibleMemberName: charge.responsible_member_name ?? null,
+      responsibles: (await chargesRepository.getResponsibleMembers(charge.id)).map((r) => ({
+        memberId: r.memberId,
+        memberName: r.memberName,
+        groupId: r.groupId,
+        groupName: r.groupName,
+      })),
     };
     const { periods, canGoBack, canGoForward } = this._matrixPeriods(charge, anchor || null, columns || null);
-    const settlements = await this._computeSettlements(charge, periods);
+    const rawSettlements = await this._computeSettlements(charge, periods);
 
-    const memberIds = await this._resolveChargeParticipants(charge, actorId, authContext);
+    const { memberIds, scopedToMemberId } = await this._resolveChargeParticipants(charge, actorId, authContext);
+    const settlements = scopedToMemberId ? this._filterSettlementsToResponsible(rawSettlements, scopedToMemberId) : rawSettlements;
 
     if (!memberIds.length) return { charge: chargeDto, periods, canGoBack, canGoForward, rows: [], settlements };
 
-    const [members, instances, amounts] = await Promise.all([
+    const [members, instances, amounts, responsibleByMember] = await Promise.all([
       membersRepository.findNamesByIds(memberIds, clubId),
       chargeInstancesRepository.findForChargeAndMembers(chargeId, memberIds),
       chargesRepository.resolveAmounts(chargeId, memberIds, charge.amount),
+      chargesRepository.resolveResponsibles(chargeId, memberIds),
     ]);
     const paidByInstance = await chargeInstancesRepository.sumAllocationsForInstances(instances.map((i) => i.id));
 
@@ -613,7 +662,14 @@ class PaymentsService {
     const rows = members
       .map((m) => ({
         memberId: m.id,
-        memberName: this._fullName(m),
+        memberName: this._shortName(m),
+        // Responsable RESUELTO (con prioridad de grupo) para ESTE miembro puntual — ya no "el"
+        // responsable del cobro, ver charges.repository.js#resolveResponsibles.
+        responsibleMemberId: responsibleByMember.get(m.id)?.memberId ?? null,
+        responsibleMemberName: responsibleByMember.get(m.id)?.memberName ?? null,
+        // Usado por el filtro por grupo del frontend (treasury-payments.page.ts) — mismo criterio
+        // de parseo de CSV que members.service.js#findOptions.
+        groupIds: m.group_ids ? m.group_ids.split(',').map(Number) : [],
         cells: periods.reduce((acc, p) => {
           const inst = cellLookup.get(m.id)?.get(p.key);
           acc[p.key] = inst ? this._matrixCellToDto(inst, paidByInstance[inst.id] ?? 0) : this._virtualCellToDto(charge, p.key, amounts.get(m.id));
@@ -625,41 +681,67 @@ class PaymentsService {
     return { charge: chargeDto, periods, canGoBack, canGoForward, rows, settlements };
   }
 
-  /** El actor es responsable de ESTE cobro si su ficha de miembro vinculada (`members.user_id`,
-   * ver members.service.js#linkUser) es justo `charge.responsible_member_id` — el único camino
-   * de acceso a "Pagos" para alguien sin ningún rol de Tesorería asignado (ej. un entrenador que
-   * junta la plata de su categoría sin ser "admin" de nada más). Da acceso COMPLETO a este cobro
-   * puntual (todos sus participantes), sin necesitar ningún scope de Miembros/Pagos asignado —
-   * ver `_resolveChargeParticipants`/`assertChargeMemberPaymentAccessible`, que lo usan como
-   * alternativa al camino normal, nunca como reemplazo de él. */
+  /** ¿El actor es responsable de ALGO en este cobro (cualquier grupo, o "todos los grupos")? Gate
+   * grueso de autorización — distingue "no tengo nada que ver acá" (403) de "soy responsable pero
+   * hoy no me resuelve nadie" (lista vacía, ver `_resolveChargeParticipants`). La barrera FINA de
+   * qué miembros puntuales corresponden a cada responsable la hace `resolveResponsibles`. */
   async _isResponsibleForCharge(charge, actorId) {
-    if (!charge.responsible_member_id) return false;
     const member = await membersRepository.findByUserId(actorId, charge.club_id);
-    return !!member && member.id === charge.responsible_member_id;
+    if (!member) return false;
+    return chargesRepository.isAnyResponsible(charge.id, member.id);
   }
 
   /** A quién de los participantes de ESTE cobro puede ver el actor — dos caminos independientes,
    * cualquiera alcanza: (a) el camino normal (`getVisibleMemberIds`, intersección de scope de
-   * Miembros y de Pagos) o (b) ser el responsable de este cobro puntual (`_isResponsibleForCharge`),
-   * que da acceso total a TODOS sus participantes. Sin ninguno de los dos, 403 — a diferencia del
-   * resto de la matriz (que ante un scope vacío simplemente muestra 0 filas), acá si ni siquiera
-   * es responsable no debería haber llegado a este punto, así que es un error real. */
+   * Miembros y de Pagos) o (b) ser responsable de ESTE cobro, que da acceso SOLO a los miembros
+   * cuyo responsable resuelto (con prioridad de grupo) sea justo el actor — ya no acceso total a
+   * todo el cobro, cada responsable ve nada más que su propio grupo (o todos, si no tiene uno
+   * asignado). Devuelve además `scopedToMemberId` (el `member.id` del actor si entró por (b),
+   * `null` si entró por (a)) — lo usa `getChargeMatrix` para recortar el desglose de settlements
+   * a solo la fila propia del actor. Sin ninguno de los dos caminos, 403 — a diferencia del resto
+   * de la matriz (que ante un scope vacío simplemente muestra 0 filas), acá si ni siquiera es
+   * responsable no debería haber llegado a este punto, así que es un error real. Si SÍ es
+   * responsable pero hoy no resuelve para nadie (ej. su grupo quedó vacío), no es un error: se
+   * devuelve una lista vacía, igual que el camino normal ante un scope vacío. */
   async _resolveChargeParticipants(charge, actorId, authContext) {
     const participantIds = await chargesRepository.expandTargetMemberIds(charge.id);
     if (permissionService.hasAnyFunction(authContext, [FUNCTIONS.VIEW_PAYMENTS, FUNCTIONS.VIEW_PAYMENTS_SCOPED])) {
       const visibleMemberIds = await this.getVisibleMemberIds(authContext, actorId, charge.club_id);
-      return visibleMemberIds === null ? participantIds : participantIds.filter((id) => visibleMemberIds.includes(id));
+      const memberIds = visibleMemberIds === null ? participantIds : participantIds.filter((id) => visibleMemberIds.includes(id));
+      return { memberIds, scopedToMemberId: null };
     }
-    if (!(await this._isResponsibleForCharge(charge, actorId))) throw AppError.forbidden('No tienes permiso para ver este cobro.');
-    return participantIds;
+    const member = await membersRepository.findByUserId(actorId, charge.club_id);
+    if (!member || !(await chargesRepository.isAnyResponsible(charge.id, member.id))) {
+      throw AppError.forbidden('No tienes permiso para ver este cobro.');
+    }
+    const resolved = await chargesRepository.resolveResponsibles(charge.id, participantIds);
+    const memberIds = participantIds.filter((id) => resolved.get(id)?.memberId === member.id);
+    return { memberIds, scopedToMemberId: member.id };
   }
 
   /** Camino combinado para crear/ver el pago de UN miembro puntual dentro de un cobro — además
-   * del camino normal (`assertMemberPaymentsAccessible`), acepta ser responsable de ESTE cobro
-   * como alternativa completa, sin necesitar ningún scope de Miembros/Pagos asignado. */
+   * del camino normal (`assertMemberPaymentsAccessible`), acepta ser el responsable RESUELTO
+   * (con prioridad de grupo) para ESE miembro puntual, sin necesitar ningún scope de Miembros/
+   * Pagos asignado — ya no "ser responsable de este cobro" a secas (acceso total), ahora acotado
+   * a los miembros que de verdad le corresponden a este responsable. */
   async assertChargeMemberPaymentAccessible(charge, memberId, actorId, authContext) {
-    if (await this._isResponsibleForCharge(charge, actorId)) return;
+    const member = await membersRepository.findByUserId(actorId, charge.club_id);
+    if (member) {
+      const resolved = await chargesRepository.resolveResponsibles(charge.id, [memberId]);
+      if (resolved.get(memberId)?.memberId === member.id) return;
+    }
     await this.assertMemberPaymentsAccessible(charge.club_id, memberId, actorId, authContext);
+  }
+
+  /** Acceso a la transferencia (settlement) de UN responsable puntual — a diferencia de
+   * `assertChargeMemberPaymentAccessible` (que resuelve "quién cobra la plata de un miembro que
+   * PAGA"), acá `responsibleMemberId` NO es alguien que paga, es la persona a la que se refiere
+   * el settlement — el bypass es de identidad directa (soy justo esa persona), no de resolución
+   * por grupo. */
+  async _assertSettlementAccessible(charge, responsibleMemberId, actorId, authContext) {
+    const member = await membersRepository.findByUserId(actorId, charge.club_id);
+    if (member && member.id === responsibleMemberId) return;
+    await this.assertMemberPaymentsAccessible(charge.club_id, responsibleMemberId, actorId, authContext);
   }
 
   /** El acceso real a los pagos de un miembro exige DOS resoluciones independientes que deben
@@ -705,12 +787,55 @@ class PaymentsService {
       paymentRows.map(async (p) => this.toDto(p, await paymentsRepository.getAllocations(p.id)))
     );
 
-    const virtualInstances = await this._computeMissingPastInstances(instanceRows, memberId);
-    const instances = [...instanceRows.map((r) => this._instanceToDto(r)), ...virtualInstances].sort(
-      (a, b) => new Date(b.dueDate) - new Date(a.dueDate)
+    // Responsable RESUELTO (con prioridad de grupo) para ESTE miembro + la lista completa de
+    // responsables del cobro (para las demás opciones de "pagado a") — una vez por cada cobro
+    // distinto entre sus instancias, ya no es "el" responsable único del cobro, ver
+    // charges.repository.js#resolveResponsibles.
+    const chargeIds = [...new Set(instanceRows.map((r) => r.charge_id))];
+    const responsibleEntries = await Promise.all(
+      chargeIds.map(async (chargeId) => {
+        const [resolvedMap, all] = await Promise.all([
+          chargesRepository.resolveResponsibles(chargeId, [memberId]),
+          chargesRepository.getResponsibleMembers(chargeId),
+        ]);
+        return [chargeId, { resolved: resolvedMap.get(memberId) ?? null, all: all.map((r) => ({ memberId: r.memberId, memberName: r.memberName })) }];
+      })
     );
+    const responsibleByCharge = new Map(responsibleEntries);
+
+    const virtualInstances = await this._computeMissingPastInstances(instanceRows, memberId, responsibleByCharge);
+    const instances = [
+      ...instanceRows.map((r) => this._instanceToDto(r, responsibleByCharge.get(r.charge_id) ?? null)),
+      ...virtualInstances,
+    ];
+    this._demoteFuturePendingDuplicates(instances);
+    instances.sort((a, b) => new Date(b.dueDate) - new Date(a.dueDate));
 
     return { instances, payments };
+  }
+
+  /** `chargeInstances.service.js#_computePeriods` genera deliberadamente el período ACTUAL y el
+   * SIGUIENTE de una vez (para que el cron no tenga que correr justo el día del vencimiento) —
+   * eso hacía que, mientras el período actual seguía sin vencer, el siguiente YA apareciera acá
+   * también como "Pendiente", mostrando 2 pendientes simultáneos para el mismo cobro. Entre las
+   * instancias `pending` de un mismo cobro, solo la de vencimiento más próximo se muestra como
+   * "Pendiente" — el resto pasa a `displayStatus: 'upcoming'` ("Próximo"). En cuanto la más
+   * próxima se paga o vence (deja de ser `pending`), la siguiente queda como la única `pending`
+   * y se "promueve" sola, sin tocar nada de la generación ni el cron. */
+  _demoteFuturePendingDuplicates(instances) {
+    const earliestPendingByCharge = new Map();
+    for (const inst of instances) {
+      if (inst.displayStatus !== 'pending') continue;
+      const current = earliestPendingByCharge.get(inst.chargeId);
+      if (!current || new Date(inst.dueDate) < new Date(current.dueDate)) {
+        earliestPendingByCharge.set(inst.chargeId, inst);
+      }
+    }
+    for (const inst of instances) {
+      if (inst.displayStatus === 'pending' && earliestPendingByCharge.get(inst.chargeId) !== inst) {
+        inst.displayStatus = 'upcoming';
+      }
+    }
   }
 
   async getById(paymentId) {
@@ -721,18 +846,23 @@ class PaymentsService {
   }
 
   /** "A quién se le paga" — reglas distintas según `charge.purpose`: un cobro normal
-   * ('treasury') admite Tesorería (`null`) o su responsable (si tiene uno); un cobro 'external'
-   * (ej. inscripción de un campeonato, ver charges.service.js) SIEMPRE tiene responsable y NUNCA
-   * admite Tesorería como destino — todo pago de un cobro externo debe quedar a nombre del
-   * responsable, porque ese dinero nunca pasa por Tesorería. */
-  _validatePaidToMemberId(charge, paidToMemberId) {
+   * ('treasury') admite Tesorería (`null`) o CUALQUIERA de los responsables configurados en el
+   * cobro (no necesariamente el que le correspondería a este miembro por su grupo — confirmado
+   * con el usuario: el resuelto por grupo es solo la sugerencia por defecto en el frontend, no
+   * una validación estricta, porque a veces el dinero termina en manos de otro responsable
+   * presente ese día); un cobro 'external' (ej. inscripción de un campeonato, ver
+   * charges.service.js) SIEMPRE tiene al menos un responsable y NUNCA admite Tesorería como
+   * destino — todo pago de un cobro externo debe quedar a nombre de alguno de sus responsables,
+   * porque ese dinero nunca pasa por Tesorería. `responsibleIds`: ids de TODOS los responsables
+   * configurados en el cobro (ver charges.repository.js#getResponsibleMembers). */
+  _validatePaidToMemberId(charge, paidToMemberId, responsibleIds) {
     if (charge.purpose === 'external') {
-      if (paidToMemberId !== charge.responsible_member_id) {
-        throw AppError.badRequest('Este cobro es externo — el pago debe quedar a nombre del responsable.');
+      if (paidToMemberId === null || !responsibleIds.includes(paidToMemberId)) {
+        throw AppError.badRequest('Este cobro es externo — el pago debe quedar a nombre de uno de sus responsables.');
       }
       return;
     }
-    if (paidToMemberId !== null && paidToMemberId !== charge.responsible_member_id) {
+    if (paidToMemberId !== null && !responsibleIds.includes(paidToMemberId)) {
       throw AppError.badRequest('El destinatario del pago no es válido para este cobro.');
     }
   }
@@ -763,10 +893,11 @@ class PaymentsService {
       throw AppError.badRequest(`El monto excede el saldo pendiente de "${instance.period_label}" ($${remaining.toFixed(2)}).`);
     }
 
-    // "A quién se le paga": el responsable del cobro (si tiene uno configurado) o Tesorería
-    // (`null`, pago directo) — no cualquier miembro, solo esos dos valores son válidos.
+    // "A quién se le paga": alguno de los responsables del cobro (si tiene) o Tesorería (`null`,
+    // pago directo) — no cualquier miembro, ver _validatePaidToMemberId.
     const paidToMemberId = data.paidToMemberId ?? null;
-    this._validatePaidToMemberId(charge, paidToMemberId);
+    const responsibleIds = (await chargesRepository.getResponsibleMembers(charge.id)).map((r) => r.memberId);
+    this._validatePaidToMemberId(charge, paidToMemberId, responsibleIds);
 
     const paymentId = await withTransaction(async (conn) => {
       const id = await paymentsRepository.createPayment(
@@ -802,8 +933,7 @@ class PaymentsService {
    * en una celda `partial`/`paid`, para editarlos/eliminarlos (un período puede acumular varios
    * abonos). Mismo alcance que el resto: exige que el miembro dueño de la instancia sea visible. */
   async listForInstance(clubId, instanceId, actorId, authContext) {
-    const instance = await this._findInstanceInClub(clubId, instanceId);
-    const charge = await chargesRepository.findActiveById(instance.charge_id);
+    const { instance, charge } = await this._findInstanceInClub(clubId, instanceId);
     await this.assertChargeMemberPaymentAccessible(charge, instance.member_id, actorId, authContext);
 
     const rows = await paymentsRepository.findByInstance(instanceId);
@@ -836,12 +966,13 @@ class PaymentsService {
       }
     }
 
-    // Mismo criterio que create(): solo el responsable del cobro o Tesorería (`null`) son
-    // destinatarios válidos (y en un cobro externo, SOLO el responsable).
+    // Mismo criterio que create(): solo un responsable del cobro o Tesorería (`null`) son
+    // destinatarios válidos (y en un cobro externo, SOLO alguno de los responsables).
     if (data.paidToMemberId !== undefined) {
       const instance = await chargeInstancesRepository.findActiveById(allocation.charge_instance_id);
       const charge = await chargesRepository.findActiveById(instance.charge_id);
-      this._validatePaidToMemberId(charge, data.paidToMemberId);
+      const responsibleIds = (await chargesRepository.getResponsibleMembers(charge.id)).map((r) => r.memberId);
+      this._validatePaidToMemberId(charge, data.paidToMemberId, responsibleIds);
     }
 
     await withTransaction(async (conn) => {
@@ -898,12 +1029,15 @@ class PaymentsService {
     if (!instance) throw AppError.notFound('Período no encontrado.');
     const charge = await chargesRepository.findActiveById(instance.charge_id);
     if (!charge || charge.club_id !== clubId) throw AppError.notFound('Período no encontrado.');
-    return instance;
+    return { instance, charge };
   }
 
+  /** Además de EXEMPT_PAYMENTS, deja pasar a quien es el responsable RESUELTO (con prioridad de
+   * grupo) del miembro dueño de esta instancia — mismo bypass que ya tenía registrar un pago (ver
+   * requireFunctionOrResponsibleCharge en la ruta), extendido acá por pedido explícito. */
   async exemptInstance(clubId, instanceId, reason, exemptType, actorId, authContext) {
-    const instance = await this._findInstanceInClub(clubId, instanceId);
-    await this.assertMemberPaymentsAccessible(clubId, instance.member_id, actorId, authContext);
+    const { instance, charge } = await this._findInstanceInClub(clubId, instanceId);
+    await this.assertChargeMemberPaymentAccessible(charge, instance.member_id, actorId, authContext);
     if (instance.status === 'paid' || instance.status === 'partial') {
       throw AppError.conflict('No se puede eximir un período con pagos registrados — elimina el pago primero.');
     }
@@ -917,6 +1051,47 @@ class PaymentsService {
       entityId: instanceId,
       changes: { reason: reason || null, type: resolvedType },
     });
+  }
+
+  /** Igual regla que `exemptInstance`, aplicada a varios períodos de una sola vez (pedido:
+   * "congelar/marcar varias fechas a la vez", solo cobros mensuales desde el frontend). Los
+   * períodos con pago ya registrado se saltan en vez de abortar todo el lote — el usuario
+   * seleccionó varias filas, algunas mixtas no deberían bloquear las que sí son válidas. */
+  async exemptMany(clubId, instanceIds, reason, exemptType, actorId, authContext) {
+    const resolvedType = exemptType === CHARGE_EXEMPT_TYPE.NOT_APPLICABLE ? CHARGE_EXEMPT_TYPE.NOT_APPLICABLE : CHARGE_EXEMPT_TYPE.FROZEN;
+    const applied = [];
+    const skipped = [];
+
+    await withTransaction(async (conn) => {
+      for (const instanceId of instanceIds) {
+        // eslint-disable-next-line no-await-in-loop
+        const { instance, charge } = await this._findInstanceInClub(clubId, instanceId);
+        // eslint-disable-next-line no-await-in-loop
+        await this.assertChargeMemberPaymentAccessible(charge, instance.member_id, actorId, authContext);
+        if (instance.status === 'paid' || instance.status === 'partial') {
+          skipped.push(instanceId);
+          continue;
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await chargeInstancesRepository.markExempt(instanceId, reason, resolvedType, actorId, conn);
+        applied.push(instanceId);
+      }
+    });
+
+    await Promise.all(
+      applied.map((instanceId) =>
+        auditRepository.logAction({
+          userId: actorId,
+          clubId,
+          action: 'PAYMENT_INSTANCE_EXEMPTED',
+          entityType: 'charge_instance',
+          entityId: instanceId,
+          changes: { reason: reason || null, type: resolvedType },
+        })
+      )
+    );
+
+    return { applied, skipped };
   }
 
   /** Crea (si no existe) la instancia de UN período puntual para UN miembro de este cobro —
@@ -952,6 +1127,7 @@ class PaymentsService {
    * número que Tesorería nunca tuvo realmente en la mano). Si el actor no tiene VIEW_EXPENSES no
    * se resta nada — mostrar un neto a medias (ingresos completos menos gastos parciales que sí
    * puede ver) sería peor que mostrar el bruto: al menos el bruto es honesto sobre lo que es.
+   * `incomeTotal`: BRUTO histórico (sin restar gastos) — directo + transferido por responsables.
    * `expensesTotal`: total histórico gastado, `null` si el actor no tiene VIEW_EXPENSES.
    * `pendingFromResponsibles`: cuánto queda AHORA MISMO en manos de responsables sin transferir,
    * sumado entre TODOS ellos.
@@ -969,6 +1145,7 @@ class PaymentsService {
       : [null, {}];
 
     let treasuryTotal = null;
+    let incomeTotal = null;
     let overdueMembersCount = null;
     let pendingFromResponsibles = null;
     let incomeByMonth = null;
@@ -992,7 +1169,8 @@ class PaymentsService {
       // Neto (ingresos − gastos) solo cuando el actor también ve Gastos — mostrar un neto a
       // medias (ingreso completo menos un gasto que en realidad no puede ver del todo) sería
       // peor que mostrar el bruto: al menos el bruto es honesto sobre lo que representa.
-      treasuryTotal = directTotal + settledToTreasury - (hasExpenseAccess ? expensesTotal : 0);
+      incomeTotal = directTotal + settledToTreasury;
+      treasuryTotal = incomeTotal - (hasExpenseAccess ? expensesTotal : 0);
       overdueMembersCount = overdue;
       pendingFromResponsibles = Math.max(0, heldByResponsibles - settledAllTime);
       incomeByMonth = this._sumMonthlyMaps(directByMonth, settledByMonth, DASHBOARD_CHART_MONTHS);
@@ -1005,7 +1183,7 @@ class PaymentsService {
         ? this._buildMonthlySeries(incomeByMonth ?? {}, expensesByMonth, DASHBOARD_CHART_MONTHS)
         : null;
 
-    return { activeChargesCount, activeExpensesCount, treasuryTotal, expensesTotal, overdueMembersCount, pendingFromResponsibles, monthlyTreasury };
+    return { activeChargesCount, activeExpensesCount, treasuryTotal, incomeTotal, expensesTotal, overdueMembersCount, pendingFromResponsibles, monthlyTreasury };
   }
 
   /** Suma dos mapas `{ 'YYYY-MM': total }` en uno solo — usado para combinar pagos directos +
@@ -1037,8 +1215,8 @@ class PaymentsService {
   }
 
   async unexemptInstance(clubId, instanceId, actorId, authContext) {
-    const instance = await this._findInstanceInClub(clubId, instanceId);
-    await this.assertMemberPaymentsAccessible(clubId, instance.member_id, actorId, authContext);
+    const { instance, charge } = await this._findInstanceInClub(clubId, instanceId);
+    await this.assertChargeMemberPaymentAccessible(charge, instance.member_id, actorId, authContext);
     if (instance.status !== 'exempt') throw AppError.conflict('Este período no está marcado como no corresponde.');
     await chargeInstancesRepository.markUnexempt(instanceId);
     await auditRepository.logAction({

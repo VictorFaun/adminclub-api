@@ -13,7 +13,6 @@ class Club {
       secondaryColor: row.secondary_color,
       theme: row.theme,
       status: row.status,
-      inviteCode: row.invite_code,
       isPublic: !!row.is_public,
       createdBy: row.created_by,
       createdAt: row.created_at,

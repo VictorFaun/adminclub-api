@@ -66,11 +66,24 @@ const unexemptInstance = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, null, 'Exención eliminada correctamente.');
 });
 
+const exemptMany = asyncHandler(async (req, res) => {
+  const result = await paymentsService.exemptMany(
+    req.club.id,
+    req.body.instanceIds,
+    req.body.reason,
+    req.body.type,
+    req.user.id,
+    req.authContext
+  );
+  return ApiResponse.ok(res, result, 'Períodos marcados correctamente.');
+});
+
 const listSettlements = asyncHandler(async (req, res) => {
   const data = await paymentsService.listSettlements(
     req.club.id,
     Number(req.params.chargeId),
     req.params.periodKey,
+    Number(req.query.responsibleMemberId),
     req.user.id,
     req.authContext
   );
@@ -103,6 +116,7 @@ module.exports = {
   remove,
   exemptInstance,
   unexemptInstance,
+  exemptMany,
   listSettlements,
   createSettlement,
   updateSettlement,

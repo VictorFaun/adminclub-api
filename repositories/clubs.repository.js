@@ -18,13 +18,6 @@ class ClubsRepository extends BaseRepository {
     return rows[0] || null;
   }
 
-  async findByInviteCode(inviteCode, conn = pool) {
-    const [rows] = await conn.query('SELECT * FROM clubs WHERE invite_code = ? AND deleted_at IS NULL LIMIT 1', [
-      inviteCode,
-    ]);
-    return rows[0] || null;
-  }
-
   async publicCodeExists(publicCode, excludeClubId = null, conn = pool) {
     const sql = excludeClubId
       ? 'SELECT id FROM clubs WHERE public_code = ? AND id != ? LIMIT 1'
@@ -37,8 +30,8 @@ class ClubsRepository extends BaseRepository {
   async createClub(data, conn = pool) {
     const [result] = await conn.query(
       `INSERT INTO clubs
-        (uuid, name, public_code, invite_code, description, primary_color, secondary_color, theme, timezone, status, is_public, created_by)
-       VALUES (UUID(), :name, :publicCode, :inviteCode, :description, :primaryColor, :secondaryColor, :theme, :timezone, :status, :isPublic, :createdBy)`,
+        (uuid, name, public_code, description, primary_color, secondary_color, theme, timezone, status, is_public, created_by)
+       VALUES (UUID(), :name, :publicCode, :description, :primaryColor, :secondaryColor, :theme, :timezone, :status, :isPublic, :createdBy)`,
       data
     );
     return result.insertId;
@@ -83,10 +76,6 @@ class ClubsRepository extends BaseRepository {
 
   async softDelete(id, conn = pool) {
     await conn.query('UPDATE clubs SET deleted_at = NOW(), status = "inactive" WHERE id = ?', [id]);
-  }
-
-  async regenerateInviteCode(id, inviteCode, conn = pool) {
-    await conn.query('UPDATE clubs SET invite_code = ? WHERE id = ?', [inviteCode, id]);
   }
 
   async countUsers(clubId, conn = pool) {

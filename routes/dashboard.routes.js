@@ -9,5 +9,6 @@ router.use(authMiddleware, clubContextMiddleware);
 
 router.get('/', requireFunction(FUNCTIONS.VIEW_DASHBOARD), controller.overview);
 router.get('/audit-logs', requireFunction(FUNCTIONS.VIEW_AUDIT_LOGS), controller.auditLogs);
+router.get('/audit-logs/filters', requireFunction(FUNCTIONS.VIEW_AUDIT_LOGS), controller.auditLogFilters);
 
 module.exports = router;

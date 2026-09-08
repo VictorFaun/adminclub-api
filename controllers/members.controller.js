@@ -46,6 +46,11 @@ const create = asyncHandler(async (req, res) => {
   return ApiResponse.created(res, member, 'Miembro creado correctamente.');
 });
 
+const createSelf = asyncHandler(async (req, res) => {
+  const member = await membersService.createSelf(req.club.id, req.user.id, req.body);
+  return ApiResponse.created(res, member, 'Ficha completada correctamente.');
+});
+
 const update = asyncHandler(async (req, res) => {
   const member = await membersService.update(req.club.id, Number(req.params.id), req.body, req.user.id, req.authContext);
   return ApiResponse.ok(res, member, 'Miembro actualizado correctamente.');
@@ -61,4 +66,4 @@ const linkUser = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, member, req.body.userId ? 'Cuenta vinculada correctamente.' : 'Cuenta desvinculada correctamente.');
 });
 
-module.exports = { list, options, dashboard, getById, create, update, remove, linkUser };
+module.exports = { list, options, dashboard, getById, create, createSelf, update, remove, linkUser };

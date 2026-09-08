@@ -13,8 +13,8 @@ class InvitationsRepository extends BaseRepository {
 
   async createInvitation(data, conn = pool) {
     const [result] = await conn.query(
-      `INSERT INTO invitations (uuid, club_id, code, created_by, max_uses, expires_at, status, default_role_id, note)
-       VALUES (UUID(), :clubId, :code, :createdBy, :maxUses, :expiresAt, :status, :defaultRoleId, :note)`,
+      `INSERT INTO invitations (uuid, club_id, code, created_by, max_uses, expires_at, status, default_role_id, requires_member_profile, note)
+       VALUES (UUID(), :clubId, :code, :createdBy, :maxUses, :expiresAt, :status, :defaultRoleId, :requiresMemberProfile, :note)`,
       data
     );
     return result.insertId;

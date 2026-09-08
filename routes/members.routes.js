@@ -13,7 +13,7 @@ router.use(authMiddleware, clubContextMiddleware);
 // parámetro :id (y fallarían la validación de que sea numérico).
 // Además de EDIT_ROLE (scope picker de roles) y VIEW_MEMBERS/_SCOPED, lo usa charge-form
 // (CREATE/EDIT_CHARGES) para poblar el picker de miembros específicos sin exigirle el permiso
-// completo del módulo Miembros — mismo criterio que memberGroups.routes.js/memberTags.routes.js.
+// completo del módulo Miembros — mismo criterio que memberGroups.routes.js.
 router.get(
   '/options',
   requireFunction(FUNCTIONS.EDIT_ROLE, FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED, FUNCTIONS.CREATE_CHARGES, FUNCTIONS.EDIT_CHARGES),
@@ -21,6 +21,12 @@ router.get(
 );
 router.get('/dashboard', requireFunction(FUNCTIONS.VIEW_MEMBERS_DASHBOARD), controller.dashboard);
 router.use('/fields', require('./memberFields.routes'));
+
+// Autoservicio de ficha (ver members.service.js#createSelf) — deliberadamente SIN
+// requireFunction: es la única acción permitida mientras la membresía tenga
+// `requires_profile_completion` (permission.middleware.js#assertProfileNotPending bloquea todo
+// lo demás). El propio service valida que el actor realmente tenga una ficha pendiente.
+router.post('/me', sanitizeBody, validation.createMemberSelf, handleValidation, controller.createSelf);
 
 router.get(
   '/',

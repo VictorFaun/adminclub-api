@@ -1,9 +1,11 @@
 const { pool } = require('../config/database');
 const BaseRepository = require('./BaseRepository');
 
-/** Transferencias del responsable de un cobro hacia Tesorería — ver `018_charge_settlements.sql`.
+/** Transferencias de un responsable de un cobro hacia Tesorería — ver `018_charge_settlements.sql`
+ * + `032_charge_responsibles.sql` (agrega `responsible_member_id`: con varios responsables por
+ * cobro, cada uno tiene su propio saldo pendiente de transferir, independiente del resto).
  * Mismo patrón que `payments.repository.js`: varias filas posibles por (charge_id,
- * period_label) para permitir transferencias parciales. */
+ * responsible_member_id, period_label) para permitir transferencias parciales. */
 class ChargeSettlementsRepository extends BaseRepository {
   constructor() {
     super('charge_settlements', 'id');
@@ -14,29 +16,34 @@ class ChargeSettlementsRepository extends BaseRepository {
     return rows[0] || null;
   }
 
-  /** Todas las transferencias registradas para UN período de UN cobro — usado por el modal
-   * "editar/eliminar" (mismo rol que payments.repository.js#findByInstance). */
-  async findByChargeAndPeriod(chargeId, periodLabel, conn = pool) {
+  /** Todas las transferencias registradas para UN período + UN responsable de UN cobro — usado
+   * por el modal "editar/eliminar" (mismo rol que payments.repository.js#findByInstance). Acotado
+   * a un responsable puntual porque, con varios por cobro, cada uno tiene su propio saldo. */
+  async findByChargeResponsibleAndPeriod(chargeId, responsibleMemberId, periodLabel, conn = pool) {
     const [rows] = await conn.query(
       `SELECT cs.*, u.username AS registered_by_username FROM charge_settlements cs
        LEFT JOIN users u ON u.id = cs.registered_by
-       WHERE cs.charge_id = ? AND cs.period_label = ? ORDER BY cs.transferred_at DESC`,
-      [chargeId, periodLabel]
+       WHERE cs.charge_id = ? AND cs.responsible_member_id = ? AND cs.period_label = ? ORDER BY cs.transferred_at DESC`,
+      [chargeId, responsibleMemberId, periodLabel]
     );
     return rows;
   }
 
-  /** `{ [periodLabel]: totalTransferido }` para un conjunto de períodos de un cobro — usado por
-   * getChargeMatrix para calcular cuánto ya se le transfirió a Tesorería por período. */
+  /** `{ [periodLabel]: { [responsibleMemberId]: totalTransferido } }` para un conjunto de
+   * períodos de un cobro — usado por getChargeMatrix para calcular cuánto ya se le transfirió a
+   * Tesorería por período, DESGLOSADO por responsable (cada uno tiene su propio saldo). */
   async sumByChargeAndPeriods(chargeId, periodLabels, conn = pool) {
     if (!periodLabels.length) return {};
     const [rows] = await conn.query(
-      `SELECT period_label, COALESCE(SUM(amount), 0) AS total FROM charge_settlements
-       WHERE charge_id = ? AND period_label IN (?) GROUP BY period_label`,
+      `SELECT period_label, responsible_member_id, COALESCE(SUM(amount), 0) AS total FROM charge_settlements
+       WHERE charge_id = ? AND period_label IN (?) GROUP BY period_label, responsible_member_id`,
       [chargeId, periodLabels]
     );
     const byPeriod = {};
-    for (const row of rows) byPeriod[row.period_label] = Number(row.total);
+    for (const row of rows) {
+      if (!byPeriod[row.period_label]) byPeriod[row.period_label] = {};
+      byPeriod[row.period_label][row.responsible_member_id] = Number(row.total);
+    }
     return byPeriod;
   }
 
@@ -52,7 +59,7 @@ class ChargeSettlementsRepository extends BaseRepository {
     let memberFilter = '';
     if (memberIds) {
       if (!memberIds.length) return 0;
-      memberFilter = 'AND c.responsible_member_id IN (?)';
+      memberFilter = 'AND cs.responsible_member_id IN (?)';
       params.push(memberIds);
     }
     const [rows] = await conn.query(
@@ -74,7 +81,7 @@ class ChargeSettlementsRepository extends BaseRepository {
     let memberFilter = '';
     if (memberIds) {
       if (!memberIds.length) return 0;
-      memberFilter = 'AND c.responsible_member_id IN (?)';
+      memberFilter = 'AND cs.responsible_member_id IN (?)';
       params.push(memberIds);
     }
     const [rows] = await conn.query(
@@ -96,7 +103,7 @@ class ChargeSettlementsRepository extends BaseRepository {
     let memberFilter = '';
     if (memberIds) {
       if (!memberIds.length) return {};
-      memberFilter = 'AND c.responsible_member_id IN (?)';
+      memberFilter = 'AND cs.responsible_member_id IN (?)';
       params.push(memberIds);
     }
     params.push(months - 1);
@@ -116,8 +123,8 @@ class ChargeSettlementsRepository extends BaseRepository {
 
   async createSettlement(data, conn = pool) {
     const [result] = await conn.query(
-      `INSERT INTO charge_settlements (uuid, charge_id, period_label, amount, transferred_at, note, registered_by)
-       VALUES (UUID(), :chargeId, :periodLabel, :amount, :transferredAt, :note, :registeredBy)`,
+      `INSERT INTO charge_settlements (uuid, charge_id, responsible_member_id, period_label, amount, transferred_at, note, registered_by)
+       VALUES (UUID(), :chargeId, :responsibleMemberId, :periodLabel, :amount, :transferredAt, :note, :registeredBy)`,
       data
     );
     return result.insertId;

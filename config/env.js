@@ -75,6 +75,21 @@ const env = {
     dir: process.env.LOG_DIR || 'logs',
     level: process.env.LOG_LEVEL || 'dev',
   },
+
+  // Login con Google — solo hace falta el Client ID (público, NO un secreto): se verifica el
+  // `id_token` que ya emitió Google del lado del navegador (Google Identity Services), sin
+  // flujo de redirect/callback ni `client_secret` de por medio (ver GOOGLE_LOGIN_SETUP.md).
+  google: {
+    clientId: process.env.GOOGLE_CLIENT_ID,
+  },
+
+  // Envío de correo real vía Resend — mientras falte RESEND_API_KEY, email.service.js sigue
+  // cayendo a su comportamiento de siempre (loguear en vez de enviar), ver RESEND_EMAIL_SETUP.md.
+  email: {
+    resendApiKey: process.env.RESEND_API_KEY,
+    fromAddress: process.env.EMAIL_FROM || 'no-reply@adminclub.dev',
+    fromName: process.env.EMAIL_FROM_NAME || 'Admin Club',
+  },
 };
 
 const requiredInProduction = ['JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET', 'DB_PASSWORD'];

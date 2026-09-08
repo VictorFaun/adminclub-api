@@ -6,14 +6,39 @@ class UsersRepository extends BaseRepository {
     super('users', 'id');
   }
 
+  // `deleted_at IS NULL` en ambos: una cuenta eliminada (ver #removeGlobal/softDelete) no debe
+  // seguir bloqueando su email para siempre — ni aparecer como "existente" al registrarse de
+  // nuevo, ni resolverse en login/forgot-password (ya inaccesible igual vía authMiddleware).
   async findByEmail(email, conn = pool) {
-    const [rows] = await conn.query('SELECT * FROM users WHERE email = ? LIMIT 1', [email]);
+    const [rows] = await conn.query('SELECT * FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1', [email]);
     return rows[0] || null;
+  }
+
+  /** Login acepta correo O nombre de usuario — una sola query en vez de intentar `findByEmail`
+   * y recién si falla `findByUsername`, para no duplicar el viaje a la base de datos en el caso
+   * común (usuario real, encuentra en el primer intento igual). */
+  async findByIdentifier(identifier, conn = pool) {
+    const [rows] = await conn.query('SELECT * FROM users WHERE (email = ? OR username = ?) AND deleted_at IS NULL LIMIT 1', [
+      identifier,
+      identifier,
+    ]);
+    return rows[0] || null;
+  }
+
+  async usernameExists(username, excludeUserId = null, conn = pool) {
+    const params = [username];
+    let sql = 'SELECT id FROM users WHERE username = ?';
+    if (excludeUserId) {
+      sql += ' AND id != ?';
+      params.push(excludeUserId);
+    }
+    const [rows] = await conn.query(`${sql} LIMIT 1`, params);
+    return rows.length > 0;
   }
 
   async emailExists(email, excludeUserId = null, conn = pool) {
     const params = [email];
-    let sql = 'SELECT id FROM users WHERE email = ?';
+    let sql = 'SELECT id FROM users WHERE email = ? AND deleted_at IS NULL';
     if (excludeUserId) {
       sql += ' AND id != ?';
       params.push(excludeUserId);
@@ -29,6 +54,32 @@ class UsersRepository extends BaseRepository {
       data
     );
     return result.insertId;
+  }
+
+  /** Login con Google — mismo criterio que `findByIdentifier`: `deleted_at IS NULL` para que una
+   * cuenta eliminada no siga resolviendo. */
+  async findByGoogleId(googleId, conn = pool) {
+    const [rows] = await conn.query('SELECT * FROM users WHERE google_id = ? AND deleted_at IS NULL LIMIT 1', [googleId]);
+    return rows[0] || null;
+  }
+
+  /** Cuenta creada 100% desde Google — `password_hash` queda NULL (columna ya relajada, ver
+   * `034_google_auth.sql`) hasta que el usuario cree una con el flujo de "¿Olvidaste tu
+   * contraseña?" (ver auth.service.js#loginWithGoogle). `email_verified_at` se marca de una:
+   * Google ya verificó el correo antes de emitir el id_token. */
+  async createUserFromGoogle({ username, email, googleId, avatarUrl }, conn = pool) {
+    const [result] = await conn.query(
+      `INSERT INTO users (uuid, username, email, google_id, password_hash, avatar_url, status, email_verified_at)
+       VALUES (UUID(), :username, :email, :googleId, NULL, :avatarUrl, 'active', NOW())`,
+      { username, email, googleId, avatarUrl: avatarUrl || null }
+    );
+    return result.insertId;
+  }
+
+  /** Vincula una cuenta LOCAL ya existente (mismo correo) a una cuenta de Google — pedido
+   * explícito: un correo ya registrado sin contraseña de Google debe VINCULARSE, nunca duplicarse. */
+  async linkGoogleId(userId, googleId, conn = pool) {
+    await conn.query('UPDATE users SET google_id = ? WHERE id = ?', [googleId, userId]);
   }
 
   async setEmailVerified(userId, conn = pool) {
@@ -95,7 +146,7 @@ class UsersRepository extends BaseRepository {
 
   async findClubsForUser(userId, conn = pool) {
     const [rows] = await conn.query(
-      `SELECT c.*, uc.status AS membership_status, uc.is_default, uc.joined_at
+      `SELECT c.*, uc.status AS membership_status, uc.is_default, uc.joined_at, uc.requires_profile_completion
        FROM user_clubs uc INNER JOIN clubs c ON c.id = uc.club_id
        WHERE uc.user_id = ? AND c.deleted_at IS NULL
        ORDER BY uc.is_default DESC, c.name ASC`,
@@ -168,8 +219,35 @@ class UsersRepository extends BaseRepository {
     return rows.map((r) => r.name);
   }
 
+  /** Versión batch de findGlobalRoleCodes, para listados (evita N+1) — mismo patrón que findClubsForUsers. */
+  async findGlobalRoleCodesForUsers(userIds, conn = pool) {
+    if (!userIds.length) return {};
+    const [rows] = await conn.query(
+      `SELECT ur.user_id AS user_id, r.name FROM user_roles ur
+       INNER JOIN roles r ON r.id = ur.role_id
+       WHERE ur.user_id IN (?) AND r.scope = 'global'`,
+      [userIds]
+    );
+    const byUser = {};
+    for (const row of rows) {
+      if (!byUser[row.user_id]) byUser[row.user_id] = [];
+      byUser[row.user_id].push(row.name);
+    }
+    return byUser;
+  }
+
   async softDelete(userId, conn = pool) {
     await conn.query('UPDATE users SET deleted_at = NOW() WHERE id = ?', [userId]);
+  }
+
+  /** Ver clubs.service.js#joinByCode (se marca al unirse con una invitación que exige ficha) y
+   * members.service.js#createSelf (se limpia al completarla). */
+  async setRequiresProfileCompletion(userId, clubId, value, conn = pool) {
+    await conn.query('UPDATE user_clubs SET requires_profile_completion = ? WHERE user_id = ? AND club_id = ?', [
+      value ? 1 : 0,
+      userId,
+      clubId,
+    ]);
   }
 }
 

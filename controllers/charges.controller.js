@@ -3,12 +3,12 @@ const ApiResponse = require('../helpers/ApiResponse');
 const chargesService = require('../services/charges.service');
 
 const list = asyncHandler(async (req, res) => {
-  const items = await chargesService.listForClub(req.club.id, req.user.id, req.authContext);
+  const items = await chargesService.listForClub(req.club.id, req.user.id, req.authContext, req.query);
   return ApiResponse.ok(res, items, 'Cobros obtenidos correctamente.');
 });
 
 const listArchived = asyncHandler(async (req, res) => {
-  const items = await chargesService.listArchivedForClub(req.club.id);
+  const items = await chargesService.listArchivedForClub(req.club.id, req.query);
   return ApiResponse.ok(res, items, 'Cobros archivados obtenidos correctamente.');
 });
 

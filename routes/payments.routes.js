@@ -65,9 +65,13 @@ router.put('/:id', requireFunction(FUNCTIONS.EDIT_PAYMENTS), sanitizeBody, valid
 
 router.delete('/:id', requireFunction(FUNCTIONS.DELETE_PAYMENTS), validation.paymentId, handleValidation, controller.remove);
 
+// Además de EXEMPT_PAYMENTS, deja pasar a quien es responsable del cobro al que pertenece el
+// período (chequeo fino en payments.service.js#exemptInstance/exemptMany/unexemptInstance, vía
+// assertChargeMemberPaymentAccessible) — pedido explícito: un responsable sin rol de Tesorería
+// debe poder no solo registrar pagos sino también marcar congelado/no aplica.
 router.put(
   '/instances/:instanceId/exempt',
-  requireFunction(FUNCTIONS.EXEMPT_PAYMENTS),
+  requireFunctionOrResponsibleCharge(FUNCTIONS.EXEMPT_PAYMENTS),
   sanitizeBody,
   validation.exemptInstance,
   handleValidation,
@@ -76,17 +80,27 @@ router.put(
 
 router.put(
   '/instances/:instanceId/unexempt',
-  requireFunction(FUNCTIONS.EXEMPT_PAYMENTS),
+  requireFunctionOrResponsibleCharge(FUNCTIONS.EXEMPT_PAYMENTS),
   validation.instanceIdParam,
   handleValidation,
   controller.unexemptInstance
 );
 
-// Transferencias del responsable de un cobro a Tesorería ("Total a pagar" en la matriz) — mismas
-// funcionalidades que los pagos normales, ver payments.service.js#_computeSettlements. El
-// responsable del cobro además puede registrar/ver SU PROPIA transferencia sin tener ninguna de
-// las dos (es literalmente la persona a la que se refiere el settlement, ver
-// payments.service.js#listSettlements/createSettlement).
+router.put(
+  '/instances/exempt-batch',
+  requireFunctionOrResponsibleCharge(FUNCTIONS.EXEMPT_PAYMENTS),
+  sanitizeBody,
+  validation.exemptMany,
+  handleValidation,
+  controller.exemptMany
+);
+
+// Transferencias de un responsable del cobro a Tesorería ("Total a pagar" en la matriz, ahora
+// desglosado por responsable — un cobro puede tener varios) — mismas funcionalidades que los
+// pagos normales, ver payments.service.js#_computeSettlements. Cada responsable además puede
+// registrar/ver SU PROPIA transferencia sin tener ninguna de las dos (es literalmente la persona
+// a la que se refiere el settlement, ver payments.service.js#listSettlements/createSettlement/
+// _assertSettlementAccessible).
 router.get(
   '/charges/:chargeId/settlements/:periodKey',
   requireFunctionOrResponsibleCharge(FUNCTIONS.VIEW_PAYMENTS, FUNCTIONS.VIEW_PAYMENTS_SCOPED),

@@ -19,6 +19,14 @@ class MembersRepository extends BaseRepository {
     return rows[0] || null;
   }
 
+  /** Usado al eliminar una cuenta de usuario (`users.service.js#removeGlobal`): sin esto, un
+   * miembro seguiría "vinculado" a una cuenta fantasma para siempre — `_assertUserLinkable`
+   * (members.service.js) rechaza vincular un miembro que ya tiene `user_id`, sin filtrar
+   * eliminados, así que ese miembro quedaría imposible de re-vincular a una cuenta real nueva. */
+  async unlinkFromAllMembers(userId, conn = pool) {
+    await conn.query('UPDATE members SET user_id = NULL WHERE user_id = ?', [userId]);
+  }
+
   async rutExists(rut, clubId, excludeMemberId = null, conn = pool) {
     const sql = excludeMemberId
       ? 'SELECT id FROM members WHERE rut = ? AND club_id = ? AND id != ? AND deleted_at IS NULL LIMIT 1'
@@ -50,57 +58,60 @@ class MembersRepository extends BaseRepository {
    * devolver una página vacía directamente, sin query).
    */
   async paginateByClub(clubId, { limit, offset, sortBy, sortOrder, search, status, groupId, linked, memberIds }) {
-    const params = [clubId];
+    const whereParams = [clubId];
     const where = ['m.club_id = ?', 'm.deleted_at IS NULL'];
     const joins = [];
+    const joinParams = [];
 
     if (status) {
       where.push('m.status = ?');
-      params.push(status);
+      whereParams.push(status);
     }
     if (search) {
       where.push(
         '(m.first_name LIKE ? OR m.middle_name LIKE ? OR m.last_name LIKE ? OR m.second_last_name LIKE ? OR m.email LIKE ? OR m.rut LIKE ?)'
       );
-      params.push(...Array(6).fill(`%${search}%`));
+      whereParams.push(...Array(6).fill(`%${search}%`));
     }
     if (groupId) {
       joins.push('INNER JOIN member_group_members mgm_f ON mgm_f.member_id = m.id AND mgm_f.group_id = ?');
-      params.push(groupId);
+      joinParams.push(groupId);
     }
     if (linked === 'yes') where.push('m.user_id IS NOT NULL');
     if (linked === 'no') where.push('m.user_id IS NULL');
     if (memberIds) {
       if (!memberIds.length) return { rows: [], total: 0 };
       where.push('m.id IN (?)');
-      params.push(memberIds);
+      whereParams.push(memberIds);
     }
 
     const joinSql = joins.join(' ');
     const whereSql = where.join(' AND ');
+    // El JOIN va ANTES que el WHERE en el SQL final, así que sus placeholders deben ir
+    // primero en el array de params (mysql2 hace binding puramente posicional) — antes se
+    // agregaba `groupId` al mismo array que `clubId`/`status`/`search` en orden de inserción,
+    // desalineando todos los placeholders en cuanto se combinaba con el filtro de grupo.
+    const baseParams = [...joinParams, ...whereParams];
 
     const [rows] = await pool.query(
       `SELECT m.* FROM members m ${joinSql} WHERE ${whereSql}
        ORDER BY m.${sortBy} ${sortOrder} LIMIT ? OFFSET ?`,
-      [...params, limit, offset]
+      [...baseParams, limit, offset]
     );
-    const [countRows] = await pool.query(`SELECT COUNT(*) AS total FROM members m ${joinSql} WHERE ${whereSql}`, params);
+    const [countRows] = await pool.query(`SELECT COUNT(*) AS total FROM members m ${joinSql} WHERE ${whereSql}`, baseParams);
     return { rows, total: countRows[0].total };
   }
 
-  /** Lista liviana `{id, ...}` para pickers (scope de rol, selector de grupo/etiqueta, miembros
-   * específicos de un cobro) — sin paginar. Incluye `group_ids`/`tag_ids` (CSV, se parsean en
-   * el service) para que los pickers de charge-form muestren de una a quién ya pertenece cada
-   * miembro sin una consulta aparte por cada uno — `DISTINCT` porque el doble LEFT JOIN arma un
-   * producto cruzado grupo×etiqueta por miembro, que repetiría ids sin él. */
+  /** Lista liviana `{id, ...}` para pickers (scope de rol, selector de grupo, miembros
+   * específicos de un cobro) — sin paginar. Incluye `group_ids` (CSV, se parsea en el service)
+   * para que los pickers de charge-form muestren de una a quién ya pertenece cada miembro sin
+   * una consulta aparte por cada uno. */
   async findOptions(clubId, conn = pool) {
     const [rows] = await conn.query(
       `SELECT m.id, m.first_name, m.middle_name, m.last_name, m.second_last_name,
-              GROUP_CONCAT(DISTINCT mgm.group_id) AS group_ids,
-              GROUP_CONCAT(DISTINCT mtm.tag_id) AS tag_ids
+              GROUP_CONCAT(DISTINCT mgm.group_id) AS group_ids
        FROM members m
        LEFT JOIN member_group_members mgm ON mgm.member_id = m.id
-       LEFT JOIN member_tag_members mtm ON mtm.member_id = m.id
        WHERE m.club_id = ? AND m.deleted_at IS NULL
        GROUP BY m.id
        ORDER BY m.first_name ASC, m.last_name ASC`,
@@ -120,12 +131,17 @@ class MembersRepository extends BaseRepository {
 
   /** Igual que `findByIds` pero trayendo los campos de nombre — usado por
    * payments.service.js#getChargeMatrix para armar las filas (una por miembro) sin tener que
-   * pedir la ficha completa de cada uno. */
+   * pedir la ficha completa de cada uno. `group_ids` (CSV, mismo criterio que `findOptions`) —
+   * lo necesita el filtro por grupo de la matriz de pagos. */
   async findNamesByIds(ids, clubId, conn = pool) {
     if (!ids.length) return [];
     const [rows] = await conn.query(
-      `SELECT id, first_name, middle_name, last_name, second_last_name FROM members
-       WHERE id IN (?) AND club_id = ? AND deleted_at IS NULL ORDER BY first_name ASC, last_name ASC`,
+      `SELECT m.id, m.first_name, m.middle_name, m.last_name, m.second_last_name,
+              GROUP_CONCAT(DISTINCT mgm.group_id) AS group_ids
+       FROM members m
+       LEFT JOIN member_group_members mgm ON mgm.member_id = m.id
+       WHERE m.id IN (?) AND m.club_id = ? AND m.deleted_at IS NULL
+       GROUP BY m.id ORDER BY m.first_name ASC, m.last_name ASC`,
       [ids, clubId]
     );
     return rows;
@@ -184,38 +200,6 @@ class MembersRepository extends BaseRepository {
     if (!groupIds.length) return;
     const values = groupIds.map((groupId) => [groupId, memberId]);
     await conn.query('INSERT INTO member_group_members (group_id, member_id) VALUES ?', [values]);
-  }
-
-  // --- Etiquetas de un miembro / de varios miembros (mismo patrón que Grupos arriba) ---
-
-  async getTagsForMember(memberId, conn = pool) {
-    const [rows] = await conn.query(
-      `SELECT t.id, t.name, t.color FROM member_tag_members mtm
-       INNER JOIN member_tags t ON t.id = mtm.tag_id WHERE mtm.member_id = ? ORDER BY t.name ASC`,
-      [memberId]
-    );
-    return rows;
-  }
-
-  async getTagsForMembers(memberIds, conn = pool) {
-    if (!memberIds.length) return {};
-    const [rows] = await conn.query(
-      `SELECT mtm.member_id, t.id, t.name, t.color FROM member_tag_members mtm
-       INNER JOIN member_tags t ON t.id = mtm.tag_id WHERE mtm.member_id IN (?)`,
-      [memberIds]
-    );
-    const byMember = {};
-    for (const row of rows) {
-      (byMember[row.member_id] ??= []).push({ id: row.id, name: row.name, color: row.color });
-    }
-    return byMember;
-  }
-
-  async setTags(memberId, tagIds, conn = pool) {
-    await conn.query('DELETE FROM member_tag_members WHERE member_id = ?', [memberId]);
-    if (!tagIds.length) return;
-    const values = tagIds.map((tagId) => [tagId, memberId]);
-    await conn.query('INSERT INTO member_tag_members (tag_id, member_id) VALUES ?', [values]);
   }
 
   // --- Valores de campos personalizados ---

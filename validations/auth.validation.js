@@ -13,10 +13,14 @@ const register = [
 ];
 
 const login = [
-  body('email').trim().isEmail().withMessage('Correo electrónico inválido.').normalizeEmail(NORMALIZE_EMAIL_OPTIONS),
+  // Acepta correo O nombre de usuario — a diferencia de `register`/`forgotPassword`, acá no se
+  // puede exigir formato de correo ni normalizarlo como tal (ver users.repository.js#findByIdentifier).
+  body('identifier').trim().notEmpty().withMessage('Ingresa tu correo o nombre de usuario.').isLength({ max: 160 }),
   body('password').notEmpty().withMessage('La contraseña es obligatoria.'),
   body('rememberMe').optional().isBoolean().toBoolean(),
 ];
+
+const loginWithGoogle = [body('idToken').trim().notEmpty().withMessage('Token de Google inválido.')];
 
 const forgotPassword = [body('email').trim().isEmail().withMessage('Correo electrónico inválido.').normalizeEmail(NORMALIZE_EMAIL_OPTIONS)];
 
@@ -36,4 +40,13 @@ const changePassword = [
 
 const defaultClub = [body('clubId').isInt({ min: 1 }).withMessage('clubId inválido.')];
 
-module.exports = { register, login, forgotPassword, resetPassword, verifyEmail, changePassword, defaultClub };
+module.exports = {
+  register,
+  login,
+  loginWithGoogle,
+  forgotPassword,
+  resetPassword,
+  verifyEmail,
+  changePassword,
+  defaultClub,
+};

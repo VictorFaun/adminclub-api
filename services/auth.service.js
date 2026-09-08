@@ -6,6 +6,7 @@ const auditRepository = require('../repositories/audit.repository');
 const clubsRepository = require('../repositories/clubs.repository');
 const membersRepository = require('../repositories/members.repository');
 const chargesRepository = require('../repositories/charges.repository');
+const trainingsRepository = require('../repositories/trainings.repository');
 const platformSettingsRepository = require('../repositories/platformSettings.repository');
 const { withTransaction } = require('../config/database');
 const AppError = require('../helpers/AppError');
@@ -23,6 +24,7 @@ const clubsService = require('./clubs.service');
 const env = require('../config/env');
 const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const { USER_STATUS, TOKEN_TYPE, GLOBAL_ROLES } = require('../config/constants');
+const { OAuth2Client } = require('google-auth-library');
 
 /**
  * Mapea una fila de club (snake_case, tal como la devuelve
@@ -36,6 +38,7 @@ function toClubContextDto(row) {
     ...clubsService.toDto(row),
     membership_status: row.membership_status,
     is_default: row.is_default,
+    requiresProfileCompletion: !!row.requires_profile_completion,
   };
 }
 
@@ -56,8 +59,13 @@ class AuthService {
       email: user.email,
       avatarUrl: toAbsoluteMediaUrl(user.avatar_url),
       phone: user.phone,
+      timezone: user.timezone,
       status: user.status,
       emailVerified: !!user.email_verified_at,
+      // `false` para una cuenta creada 100% desde Google (ver `createUserFromGoogle`) — el
+      // frontend usa esto para mostrar "Crear contraseña" (dispara el flujo YA EXISTENTE de
+      // "¿Olvidaste tu contraseña?", ver loginWithGoogle) en vez de "Cambiar contraseña".
+      hasPassword: !!user.password_hash,
       defaultClubId: user.default_club_id,
       createdAt: user.created_at,
     };
@@ -66,6 +74,12 @@ class AuthService {
   async register({ username, email, password }) {
     const exists = await usersRepository.emailExists(email);
     if (exists) throw AppError.conflict('Ya existe una cuenta registrada con este correo electrónico.');
+    // Necesario desde que `username` sirve también para iniciar sesión (uk_users_username,
+    // migración 031) — antes era solo un nombre para mostrar, ahora dos personas no pueden
+    // compartirlo sin ambigüedad de a cuál de las dos cuentas se refiere el login.
+    if (await usersRepository.usernameExists(username)) {
+      throw AppError.conflict('Ya existe una cuenta registrada con este nombre de usuario.');
+    }
     if (!isStrongPassword(password)) {
       throw AppError.badRequest('La contraseña no cumple con los requisitos de seguridad.');
     }
@@ -81,6 +95,7 @@ class AuthService {
 
     const user = await usersRepository.findById(userId);
     await this.requestEmailVerification(user);
+    await emailService.sendWelcomeEmail(user);
 
     return this.sanitizeUser(user);
   }
@@ -106,12 +121,20 @@ class AuthService {
     await tokensRepository.markUsed({ id: record.id, type: TOKEN_TYPE.VERIFY_EMAIL });
   }
 
-  async login({ email, password, ipAddress, userAgent }) {
-    const user = await usersRepository.findByEmail(email);
-    if (!user) throw AppError.unauthorized('Correo electrónico o contraseña incorrectos.');
+  async login({ identifier, password, ipAddress, userAgent }) {
+    const user = await usersRepository.findByIdentifier(identifier);
+    if (!user) throw AppError.unauthorized('Credenciales incorrectas.');
+
+    // Cuenta creada 100% desde Google (`password_hash` NULL, ver `createUserFromGoogle`) —
+    // `comparePassword` no puede validar contra `null`, y aunque pudiera, no habría "la
+    // contraseña actual" que comparar. Mensaje explícito en vez de "Credenciales incorrectas"
+    // genérico, para que el usuario sepa qué hacer (usar Google, o crear una contraseña).
+    if (!user.password_hash) {
+      throw AppError.unauthorized('Esta cuenta usa Google — inicia sesión con Google o crea una contraseña con "¿Olvidaste tu contraseña?".');
+    }
 
     const passwordMatches = await comparePassword(password, user.password_hash);
-    if (!passwordMatches) throw AppError.unauthorized('Correo electrónico o contraseña incorrectos.');
+    if (!passwordMatches) throw AppError.unauthorized('Credenciales incorrectas.');
 
     if (user.status === USER_STATUS.SUSPENDED) throw AppError.forbidden('Tu cuenta ha sido suspendida.');
     if (user.status === USER_STATUS.BLOCKED) throw AppError.forbidden('Tu cuenta ha sido bloqueada.');
@@ -143,6 +166,89 @@ class AuthService {
     };
   }
 
+  /** Login/registro con Google — verifica el `id_token` que Google Identity Services ya emitió
+   * en el navegador (audience = GOOGLE_CLIENT_ID, ver config/env.js#google), sin flujo de
+   * redirect/callback ni `client_secret` de por medio (no hace falta: la app es un SPA +
+   * Capacitor, no un servidor con sesión propia). Resuelve la cuenta en este orden:
+   * 1) ya vinculada por `google_id` → esa;
+   * 2) existe una cuenta LOCAL con el mismo correo → se VINCULA (pedido explícito: nunca
+   *    duplicar una cuenta por el mismo correo);
+   * 3) no existe ninguna → se crea una nueva, 100% desde los datos de Google.
+   * Termina con la MISMA cola que `login()` (mismos tokens/sesión/auditoría/bootstrap) para no
+   * duplicar esa lógica. */
+  async loginWithGoogle({ idToken, ipAddress, userAgent }) {
+    if (!env.google.clientId) {
+      throw AppError.badRequest('El login con Google no está configurado en este servidor.');
+    }
+
+    const client = new OAuth2Client(env.google.clientId);
+    let payload;
+    try {
+      const ticket = await client.verifyIdToken({ idToken, audience: env.google.clientId });
+      payload = ticket.getPayload();
+    } catch {
+      throw AppError.unauthorized('Token de Google inválido o expirado.');
+    }
+    if (!payload?.sub || !payload.email) throw AppError.unauthorized('Token de Google inválido.');
+
+    let user = await usersRepository.findByGoogleId(payload.sub);
+    if (!user) {
+      const existingByEmail = await usersRepository.findByEmail(payload.email);
+      if (existingByEmail) {
+        await usersRepository.linkGoogleId(existingByEmail.id, payload.sub);
+        user = await usersRepository.findById(existingByEmail.id);
+      } else {
+        const username = await this._generateUsernameFromEmail(payload.email);
+        const userId = await usersRepository.createUserFromGoogle({
+          username,
+          email: payload.email,
+          googleId: payload.sub,
+          avatarUrl: payload.picture || null,
+        });
+        user = await usersRepository.findById(userId);
+        await emailService.sendWelcomeEmail(user);
+      }
+    }
+
+    if (user.status === USER_STATUS.SUSPENDED) throw AppError.forbidden('Tu cuenta ha sido suspendida.');
+    if (user.status === USER_STATUS.BLOCKED) throw AppError.forbidden('Tu cuenta ha sido bloqueada.');
+
+    const { accessToken, refreshToken } = await withTransaction(async (conn) => {
+      const sessionId = await sessionsRepository.createSession({ userId: user.id, ipAddress, userAgent }, conn);
+      return this._issueTokenPair({ userId: user.id, sessionId, ipAddress, userAgent }, conn);
+    });
+
+    await usersRepository.touchLastLogin(user.id);
+    await auditRepository.logAction({
+      userId: user.id,
+      clubId: null,
+      action: 'LOGIN',
+      entityType: 'user',
+      entityId: user.id,
+      changes: { provider: 'google' },
+      ipAddress,
+      userAgent,
+    });
+
+    const bootstrap = await this.resolveLoginClubContext(user.id);
+    return { user: this.sanitizeUser(user), accessToken, refreshToken, ...bootstrap };
+  }
+
+  /** `juan.perez@gmail.com` → `juan.perez`, con sufijo numérico si ya existe (mismo criterio que
+   * la desduplicación de `031_username_unique.sql`, pero resuelto en el momento de crear la
+   * cuenta en vez de en una migración retroactiva). */
+  async _generateUsernameFromEmail(email) {
+    const base = email.split('@')[0].toLowerCase().replace(/[^a-z0-9._-]/g, '') || 'usuario';
+    let candidate = base;
+    let suffix = 0;
+    // eslint-disable-next-line no-await-in-loop
+    while (await usersRepository.usernameExists(candidate)) {
+      suffix += 1;
+      candidate = `${base}${suffix}`;
+    }
+    return candidate;
+  }
+
   /** Determina el club activo tras login según las reglas de negocio del flujo inicial. */
   async resolveLoginClubContext(userId) {
     const clubs = await usersRepository.findClubsForUser(userId);
@@ -158,12 +264,15 @@ class AuthService {
     const clubId = selectedClubRow ? selectedClubRow.id : null;
     const authorization = await permissionService.buildAuthorizationContext(userId, clubId);
     authorization.hasResponsibleCharges = await this._hasResponsibleCharges(userId, clubId);
+    authorization.hasResponsibleTrainings = await this._hasResponsibleTrainings(userId, clubId);
+    const user = await usersRepository.findById(userId);
 
     return {
       clubs: activeClubs.map(toClubContextDto),
       selectedClub: toClubContextDto(selectedClubRow),
       authorization,
       platformTimezone: await this.getPlatformTimezone(),
+      userTimezone: user ? user.timezone : null,
     };
   }
 
@@ -180,6 +289,16 @@ class AuthService {
     const member = await membersRepository.findByUserId(userId, clubId);
     if (!member) return false;
     return chargesRepository.existsResponsibleMember(clubId, member.id);
+  }
+
+  /** Mismo criterio EXACTO que `_hasResponsibleCharges`, para "Entrenamientos" — usado por el
+   * ítem "Entrenamientos" del menú y `trainings-access.guard.ts`/
+   * `permission.middleware.js#requireFunctionOrResponsibleTraining` (que hace el chequeo real). */
+  async _hasResponsibleTrainings(userId, clubId) {
+    if (!clubId) return false;
+    const member = await membersRepository.findByUserId(userId, clubId);
+    if (!member) return false;
+    return trainingsRepository.existsResponsibleMember(clubId, member.id);
   }
 
   /**
@@ -299,6 +418,7 @@ class AuthService {
     const clubs = await usersRepository.findClubsForUser(userId);
     const authorization = await permissionService.buildAuthorizationContext(userId, clubId || null);
     authorization.hasResponsibleCharges = await this._hasResponsibleCharges(userId, clubId || null);
+    authorization.hasResponsibleTrainings = await this._hasResponsibleTrainings(userId, clubId || null);
 
     let selectedClubRow = clubId ? clubs.find((c) => c.id === Number(clubId)) : null;
     if (clubId && !selectedClubRow && permissionService.hasFunction(authorization, 'VIEW_CLUB')) {
@@ -314,6 +434,7 @@ class AuthService {
       selectedClub: toClubContextDto(selectedClubRow),
       authorization,
       platformTimezone: await this.getPlatformTimezone(),
+      userTimezone: user.timezone,
     };
   }
 

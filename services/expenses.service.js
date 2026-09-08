@@ -3,8 +3,12 @@ const expenseCategoriesRepository = require('../repositories/expenseCategories.r
 const auditRepository = require('../repositories/audit.repository');
 const expenseInstancesService = require('./expenseInstances.service');
 const AppError = require('../helpers/AppError');
+const { parseSort } = require('../helpers/pagination');
 const { diffValue, buildDiff } = require('../helpers/auditDiff');
 const { CHARGE_RECURRENCE } = require('../config/constants');
+
+const SORTABLE = ['name', 'amount', 'start_date', 'status', 'recurrence'];
+const ARCHIVED_SORTABLE = ['archived_at', 'name', 'amount'];
 
 class ExpensesService {
   toDto(expense) {
@@ -51,13 +55,13 @@ class ExpensesService {
     if (!found.length) throw AppError.badRequest('La categoría indicada no pertenece a este club.');
   }
 
-  async listForClub(clubId) {
-    const rows = await expensesRepository.findByClub(clubId);
+  async listForClub(clubId, query = {}) {
+    const rows = await expensesRepository.findByClub(clubId, parseSort(query, SORTABLE));
     return rows.map((r) => this.toDto(r));
   }
 
-  async listArchivedForClub(clubId) {
-    const rows = await expensesRepository.findArchivedByClub(clubId);
+  async listArchivedForClub(clubId, query = {}) {
+    const rows = await expensesRepository.findArchivedByClub(clubId, parseSort(query, ARCHIVED_SORTABLE));
     return rows.map((r) => this.toDto(r));
   }
 

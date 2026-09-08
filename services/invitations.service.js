@@ -22,6 +22,7 @@ class InvitationsService {
       expiresAt: row.expires_at,
       status: row.status,
       defaultRoleId: row.default_role_id,
+      requiresMemberProfile: !!row.requires_member_profile,
       note: row.note,
       createdBy: row.created_by,
       creatorName: row.creator_username ?? null,
@@ -30,7 +31,7 @@ class InvitationsService {
     };
   }
 
-  async create(clubId, { maxUses, expiresAt, defaultRoleId, note }, actorId) {
+  async create(clubId, { maxUses, expiresAt, defaultRoleId, note, requiresMemberProfile }, actorId) {
     // Elegir el rol con el que entrará quien use la invitación es, en la práctica,
     // asignar un rol: exige el mismo permiso (ASSIGN_USER_ROLES) que hacerlo a mano
     // desde el perfil de un usuario. Si el actor no lo tiene, se ignora lo que haya
@@ -58,6 +59,7 @@ class InvitationsService {
       expiresAt: expiresAt || null,
       status: 'active',
       defaultRoleId: defaultRoleId || null,
+      requiresMemberProfile: requiresMemberProfile ? 1 : 0,
       note: note || null,
     });
 
@@ -93,6 +95,43 @@ class InvitationsService {
       entityType: 'invitation',
       entityId: invitationId,
       changes: { status: { from: invitation.status, to: 'revoked' } },
+    });
+  }
+
+  async reactivate(clubId, invitationId, actorId) {
+    const invitation = await invitationsRepository.findById(invitationId);
+    if (!invitation || invitation.club_id !== clubId) throw AppError.notFound('Invitación no encontrada.');
+    if (invitation.status !== 'revoked') throw AppError.conflict('Solo se puede reactivar una invitación revocada.');
+    if (invitation.expires_at && new Date(invitation.expires_at) < new Date()) {
+      throw AppError.conflict('Esta invitación ya expiró; crea una nueva en su lugar.');
+    }
+
+    await invitationsRepository.setStatus(invitationId, 'active');
+    await auditRepository.logAction({
+      userId: actorId,
+      clubId,
+      action: 'INVITATION_REACTIVATED',
+      entityType: 'invitation',
+      entityId: invitationId,
+      changes: { status: { from: 'revoked', to: 'active' } },
+    });
+  }
+
+  async remove(clubId, invitationId, actorId) {
+    const invitation = await invitationsRepository.findById(invitationId);
+    if (!invitation || invitation.club_id !== clubId) throw AppError.notFound('Invitación no encontrada.');
+    // Una invitación activa se revoca primero (mismo criterio que `revoke()` a la inversa): no
+    // se permite borrar de un tirón algo que todavía se puede estar usando para unirse al club.
+    if (invitation.status === 'active') throw AppError.conflict('Revoca la invitación antes de eliminarla.');
+
+    await invitationsRepository.deleteById(invitationId);
+    await auditRepository.logAction({
+      userId: actorId,
+      clubId,
+      action: 'INVITATION_DELETED',
+      entityType: 'invitation',
+      entityId: invitationId,
+      changes: { status: invitation.status },
     });
   }
 }

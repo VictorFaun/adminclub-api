@@ -3,12 +3,12 @@ const ApiResponse = require('../helpers/ApiResponse');
 const expensesService = require('../services/expenses.service');
 
 const list = asyncHandler(async (req, res) => {
-  const items = await expensesService.listForClub(req.club.id);
+  const items = await expensesService.listForClub(req.club.id, req.query);
   return ApiResponse.ok(res, items, 'Gastos obtenidos correctamente.');
 });
 
 const listArchived = asyncHandler(async (req, res) => {
-  const items = await expensesService.listArchivedForClub(req.club.id);
+  const items = await expensesService.listArchivedForClub(req.club.id, req.query);
   return ApiResponse.ok(res, items, 'Gastos archivados obtenidos correctamente.');
 });
 

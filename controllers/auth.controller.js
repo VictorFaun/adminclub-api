@@ -40,6 +40,17 @@ const login = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, result, 'Sesión iniciada correctamente.');
 });
 
+const loginWithGoogle = asyncHandler(async (req, res) => {
+  const result = await authService.loginWithGoogle({
+    idToken: req.body.idToken,
+    ipAddress: req.ip,
+    userAgent: req.headers['user-agent'],
+  });
+
+  setRefreshCookie(res, result.refreshToken);
+  return ApiResponse.ok(res, result, 'Sesión iniciada correctamente.');
+});
+
 const refresh = asyncHandler(async (req, res) => {
   const refreshToken = getRefreshTokenFromRequest(req);
   const result = await authService.refresh({
@@ -109,6 +120,7 @@ const setDefaultClub = asyncHandler(async (req, res) => {
 module.exports = {
   register,
   login,
+  loginWithGoogle,
   refresh,
   logout,
   logoutAll,

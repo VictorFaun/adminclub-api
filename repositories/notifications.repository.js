@@ -15,7 +15,7 @@ class NotificationsRepository extends BaseRepository {
     return result.insertId;
   }
 
-  async paginateByUser(userId, { limit, offset, unreadOnly, clubId }) {
+  async paginateByUser(userId, { limit, offset, sortBy = 'created_at', sortOrder = 'DESC', unreadOnly, clubId }) {
     const params = [userId];
     const where = ['user_id = ?'];
     if (unreadOnly) where.push('is_read = 0');
@@ -25,7 +25,7 @@ class NotificationsRepository extends BaseRepository {
     }
     const whereSql = where.join(' AND ');
     const [rows] = await pool.query(
-      `SELECT * FROM notifications WHERE ${whereSql} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      `SELECT * FROM notifications WHERE ${whereSql} ORDER BY ${sortBy} ${sortOrder} LIMIT ? OFFSET ?`,
       [...params, limit, offset]
     );
     const [countRows] = await pool.query(`SELECT COUNT(*) AS total FROM notifications WHERE ${whereSql}`, params);

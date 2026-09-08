@@ -6,10 +6,12 @@ const { emitToUser } = require('../sockets');
 
 class NotificationsService {
   async listForUser(userId, query) {
-    const { limit, offset, page } = parsePagination(query, ['created_at']);
+    const { limit, offset, sortBy, sortOrder, page } = parsePagination(query, ['created_at', 'is_read']);
     const { rows, total, unreadCount } = await notificationsRepository.paginateByUser(userId, {
       limit,
       offset,
+      sortBy,
+      sortOrder,
       unreadOnly: query.unreadOnly === 'true',
       clubId: query.clubId ? Number(query.clubId) : null,
     });

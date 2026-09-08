@@ -78,15 +78,15 @@ class ChargeInstancesRepository extends BaseRepository {
     return map;
   }
 
+  // Ya NO trae "el" responsable del cobro pegado con un JOIN (con varios responsables por grupo,
+  // no hay uno solo que resolver acá con un simple JOIN) — payments.service.js#listForMember
+  // arma `charge_responsible_member_id/name` aparte, con charges.repository.js#resolveResponsibles.
   async findForMember(memberId, conn = pool) {
     const [rows] = await conn.query(
       `SELECT ci.*, c.name AS charge_name, c.color AS charge_color, c.recurrence AS charge_recurrence,
-              c.purpose AS charge_purpose,
-              c.responsible_member_id AS charge_responsible_member_id,
-              NULLIF(CONCAT_WS(' ', rm.first_name, rm.middle_name, rm.last_name, rm.second_last_name), '') AS charge_responsible_member_name
+              c.purpose AS charge_purpose
        FROM charge_instances ci
        INNER JOIN charges c ON c.id = ci.charge_id
-       LEFT JOIN members rm ON rm.id = c.responsible_member_id
        WHERE ci.member_id = ? AND c.deleted_at IS NULL
        ORDER BY ci.due_date DESC`,
       [memberId]
@@ -129,6 +129,21 @@ class ChargeInstancesRepository extends BaseRepository {
       "UPDATE charge_instances SET status = 'pending', exempt_reason = NULL, exempt_type = NULL, exempt_by = NULL, exempt_at = NULL WHERE id = ?",
       [instanceId]
     );
+  }
+
+  /** Aplica un monto nuevo a las instancias YA GENERADAS de un miembro desde `fromDate` en
+   * adelante — usado por charges.service.js#update cuando se edita el monto (general o de un
+   * target) de un cobro mensual/anual con una fecha de vigencia. Deliberadamente acotado a
+   * `status = 'pending'`: una instancia `partial`/`paid` ya tiene plata real abonada contra el
+   * monto viejo, tocarle el monto ahora dejaría su estado (y lo que "falta pagar") incoherente
+   * con lo que la persona ya pagó. */
+  async updateAmountForMember(chargeId, memberId, amount, fromDate, conn = pool) {
+    const [result] = await conn.query(
+      `UPDATE charge_instances SET amount = ?
+       WHERE charge_id = ? AND member_id = ? AND due_date >= ? AND status = 'pending'`,
+      [amount, chargeId, memberId, fromDate]
+    );
+    return result.affectedRows;
   }
 
   /** Una instancia puntual de UN cobro para UN miembro en UN período — usado por

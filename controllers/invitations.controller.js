@@ -17,4 +17,14 @@ const revoke = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, null, 'Invitación revocada correctamente.');
 });
 
-module.exports = { list, create, revoke };
+const reactivate = asyncHandler(async (req, res) => {
+  await invitationsService.reactivate(req.club.id, Number(req.params.id), req.user.id);
+  return ApiResponse.ok(res, null, 'Invitación reactivada correctamente.');
+});
+
+const remove = asyncHandler(async (req, res) => {
+  await invitationsService.remove(req.club.id, Number(req.params.id), req.user.id);
+  return ApiResponse.ok(res, null, 'Invitación eliminada correctamente.');
+});
+
+module.exports = { list, create, revoke, reactivate, remove };

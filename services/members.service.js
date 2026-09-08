@@ -1,7 +1,6 @@
 const membersRepository = require('../repositories/members.repository');
 const memberFieldsRepository = require('../repositories/memberFields.repository');
 const memberGroupsRepository = require('../repositories/memberGroups.repository');
-const memberTagsRepository = require('../repositories/memberTags.repository');
 const usersRepository = require('../repositories/users.repository');
 const auditRepository = require('../repositories/audit.repository');
 const permissionService = require('./permission.service');
@@ -18,7 +17,13 @@ class MembersService {
     return [m.first_name, m.middle_name, m.last_name, m.second_last_name].filter(Boolean).join(' ');
   }
 
-  toDto(member, { groups = [], tags = [], fieldValues = [], fieldsCatalog = [], linkedUsername = null } = {}) {
+  /** "Primer nombre + primer apellido" — nombre corto para vistas de pagos (espacio angosto,
+   * ver member-payments.page.html); el resto de la app sigue usando `fullName`. */
+  _shortName(m) {
+    return [m.first_name, m.last_name].filter(Boolean).join(' ');
+  }
+
+  toDto(member, { groups = [], fieldValues = [], fieldsCatalog = [], linkedUsername = null } = {}) {
     const valueByField = new Map(fieldValues.map((v) => [v.field_id, v.value]));
     const customFields = {};
     for (const field of fieldsCatalog) {
@@ -34,6 +39,7 @@ class MembersService {
       lastName: member.last_name,
       secondLastName: member.second_last_name,
       fullName: this._fullName(member),
+      shortName: this._shortName(member),
       email: member.email,
       phone: member.phone,
       rut: member.rut,
@@ -42,7 +48,6 @@ class MembersService {
       userId: member.user_id,
       linkedUsername,
       groups: groups.map((g) => ({ id: g.id, name: g.name, color: g.color })),
-      tags: tags.map((t) => ({ id: t.id, name: t.name, color: t.color })),
       customFields,
       createdAt: member.created_at,
     };
@@ -110,14 +115,13 @@ class MembersService {
   }
 
   async _buildDto(member) {
-    const [groups, tags, fieldValues, fieldsCatalog, linkedUser] = await Promise.all([
+    const [groups, fieldValues, fieldsCatalog, linkedUser] = await Promise.all([
       membersRepository.getGroupsForMember(member.id),
-      membersRepository.getTagsForMember(member.id),
       membersRepository.getFieldValues(member.id),
       memberFieldsRepository.findByClub(member.club_id),
       member.user_id ? usersRepository.findById(member.user_id) : null,
     ]);
-    return this.toDto(member, { groups, tags, fieldValues, fieldsCatalog, linkedUsername: linkedUser?.username ?? null });
+    return this.toDto(member, { groups, fieldValues, fieldsCatalog, linkedUsername: linkedUser?.username ?? null });
   }
 
   async listForClub(clubId, query, authContext, actorId) {
@@ -137,9 +141,8 @@ class MembersService {
     });
 
     const ids = rows.map((r) => r.id);
-    const [groupsByMember, tagsByMember, fieldValuesByMember, fieldsCatalog] = await Promise.all([
+    const [groupsByMember, fieldValuesByMember, fieldsCatalog] = await Promise.all([
       membersRepository.getGroupsForMembers(ids),
-      membersRepository.getTagsForMembers(ids),
       membersRepository.getFieldValuesForMembers(ids),
       memberFieldsRepository.findByClub(clubId),
     ]);
@@ -147,7 +150,6 @@ class MembersService {
     const items = rows.map((row) =>
       this.toDto(row, {
         groups: groupsByMember[row.id] || [],
-        tags: tagsByMember[row.id] || [],
         fieldValues: fieldValuesByMember[row.id] || [],
         fieldsCatalog,
       })
@@ -169,7 +171,6 @@ class MembersService {
       id: r.id,
       fullName: this._fullName(r),
       groupIds: r.group_ids ? r.group_ids.split(',').map(Number) : [],
-      tagIds: r.tag_ids ? r.tag_ids.split(',').map(Number) : [],
     }));
   }
 
@@ -184,13 +185,6 @@ class MembersService {
       const found = await memberGroupsRepository.findByIds(data.groupIds, clubId);
       if (found.length !== data.groupIds.length) throw AppError.badRequest('Uno o más grupos no pertenecen a este club.');
       groupIds = data.groupIds;
-    }
-
-    let tagIds = [];
-    if (data.tagIds?.length) {
-      const found = await memberTagsRepository.findByIds(data.tagIds, clubId);
-      if (found.length !== data.tagIds.length) throw AppError.badRequest('Una o más etiquetas no pertenecen a este club.');
-      tagIds = data.tagIds;
     }
 
     // Se valida siempre (no solo "si vino customFields"): si el club tiene campos
@@ -217,7 +211,6 @@ class MembersService {
         conn
       );
       if (groupIds.length) await membersRepository.setGroups(id, groupIds, conn);
-      if (tagIds.length) await membersRepository.setTags(id, tagIds, conn);
       if (Object.keys(fieldEntries).length) await membersRepository.upsertFieldValues(id, fieldEntries, conn);
       return id;
     });
@@ -232,6 +225,47 @@ class MembersService {
     });
 
     return this._buildDto(await membersRepository.findActiveById(memberId));
+  }
+
+  /** Autoservicio (POST /members/me) — única forma de crear un member SIN requireFunction (ver
+   * middlewares/permission.middleware.js#assertProfileNotPending y api/CLAUDE.md). Solo
+   * utilizable por alguien cuya membresía quedó marcada `requires_profile_completion` al unirse
+   * con una invitación configurada así (`clubs.service.js#joinByCode`) — cualquier otro usuario
+   * activo normal no tiene nada que "completar" acá. */
+  async createSelf(clubId, userId, data) {
+    const membership = await usersRepository.findMembership(userId, clubId);
+    if (!membership?.requires_profile_completion) {
+      throw AppError.conflict('No tienes una ficha pendiente por completar.');
+    }
+
+    // Reintentable: si un envío anterior ya creó el member pero se cortó antes de limpiar el
+    // flag (o el cliente reintenta tras un corte de red), no se debe fallar con "ya vinculado" —
+    // se reusa lo que ya exista y solo se limpia el flag.
+    let member = await membersRepository.findByUserId(userId, clubId);
+    if (!member) {
+      // Whitelist explícita (no un simple `...data`): `status`/`groupIds` son
+      // administrativos — `validations/members.validation.js#createMemberSelf` ya no los
+      // define, pero acá es la fuente de verdad real (mismo criterio que
+      // invitations.service.js#create con `defaultRoleId`: nunca confiar en que el body no
+      // los traiga solo porque el frontend no los muestra).
+      const safeData = {
+        firstName: data.firstName,
+        middleName: data.middleName,
+        lastName: data.lastName,
+        secondLastName: data.secondLastName,
+        email: data.email,
+        phone: data.phone,
+        rut: data.rut,
+        birthDate: data.birthDate,
+        customFields: data.customFields,
+        userId,
+      };
+      await this.create(clubId, safeData, userId);
+      member = await membersRepository.findByUserId(userId, clubId);
+    }
+
+    await usersRepository.setRequiresProfileCompletion(userId, clubId, false);
+    return this._buildDto(member);
   }
 
   async update(clubId, memberId, data, actorId, authContext) {
@@ -264,22 +298,12 @@ class MembersService {
       groupIds = data.groupIds;
     }
 
-    let tagIds = null;
-    if (data.tagIds !== undefined) {
-      if (data.tagIds.length) {
-        const found = await memberTagsRepository.findByIds(data.tagIds, clubId);
-        if (found.length !== data.tagIds.length) throw AppError.badRequest('Una o más etiquetas no pertenecen a este club.');
-      }
-      tagIds = data.tagIds;
-    }
-
     const fieldEntries =
       data.customFields !== undefined ? await this._validateCustomFields(clubId, data.customFields, { requireRequired: false }) : null;
 
     await withTransaction(async (conn) => {
       if (Object.keys(updates).length) await membersRepository.updateById(memberId, updates, conn);
       if (groupIds !== null) await membersRepository.setGroups(memberId, groupIds, conn);
-      if (tagIds !== null) await membersRepository.setTags(memberId, tagIds, conn);
       if (fieldEntries && Object.keys(fieldEntries).length) await membersRepository.upsertFieldValues(memberId, fieldEntries, conn);
     });
 

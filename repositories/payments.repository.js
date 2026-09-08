@@ -9,7 +9,7 @@ class PaymentsRepository extends BaseRepository {
   /** `paid_to_member_name`: `NULLIF(CONCAT_WS(...), '')` da `NULL` cuando `paid_to_member_id`
    * es `NULL` ("a Tesorería", pago directo sin intermediario) — `CONCAT_WS` solo, sin el
    * `NULLIF`, da `''` en ese caso, no `NULL` (hay que forzarlo). Mismo patrón que
-   * charges.repository.js#findActiveById para `responsible_member_name`. */
+   * charges.repository.js#getResponsibleMembers para `responsible_member_name`. */
   async findActiveById(id, conn = pool) {
     const [rows] = await conn.query(
       `SELECT p.*, NULLIF(CONCAT_WS(' ', ptm.first_name, ptm.middle_name, ptm.last_name, ptm.second_last_name), '') AS paid_to_member_name
@@ -194,24 +194,27 @@ class PaymentsRepository extends BaseRepository {
     return byMonth;
   }
 
-  /** `{ [periodLabel]: totalQueQuedóEnManosDelResponsable }` — suma los pagos de miembros de
-   * este cobro, agrupados por período, filtrados a los que quedaron "a nombre" del responsable
-   * (`paid_to_member_id = responsibleMemberId`; lo pagado directo a Tesorería, `NULL`, NO
-   * cuenta acá — ya llegó, no hay nada que transferir por eso). Usado por
-   * getChargeMatrix#settlements para calcular cuánto le falta transferir al responsable. */
-  async sumPaidToByChargeAndPeriods(chargeId, responsibleMemberId, periodLabels, conn = pool) {
+  /** `{ [periodLabel]: { [responsibleMemberId]: totalQueQuedóEnSuMano } }` — suma los pagos de
+   * miembros de este cobro, agrupados por período Y por a quién quedaron "a nombre" (`paid_to_
+   * member_id`; lo pagado directo a Tesorería, `NULL`, se excluye — ya llegó, no hay nada que
+   * transferir por eso). Desglosado por responsable porque, con varios por cobro, cada uno tiene
+   * su propio saldo pendiente de transferir. Usado por getChargeMatrix#_computeSettlements. */
+  async sumPaidToByChargeAndPeriods(chargeId, periodLabels, conn = pool) {
     if (!periodLabels.length) return {};
     const [rows] = await conn.query(
-      `SELECT ci.period_label, COALESCE(SUM(pa.amount), 0) AS total
+      `SELECT ci.period_label, p.paid_to_member_id, COALESCE(SUM(pa.amount), 0) AS total
        FROM payment_allocations pa
        INNER JOIN payments p ON p.id = pa.payment_id
        INNER JOIN charge_instances ci ON ci.id = pa.charge_instance_id
-       WHERE ci.charge_id = ? AND ci.period_label IN (?) AND p.paid_to_member_id = ?
-       GROUP BY ci.period_label`,
-      [chargeId, periodLabels, responsibleMemberId]
+       WHERE ci.charge_id = ? AND ci.period_label IN (?) AND p.paid_to_member_id IS NOT NULL
+       GROUP BY ci.period_label, p.paid_to_member_id`,
+      [chargeId, periodLabels]
     );
     const byPeriod = {};
-    for (const row of rows) byPeriod[row.period_label] = Number(row.total);
+    for (const row of rows) {
+      if (!byPeriod[row.period_label]) byPeriod[row.period_label] = {};
+      byPeriod[row.period_label][row.paid_to_member_id] = Number(row.total);
+    }
     return byPeriod;
   }
 

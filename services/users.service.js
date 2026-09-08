@@ -1,5 +1,6 @@
 const usersRepository = require('../repositories/users.repository');
 const rolesRepository = require('../repositories/roles.repository');
+const membersRepository = require('../repositories/members.repository');
 const auditRepository = require('../repositories/audit.repository');
 const AppError = require('../helpers/AppError');
 const { parsePagination, buildMeta } = require('../helpers/pagination');
@@ -46,6 +47,9 @@ class UsersService {
   async createInClub(clubId, data, actorId) {
     const exists = await usersRepository.emailExists(data.email);
     if (exists) throw AppError.conflict('Ya existe una cuenta registrada con este correo electrónico.');
+    if (await usersRepository.usernameExists(data.username)) {
+      throw AppError.conflict('Ya existe una cuenta registrada con este nombre de usuario.');
+    }
     if (!isStrongPassword(data.password)) {
       throw AppError.badRequest('La contraseña no cumple con los requisitos de seguridad.');
     }
@@ -195,6 +199,10 @@ class UsersService {
     const membership = await usersRepository.findMembership(userId, clubId);
     if (!membership) throw AppError.notFound('El usuario no pertenece a este club.');
 
+    if (data.username !== undefined && data.username !== user.username && (await usersRepository.usernameExists(data.username, userId))) {
+      throw AppError.conflict('Ya existe una cuenta registrada con este nombre de usuario.');
+    }
+
     const updates = {};
     if (data.username !== undefined) updates.username = data.username;
     if (data.phone !== undefined) updates.phone = data.phone;
@@ -317,21 +325,46 @@ class UsersService {
     });
     // A diferencia de listForClub, acá no hay un club activo del que listar roles, pero sí
     // tiene sentido mostrar a qué clubes pertenece cada cuenta (vista de plataforma).
-    const clubsByUser = await usersRepository.findClubsForUsers(rows.map((r) => r.id));
+    const userIds = rows.map((r) => r.id);
+    const [clubsByUser, globalRolesByUser] = await Promise.all([
+      usersRepository.findClubsForUsers(userIds),
+      usersRepository.findGlobalRoleCodesForUsers(userIds),
+    ]);
+    // El frontend usa esto solo para ocultar/deshabilitar los botones de editar/desactivar/
+    // eliminar sobre un Super Admin (cosmético) — la barrera real son los guards agregados en
+    // updateGlobal/updateStatusGlobal/removeGlobal de este mismo archivo.
     return {
-      items: rows.map((r) => ({ ...this.sanitize(r), clubs: clubsByUser[r.id] || [] })),
+      items: rows.map((r) => ({
+        ...this.sanitize(r),
+        clubs: clubsByUser[r.id] || [],
+        isSuperAdmin: permissionService.isSuperAdmin(globalRolesByUser[r.id] || []),
+      })),
       meta: buildMeta({ page, limit, total }),
     };
+  }
+
+  /** Un Super Admin no se puede editar/suspender/eliminar desde la vista de plataforma — evita
+   * que un admin con EDIT_ALL_USERS/SUSPEND_ALL_USERS (funcionalidades bastante más comunes que
+   * ser Super Admin) le quite acceso a la cuenta que administra la plataforma entera, sea por
+   * error o a propósito. Mismo criterio de ubicación que el resto de estos guards (arriba del
+   * método, service layer, `AppError.badRequest`). */
+  async _assertTargetNotSuperAdmin(userId, message) {
+    const globalRoleCodes = await permissionService.getGlobalRoleCodes(userId);
+    if (permissionService.isSuperAdmin(globalRoleCodes)) throw AppError.badRequest(message);
   }
 
   /** Edita datos básicos de cualquier usuario de la plataforma (EDIT_ALL_USERS), sin depender de membresía a un club. */
   async updateGlobal(userId, data, actorId) {
     const user = await usersRepository.findById(userId);
     if (!user) throw AppError.notFound('Usuario no encontrado.');
+    await this._assertTargetNotSuperAdmin(userId, 'No puedes editar a un Super Admin.');
 
     if (data.email !== undefined && data.email !== user.email) {
       const exists = await usersRepository.emailExists(data.email, userId);
       if (exists) throw AppError.conflict('Ya existe una cuenta registrada con este correo electrónico.');
+    }
+    if (data.username !== undefined && data.username !== user.username && (await usersRepository.usernameExists(data.username, userId))) {
+      throw AppError.conflict('Ya existe una cuenta registrada con este nombre de usuario.');
     }
 
     const updates = {};
@@ -368,6 +401,7 @@ class UsersService {
     if (userId === actorId) throw AppError.badRequest('No puedes cambiar tu propio estado.');
     const user = await usersRepository.findById(userId);
     if (!user) throw AppError.notFound('Usuario no encontrado.');
+    await this._assertTargetNotSuperAdmin(userId, 'No puedes cambiar el estado de un Super Admin.');
 
     await usersRepository.updateById(userId, { status });
     const changes = buildDiff({ status: diffValue(user.status, status) });
@@ -384,6 +418,42 @@ class UsersService {
 
     const updated = await usersRepository.findById(userId);
     return this.sanitize(updated);
+  }
+
+  /** Elimina (soft-delete) la cuenta de un usuario de plataforma — solo si ya está
+   * suspendida/bloqueada (mismo criterio pedido para mostrar el botón en la UI): no tiene
+   * sentido eliminar de un tirón una cuenta que todavía puede operar con normalidad, sin pasar
+   * primero por la suspensión. No hace falta tocar `user_clubs`/`user_roles`: `authMiddleware`
+   * ya corta cualquier request con `user.deleted_at` seteado, así que una sesión activa deja de
+   * funcionar de inmediato. */
+  async removeGlobal(userId, actorId) {
+    if (userId === actorId) throw AppError.badRequest('No puedes eliminar tu propia cuenta.');
+    const user = await usersRepository.findById(userId);
+    if (!user || user.deleted_at) throw AppError.notFound('Usuario no encontrado.');
+    // No debería poder llegar acá igual (para eliminar primero hay que suspenderlo, y eso ya
+    // está bloqueado para un Super Admin) — se deja igual como segunda barrera, mismo criterio
+    // que el resto de la app ("cosmético en el frontend, la barrera real es siempre el backend").
+    await this._assertTargetNotSuperAdmin(userId, 'No puedes eliminar a un Super Admin.');
+    if (![USER_STATUS.SUSPENDED, USER_STATUS.BLOCKED].includes(user.status)) {
+      throw AppError.conflict('Solo se pueden eliminar cuentas ya suspendidas o bloqueadas.');
+    }
+
+    await withTransaction(async (conn) => {
+      // Sin esto, cualquier miembro vinculado a esta cuenta quedaría "vinculado" para siempre a
+      // una cuenta fantasma (_assertUserLinkable rechaza vincular un miembro que ya tiene
+      // user_id, sin filtrar eliminados).
+      await membersRepository.unlinkFromAllMembers(userId, conn);
+      await usersRepository.softDelete(userId, conn);
+    });
+
+    await auditRepository.logAction({
+      userId: actorId,
+      clubId: null,
+      action: 'PLATFORM_USER_DELETED',
+      entityType: 'user',
+      entityId: userId,
+      changes: { email: user.email, status: user.status },
+    });
   }
 
   async getActivity(userId, clubId, limit = 20) {

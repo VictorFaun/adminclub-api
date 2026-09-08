@@ -12,4 +12,9 @@ const auditLogs = asyncHandler(async (req, res) => {
   return ApiResponse.paginated(res, items, meta, 'Registro de auditoría obtenido correctamente.');
 });
 
-module.exports = { overview, auditLogs };
+const auditLogFilters = asyncHandler(async (req, res) => {
+  const data = await dashboardService.getAuditLogFilters(req.club.id);
+  return ApiResponse.ok(res, data, 'Filtros de auditoría obtenidos correctamente.');
+});
+
+module.exports = { overview, auditLogs, auditLogFilters };

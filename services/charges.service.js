@@ -1,17 +1,21 @@
 const chargesRepository = require('../repositories/charges.repository');
+const chargeInstancesRepository = require('../repositories/chargeInstances.repository');
 const membersRepository = require('../repositories/members.repository');
 const memberGroupsRepository = require('../repositories/memberGroups.repository');
-const memberTagsRepository = require('../repositories/memberTags.repository');
 const auditRepository = require('../repositories/audit.repository');
 const chargeInstancesService = require('./chargeInstances.service');
 const permissionService = require('./permission.service');
 const AppError = require('../helpers/AppError');
 const { withTransaction } = require('../config/database');
+const { parseSort } = require('../helpers/pagination');
 const { diffValue, buildDiff } = require('../helpers/auditDiff');
 const { CHARGE_RECURRENCE, FUNCTIONS } = require('../config/constants');
 
+const SORTABLE = ['name', 'amount', 'start_date', 'status', 'recurrence'];
+const ARCHIVED_SORTABLE = ['archived_at', 'name', 'amount'];
+
 class ChargesService {
-  toDto(charge, { targetGroups = [], targetTags = [], targetMembers = [], exclusionMemberIds = [] } = {}) {
+  toDto(charge, { targetGroups = [], targetMembers = [], exclusionMemberIds = [], responsibles = [] } = {}) {
     return {
       id: charge.id,
       uuid: charge.uuid,
@@ -34,15 +38,17 @@ class ChargesService {
       // pasa por Tesorería, y por eso exige responsable (ver _assertPurposeValid). Solo tiene
       // sentido para cobros únicos.
       purpose: charge.purpose,
-      // Responsable del cobro — opcional si `purpose` es 'treasury' (ej. el entrenador que junta
-      // la plata antes de entregarla a tesorería, alternativa a pagarle directo a Tesorería);
-      // OBLIGATORIO si `purpose` es 'external' (ver payments.service.js#_validatePaidToMemberId).
-      responsibleMemberId: charge.responsible_member_id,
-      responsibleMemberName: charge.responsible_member_name ?? null,
-      // `{id, amount}` — el nombre del target (grupo/etiqueta/miembro) es `id` en los 3 para que
-      // el frontend pueda pasarlos tal cual a <app-priced-target-picker>, sin remapear.
+      // Responsables del cobro — cada uno opcionalmente vinculado a un grupo específico
+      // (`groupId: null` = "todos los grupos", el catch-all); opcional en total si `purpose` es
+      // 'treasury' (ej. el entrenador que junta la plata antes de entregarla a tesorería,
+      // alternativa a pagarle directo a Tesorería); AL MENOS UNO es obligatorio si `purpose` es
+      // 'external' (ver payments.service.js#_validatePaidToMemberId). Quién es "el" responsable
+      // de un miembro puntual se resuelve con prioridad por grupo, ver
+      // charges.repository.js#resolveResponsibles — no hay un solo responsable "del cobro".
+      responsibles: responsibles.map((r) => ({ memberId: r.memberId, memberName: r.memberName, groupId: r.groupId, groupName: r.groupName })),
+      // `{id, amount}` — el nombre del target (grupo/miembro) es `id` en ambos para que el
+      // frontend pueda pasarlos tal cual a <app-priced-target-picker>, sin remapear.
       targetGroups: targetGroups.map((g) => ({ id: g.groupId, amount: g.amount })),
-      targetTags: targetTags.map((t) => ({ id: t.tagId, amount: t.amount })),
       targetMembers: targetMembers.map((m) => ({ id: m.memberId, amount: m.amount })),
       exclusionMemberIds,
       createdAt: charge.created_at,
@@ -64,13 +70,13 @@ class ChargesService {
     return { dueDay, dueMonth };
   }
 
-  /** Valida que cada grupo/etiqueta/miembro apuntado exista en el club y que cada monto sea
-   * válido (defensa en profundidad — `charges.validation.js` ya lo exige, pero el service es la
-   * fuente de verdad) — `targetGroups`/`targetTags`/`targetMembers` vienen en la forma cruda del
-   * payload (`{groupId,amount}`/`{tagId,amount}`/`{memberId,amount}`). */
-  async _resolveTargets(clubId, { targetMembers = [], targetGroups = [], targetTags = [], exclusionMemberIds = [] }) {
-    for (const t of [...targetGroups, ...targetTags, ...targetMembers]) {
-      if (!(Number(t.amount) > 0)) throw AppError.badRequest('Cada grupo, etiqueta o miembro apuntado necesita un monto mayor a $0.');
+  /** Valida que cada grupo/miembro apuntado exista en el club y que cada monto sea válido
+   * (defensa en profundidad — `charges.validation.js` ya lo exige, pero el service es la
+   * fuente de verdad) — `targetGroups`/`targetMembers` vienen en la forma cruda del payload
+   * (`{groupId,amount}`/`{memberId,amount}`). */
+  async _resolveTargets(clubId, { targetMembers = [], targetGroups = [], exclusionMemberIds = [] }) {
+    for (const t of [...targetGroups, ...targetMembers]) {
+      if (!(Number(t.amount) > 0)) throw AppError.badRequest('Cada grupo o miembro apuntado necesita un monto mayor a $0.');
     }
 
     const memberIds = targetMembers.map((t) => t.memberId);
@@ -84,57 +90,63 @@ class ChargesService {
       const found = await memberGroupsRepository.findByIds(groupIds, clubId);
       if (found.length !== groupIds.length) throw AppError.badRequest('Uno o más grupos no pertenecen a este club.');
     }
-    const tagIds = targetTags.map((t) => t.tagId);
-    if (tagIds.length) {
-      const found = await memberTagsRepository.findByIds(tagIds, clubId);
-      if (found.length !== tagIds.length) throw AppError.badRequest('Una o más etiquetas no pertenecen a este club.');
-    }
-    return { targetMembers, targetGroups, targetTags, exclusionMemberIds };
+    return { targetMembers, targetGroups, exclusionMemberIds };
   }
 
-  /** `responsibleMemberId` es opcional y, a diferencia de los targets, no necesita pertenecer a
-   * los grupos/miembros apuntados por el cobro — puede ser cualquier miembro del club (ej. el
-   * entrenador de una categoría, aunque él mismo no pague este cobro). */
-  async _assertResponsibleMemberValid(clubId, responsibleMemberId) {
-    if (!responsibleMemberId) return;
-    const found = await membersRepository.findByIds([responsibleMemberId], clubId);
-    if (!found.length) throw AppError.badRequest('El responsable indicado no pertenece a este club.');
+  /** Cada responsable (`{memberId, groupId}`) debe pertenecer al club — a diferencia de los
+   * targets, el miembro responsable no necesita pagar este cobro (puede ser el entrenador de una
+   * categoría, aunque él mismo no participe). Si trae `groupId` (no `null`, "todos los grupos"),
+   * ese grupo además debe ser uno de los apuntados por el cobro (`targetGroupIds`) — no tiene
+   * sentido asignar un responsable a un grupo al que el cobro ni siquiera aplica. */
+  async _assertResponsiblesValid(clubId, responsibles, targetGroupIds) {
+    if (!responsibles.length) return;
+    const memberIds = [...new Set(responsibles.map((r) => r.memberId))];
+    const found = await membersRepository.findByIds(memberIds, clubId);
+    if (found.length !== memberIds.length) throw AppError.badRequest('Uno o más responsables no pertenecen a este club.');
+
+    const targetGroupSet = new Set(targetGroupIds);
+    for (const r of responsibles) {
+      if (r.groupId != null && !targetGroupSet.has(r.groupId)) {
+        throw AppError.badRequest('El grupo de un responsable debe ser uno de los grupos apuntados por el cobro.');
+      }
+    }
   }
 
   /** `purpose: 'external'` solo tiene sentido para un cobro único (ej. la inscripción puntual de
    * un campeonato) — uno recurrente ya es plata del club período tras período, no una recolección
-   * puntual para un fin externo. Además EXIGE responsable: sin él no habría a quién pagarle (un
-   * cobro externo nunca admite Tesorería como destino, ver
-   * payments.service.js#_validatePaidToMemberId). `recurrence`/`responsibleMemberId` ya vienen
+   * puntual para un fin externo. Además EXIGE al menos un responsable: sin ninguno no habría a
+   * quién pagarle (un cobro externo nunca admite Tesorería como destino, ver
+   * payments.service.js#_validatePaidToMemberId). `recurrence`/`responsibleCount` ya vienen
    * resueltos (con lo existente si no cambiaron en un update). */
-  _assertPurposeValid(purpose, recurrence, responsibleMemberId) {
+  _assertPurposeValid(purpose, recurrence, responsibleCount) {
     if (purpose !== 'external') return;
     if (recurrence !== CHARGE_RECURRENCE.ONCE) throw AppError.badRequest('El destino "Externo" solo está disponible para cobros únicos.');
-    if (!responsibleMemberId) throw AppError.badRequest('Un cobro externo necesita un responsable — es a quien se le pagará.');
+    if (!responsibleCount) throw AppError.badRequest('Un cobro externo necesita al menos un responsable — es a quien se le pagará.');
   }
 
   async _buildDto(charge) {
-    const [targetGroups, targetTags, targetMembers, exclusionMemberIds] = await Promise.all([
+    const [targetGroups, targetMembers, exclusionMemberIds, responsibles] = await Promise.all([
       chargesRepository.getTargetGroups(charge.id),
-      chargesRepository.getTargetTags(charge.id),
       chargesRepository.getTargetMembers(charge.id),
       chargesRepository.getExclusionMemberIds(charge.id),
+      chargesRepository.getResponsibleMembers(charge.id),
     ]);
-    return this.toDto(charge, { targetGroups, targetTags, targetMembers, exclusionMemberIds });
+    return this.toDto(charge, { targetGroups, targetMembers, exclusionMemberIds, responsibles });
   }
 
   /** Con VIEW_CHARGES, la lista completa de siempre. Sin ella, el único motivo por el que la ruta
    * (ver permission.middleware.js#requireFunctionOrResponsibleCharge) dejó pasar al actor es que
    * su ficha vinculada (`members.user_id`) sea responsable de algún cobro — ahí se le devuelven
    * SOLO esos, nunca la lista completa (es lo que arma los tabs de "Pagos" para él). */
-  async listForClub(clubId, actorId, authContext) {
+  async listForClub(clubId, actorId, authContext, query = {}) {
+    const sort = parseSort(query, SORTABLE);
     if (permissionService.hasFunction(authContext, FUNCTIONS.VIEW_CHARGES)) {
-      const rows = await chargesRepository.findByClub(clubId);
+      const rows = await chargesRepository.findByClub(clubId, sort);
       return Promise.all(rows.map((r) => this._buildDto(r)));
     }
     const member = await membersRepository.findByUserId(actorId, clubId);
     if (!member) return [];
-    const rows = await chargesRepository.findByClubResponsibleMember(clubId, member.id);
+    const rows = await chargesRepository.findByClubResponsibleMember(clubId, member.id, sort);
     return Promise.all(rows.map((r) => this._buildDto(r)));
   }
 
@@ -147,8 +159,9 @@ class ChargesService {
     return chargesRepository.existsResponsibleMember(clubId, member.id);
   }
 
-  async listArchivedForClub(clubId) {
-    const rows = await chargesRepository.findArchivedByClub(clubId);
+  async listArchivedForClub(clubId, query = {}) {
+    const sort = parseSort(query, ARCHIVED_SORTABLE);
+    const rows = await chargesRepository.findArchivedByClub(clubId, sort);
     return Promise.all(rows.map((r) => this._buildDto(r)));
   }
 
@@ -161,9 +174,10 @@ class ChargesService {
   async create(clubId, data, actorId) {
     const schedule = this._resolveSchedule(data);
     const targets = await this._resolveTargets(clubId, data);
-    await this._assertResponsibleMemberValid(clubId, data.responsibleMemberId);
+    const responsibles = data.responsibles || [];
+    await this._assertResponsiblesValid(clubId, responsibles, targets.targetGroups.map((t) => t.groupId));
     const purpose = data.purpose || 'treasury';
-    this._assertPurposeValid(purpose, data.recurrence, data.responsibleMemberId);
+    this._assertPurposeValid(purpose, data.recurrence, responsibles.length);
 
     const chargeId = await withTransaction(async (conn) => {
       const id = await chargesRepository.createCharge(
@@ -180,15 +194,14 @@ class ChargesService {
           endDate: data.endDate || null,
           status: data.status || 'active',
           purpose,
-          responsibleMemberId: data.responsibleMemberId || null,
           createdBy: actorId,
         },
         conn
       );
       await chargesRepository.setTargetMembers(id, targets.targetMembers, conn);
       await chargesRepository.setTargetGroups(id, targets.targetGroups, conn);
-      await chargesRepository.setTargetTags(id, targets.targetTags, conn);
       await chargesRepository.setExclusions(id, targets.exclusionMemberIds, conn);
+      await chargesRepository.setResponsibleMembers(id, responsibles, conn);
       return id;
     });
 
@@ -228,25 +241,41 @@ class ChargesService {
     }
     if (data.endDate !== undefined) updates.end_date = data.endDate || null;
     if (data.status !== undefined) updates.status = data.status;
-    if (data.responsibleMemberId !== undefined) {
-      await this._assertResponsibleMemberValid(clubId, data.responsibleMemberId);
-      updates.responsible_member_id = data.responsibleMemberId || null;
-    }
     if (data.purpose !== undefined) updates.purpose = data.purpose;
 
-    const finalPurpose = data.purpose !== undefined ? data.purpose : charge.purpose;
-    const finalResponsibleMemberId = data.responsibleMemberId !== undefined ? data.responsibleMemberId : charge.responsible_member_id;
-    this._assertPurposeValid(finalPurpose, recurrence, finalResponsibleMemberId);
-
     const targetsChanged =
-      data.targetMembers !== undefined || data.targetGroups !== undefined || data.targetTags !== undefined || data.exclusionMemberIds !== undefined;
+      data.targetMembers !== undefined || data.targetGroups !== undefined || data.exclusionMemberIds !== undefined;
     const targets = targetsChanged
       ? await this._resolveTargets(clubId, {
           targetMembers: data.targetMembers ?? (await chargesRepository.getTargetMembers(chargeId)),
           targetGroups: data.targetGroups ?? (await chargesRepository.getTargetGroups(chargeId)),
-          targetTags: data.targetTags ?? (await chargesRepository.getTargetTags(chargeId)),
           exclusionMemberIds: data.exclusionMemberIds ?? (await chargesRepository.getExclusionMemberIds(chargeId)),
         })
+      : null;
+
+    const responsiblesChanged = data.responsibles !== undefined;
+    let responsibleCount = 0;
+    if (responsiblesChanged) {
+      const targetGroupIds = targets ? targets.targetGroups.map((t) => t.groupId) : (await chargesRepository.getTargetGroups(chargeId)).map((t) => t.groupId);
+      await this._assertResponsiblesValid(clubId, data.responsibles, targetGroupIds);
+      responsibleCount = data.responsibles.length;
+    } else {
+      responsibleCount = (await chargesRepository.getResponsibleMembers(chargeId)).length;
+    }
+
+    const finalPurpose = data.purpose !== undefined ? data.purpose : charge.purpose;
+    this._assertPurposeValid(finalPurpose, recurrence, responsibleCount);
+
+    // Reprogramar instancias YA GENERADAS con el monto nuevo — antes, editar el monto (general o
+    // de un target) solo afectaba instancias que se generaran de ahí en adelante (freeze de
+    // diseño en chargeInstancesRepository#bulkInsertIgnore). Acotado a monthly/yearly (pedido
+    // explícito) y a instancias `pending` (ver updateAmountForMember). `effectiveFrom` por
+    // defecto es la fecha de inicio del cobro, también pedido explícitamente.
+    const amountMayHaveChanged = data.amount !== undefined || targetsChanged;
+    const finalRecurrence = data.recurrence !== undefined ? data.recurrence : charge.recurrence;
+    const shouldReschedule = amountMayHaveChanged && finalRecurrence !== CHARGE_RECURRENCE.ONCE;
+    const effectiveFrom = shouldReschedule
+      ? data.effectiveFrom || (data.startDate !== undefined ? data.startDate : charge.start_date)
       : null;
 
     await withTransaction(async (conn) => {
@@ -254,8 +283,22 @@ class ChargesService {
       if (targets) {
         await chargesRepository.setTargetMembers(chargeId, targets.targetMembers, conn);
         await chargesRepository.setTargetGroups(chargeId, targets.targetGroups, conn);
-        await chargesRepository.setTargetTags(chargeId, targets.targetTags, conn);
         await chargesRepository.setExclusions(chargeId, targets.exclusionMemberIds, conn);
+      }
+      if (responsiblesChanged) {
+        await chargesRepository.setResponsibleMembers(chargeId, data.responsibles, conn);
+      }
+
+      if (shouldReschedule) {
+        const memberIds = await chargesRepository.expandTargetMemberIds(chargeId, conn);
+        if (memberIds.length) {
+          const newDefaultAmount = updates.amount !== undefined ? updates.amount : charge.amount;
+          const amounts = await chargesRepository.resolveAmounts(chargeId, memberIds, newDefaultAmount, conn);
+          for (const memberId of memberIds) {
+            // eslint-disable-next-line no-await-in-loop
+            await chargeInstancesRepository.updateAmountForMember(chargeId, memberId, amounts.get(memberId), effectiveFrom, conn);
+          }
+        }
       }
     });
 
@@ -266,6 +309,16 @@ class ChargesService {
     });
     if (changes) {
       await auditRepository.logAction({ userId: actorId, clubId, action: 'CHARGE_UPDATED', entityType: 'charge', entityId: chargeId, changes });
+    }
+    if (shouldReschedule) {
+      await auditRepository.logAction({
+        userId: actorId,
+        clubId,
+        action: 'CHARGE_AMOUNT_RESCHEDULED',
+        entityType: 'charge',
+        entityId: chargeId,
+        changes: { effectiveFrom },
+      });
     }
 
     // Si cambiaron los objetivos (o se reactivó el cobro), genera instancias para quien

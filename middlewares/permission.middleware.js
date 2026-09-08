@@ -2,6 +2,24 @@ const asyncHandler = require('../helpers/asyncHandler');
 const AppError = require('../helpers/AppError');
 const permissionService = require('../services/permission.service');
 const chargesService = require('../services/charges.service');
+const trainingsService = require('../services/trainings.service');
+
+/**
+ * Bloquea CUALQUIER acción real en el club mientras la membresía tenga
+ * `requires_profile_completion` (invitación configurada para exigir completar la ficha de
+ * miembro antes de operar — ver clubs.service.js#joinByCode e invitations.service.js). Vive acá
+ * (no en clubContextMiddleware) porque TODO endpoint protegido pasa por `requireFunction`/
+ * `requireFunctionOrResponsibleCharge` (checklist de módulo nuevo en api/CLAUDE.md), así que un
+ * solo chequeo acá cubre todos los módulos presentes y futuros sin tocar el resto de la cadena
+ * de autorización. La única excepción real es `POST /members/me` (autoservicio de ficha), que
+ * deliberadamente NO usa ninguna de estas dos funciones. `req.membership` solo existe para un
+ * miembro activo real (no aplica al modo "solo lectura" de VIEW_ALL_CLUBS/Super Admin).
+ */
+function assertProfileNotPending(req) {
+  if (req.membership?.requires_profile_completion) {
+    throw AppError.forbidden('Debes completar tu ficha de miembro antes de continuar.', { code: 'PROFILE_REQUIRED' });
+  }
+}
 
 /**
  * Middleware factory: exige que el usuario autenticado (y club activo, si aplica)
@@ -12,6 +30,7 @@ const chargesService = require('../services/charges.service');
 function requireFunction(...functionCodes) {
   return asyncHandler(async (req, res, next) => {
     if (!req.user) throw AppError.unauthorized('No autenticado.');
+    assertProfileNotPending(req);
 
     const clubId = req.club ? req.club.id : null;
     const authContext = await permissionService.buildAuthorizationContext(req.user.id, clubId);
@@ -41,6 +60,7 @@ function requireFunction(...functionCodes) {
 function requireFunctionOrResponsibleCharge(...functionCodes) {
   return asyncHandler(async (req, res, next) => {
     if (!req.user) throw AppError.unauthorized('No autenticado.');
+    assertProfileNotPending(req);
 
     const clubId = req.club ? req.club.id : null;
     const authContext = await permissionService.buildAuthorizationContext(req.user.id, clubId);
@@ -49,6 +69,28 @@ function requireFunctionOrResponsibleCharge(...functionCodes) {
     if (permissionService.hasAnyFunction(authContext, functionCodes)) return next();
 
     const isResponsible = clubId ? await chargesService.actorHasAnyResponsibleCharge(clubId, req.user.id) : false;
+    if (!isResponsible) throw AppError.forbidden('No tienes permiso para realizar esta acción.');
+
+    next();
+  });
+}
+
+/** Mismo patrón EXACTO que `requireFunctionOrResponsibleCharge`, para "Entrenamientos" — deja
+ * pasar a quien está vinculado a un miembro responsable (entrenador) de al menos un
+ * entrenamiento en este club. Igual chequeo grueso a propósito: la barrera fina por
+ * entrenamiento/miembro puntual vive en trainingAttendance.service.js. */
+function requireFunctionOrResponsibleTraining(...functionCodes) {
+  return asyncHandler(async (req, res, next) => {
+    if (!req.user) throw AppError.unauthorized('No autenticado.');
+    assertProfileNotPending(req);
+
+    const clubId = req.club ? req.club.id : null;
+    const authContext = await permissionService.buildAuthorizationContext(req.user.id, clubId);
+    req.authContext = authContext;
+
+    if (permissionService.hasAnyFunction(authContext, functionCodes)) return next();
+
+    const isResponsible = clubId ? await trainingsService.actorHasAnyResponsibleTraining(clubId, req.user.id) : false;
     if (!isResponsible) throw AppError.forbidden('No tienes permiso para realizar esta acción.');
 
     next();
@@ -67,4 +109,4 @@ function requireGlobalRole(...roleNames) {
   });
 }
 
-module.exports = { requireFunction, requireFunctionOrResponsibleCharge, requireGlobalRole };
+module.exports = { requireFunction, requireFunctionOrResponsibleCharge, requireFunctionOrResponsibleTraining, requireGlobalRole };

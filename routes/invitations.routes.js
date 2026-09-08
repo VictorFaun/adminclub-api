@@ -29,4 +29,20 @@ router.put(
   controller.revoke
 );
 
+router.put(
+  '/:id/reactivate',
+  requireFunction(FUNCTIONS.REVOKE_INVITATIONS),
+  validation.invitationId,
+  handleValidation,
+  controller.reactivate
+);
+
+router.delete(
+  '/:id',
+  requireFunction(FUNCTIONS.DELETE_INVITATIONS),
+  validation.invitationId,
+  handleValidation,
+  controller.remove
+);
+
 module.exports = router;

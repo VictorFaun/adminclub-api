@@ -45,7 +45,8 @@ router.delete('/:clubId', requireFunction(FUNCTIONS.DELETE_CLUB), validation.clu
 
 router.post('/:clubId/logo', requireFunction(FUNCTIONS.EDIT_CLUB), uploadFor('logos').single('logo'), controller.uploadLogo);
 router.post('/:clubId/banner', requireFunction(FUNCTIONS.EDIT_CLUB), uploadFor('banners').single('banner'), controller.uploadBanner);
-router.post('/:clubId/regenerate-invite-code', requireFunction(FUNCTIONS.EDIT_CLUB), controller.regenerateInviteCode);
+router.delete('/:clubId/logo', requireFunction(FUNCTIONS.EDIT_CLUB), controller.removeLogo);
+router.delete('/:clubId/banner', requireFunction(FUNCTIONS.EDIT_CLUB), controller.removeBanner);
 
 router.get('/:clubId/stats', requireFunction(FUNCTIONS.VIEW_DASHBOARD), controller.stats);
 

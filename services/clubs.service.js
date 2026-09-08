@@ -10,7 +10,6 @@ const rolesService = require('./roles.service');
 const AppError = require('../helpers/AppError');
 const { withTransaction } = require('../config/database');
 const { parsePagination, buildMeta } = require('../helpers/pagination');
-const { generateShortCode } = require('../helpers/tokenUtils');
 const slugify = require('../utils/slugify');
 const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const { CLUB_STATUS, USER_CLUB_STATUS, JOIN_REQUEST_STATUS } = require('../config/constants');
@@ -35,7 +34,6 @@ class ClubsService {
       timezone: club.timezone,
       status: club.status,
       isPublic: !!club.is_public,
-      inviteCode: club.invite_code,
       createdAt: club.created_at,
     };
   }
@@ -57,7 +55,6 @@ class ClubsService {
 
   async create({ name, description, primaryColor, secondaryColor, theme, isPublic, timezone }, creatorId) {
     const publicCode = await this._generateUniquePublicCode(name);
-    const inviteCode = generateShortCode(8);
     // El frontend manda la zona horaria detectada del DISPOSITIVO de quien crea el club
     // (Intl.DateTimeFormat().resolvedOptions().timeZone) — si por lo que sea no llega (llamada
     // directa a la API, frontend viejo, o el navegador no pudo detectarla), se cae a la zona
@@ -69,7 +66,6 @@ class ClubsService {
         {
           name,
           publicCode,
-          inviteCode,
           description: description || null,
           primaryColor: primaryColor || '#4F46E5',
           secondaryColor: secondaryColor || '#22C55E',
@@ -83,6 +79,7 @@ class ClubsService {
       );
 
       const adminRoleId = await rolesService.seedDefaultRolesForClub(id, conn);
+      await usersRepository.clearDefaultClub(creatorId, conn);
       await usersRepository.addToClub({ userId: creatorId, clubId: id, status: USER_CLUB_STATUS.ACTIVE, isDefault: true }, conn);
       if (adminRoleId) {
         await rolesRepository.assignToUser({ userId: creatorId, roleId: adminRoleId, clubId: id, assignedBy: creatorId }, conn);
@@ -150,22 +147,6 @@ class ClubsService {
     await auditRepository.logAction({ userId: actorId, clubId, action: 'CLUB_DELETED', entityType: 'club', entityId: clubId, changes: { name: club.name } });
   }
 
-  async regenerateInviteCode(clubId, actorId) {
-    const club = await clubsRepository.findActiveById(clubId);
-    if (!club) throw AppError.notFound('Club no encontrado.');
-    const inviteCode = generateShortCode(8);
-    await clubsRepository.regenerateInviteCode(clubId, inviteCode);
-    await auditRepository.logAction({
-      userId: actorId,
-      clubId,
-      action: 'CLUB_INVITE_CODE_REGENERATED',
-      entityType: 'club',
-      entityId: clubId,
-      changes: buildDiff({ code: diffValue(club.invite_code, inviteCode) }),
-    });
-    return inviteCode;
-  }
-
   async listPublic(query) {
     const { limit, offset, page } = parsePagination(query, ['name']);
     const { rows, total } = await clubsRepository.paginatePublic({ limit, offset, search: query.search });
@@ -207,33 +188,26 @@ class ClubsService {
   }
 
   /**
-   * Une a un usuario a un club usando ya sea una invitación puntual (tabla
-   * `invitations`, con expiración/usos limitados) o el código permanente del
-   * propio club (`clubs.invite_code`). Se prueba primero la invitación puntual.
+   * Une a un usuario a un club usando una invitación (tabla `invitations`). Una invitación
+   * creada sin `maxUses` ni `expiresAt` es, en la práctica, un código "permanente" (uso
+   * ilimitado, nunca expira — ver `claimUse`/`expireOutdated` en `invitations.repository.js`,
+   * que solo actúan cuando esos campos no son NULL): no hace falta un mecanismo aparte para eso.
    */
   async joinByCode(rawCode, userId) {
     const code = rawCode.trim().toUpperCase();
     const invitation = await invitationsRepository.findByCode(code);
-
-    let club;
-    let roleIdToAssign = null;
-
-    if (invitation) {
-      if (invitation.status !== 'active') throw AppError.badRequest('Esta invitación ya no está activa.');
-      if (invitation.expires_at && new Date(invitation.expires_at) < new Date()) {
-        await invitationsRepository.setStatus(invitation.id, 'expired');
-        throw AppError.badRequest('Esta invitación ha expirado.');
-      }
-      if (invitation.max_uses && invitation.uses_count >= invitation.max_uses) {
-        await invitationsRepository.setStatus(invitation.id, 'exhausted');
-        throw AppError.badRequest('Esta invitación ya alcanzó su límite de usos.');
-      }
-      club = await clubsRepository.findActiveById(invitation.club_id);
-      roleIdToAssign = invitation.default_role_id;
-    } else {
-      club = await clubsRepository.findByInviteCode(code);
+    if (!invitation) throw AppError.notFound('Código de invitación inválido.');
+    if (invitation.status !== 'active') throw AppError.badRequest('Esta invitación ya no está activa.');
+    if (invitation.expires_at && new Date(invitation.expires_at) < new Date()) {
+      await invitationsRepository.setStatus(invitation.id, 'expired');
+      throw AppError.badRequest('Esta invitación ha expirado.');
+    }
+    if (invitation.max_uses && invitation.uses_count >= invitation.max_uses) {
+      await invitationsRepository.setStatus(invitation.id, 'exhausted');
+      throw AppError.badRequest('Esta invitación ya alcanzó su límite de usos.');
     }
 
+    const club = await clubsRepository.findActiveById(invitation.club_id);
     if (!club) throw AppError.notFound('Código de invitación inválido.');
     if (club.status !== CLUB_STATUS.ACTIVE) throw AppError.forbidden('Este club no está activo.');
 
@@ -242,8 +216,9 @@ class ClubsService {
       throw AppError.conflict('Ya perteneces a este club.');
     }
 
-    // Sin fallback a "Socio": si la invitación (o el código permanente) no trae un
-    // rol explícito, quien se une entra sin roles hasta que un admin se los asigne.
+    // Sin fallback a "Socio": si la invitación no trae un rol explícito, quien se une entra sin
+    // roles hasta que un admin se los asigne.
+    const roleIdToAssign = invitation.default_role_id;
     const clubsCountBefore = await usersRepository.countClubsForUser(userId);
 
     await withTransaction(async (conn) => {
@@ -252,29 +227,26 @@ class ClubsService {
       // de un solo uso al mismo tiempo) ambos podían pasarla. `claimUse` repite la validación
       // de forma atómica contra el estado real al momento de escribir; si pierde la carrera,
       // aborta toda la operación (incluida la membresía) en vez de sumar un miembro de más.
-      if (invitation) {
-        const claimed = await invitationsRepository.claimUse(invitation.id, conn);
-        if (!claimed) {
-          // `claimUse` puede fallar por dos motivos distintos (agotó sus usos, o alguien más la
-          // revocó/expiró en el instante entre la lectura de arriba y este punto) — se relee el
-          // estado real para no decirle siempre "sin usos disponibles" cuando la causa fue otra.
-          const current = await invitationsRepository.findByCode(code, conn);
-          const reason =
-            current?.status === 'active' || !current?.status
-              ? 'ya no tiene usos disponibles'
-              : 'ya no está activa';
-          throw AppError.badRequest(`Esta invitación ${reason}.`);
-        }
+      const claimed = await invitationsRepository.claimUse(invitation.id, conn);
+      if (!claimed) {
+        // `claimUse` puede fallar por dos motivos distintos (agotó sus usos, o alguien más la
+        // revocó/expiró en el instante entre la lectura de arriba y este punto) — se relee el
+        // estado real para no decirle siempre "sin usos disponibles" cuando la causa fue otra.
+        const current = await invitationsRepository.findByCode(code, conn);
+        const reason =
+          current?.status === 'active' || !current?.status ? 'ya no tiene usos disponibles' : 'ya no está activa';
+        throw AppError.badRequest(`Esta invitación ${reason}.`);
       }
 
       await usersRepository.addToClub({ userId, clubId: club.id, status: USER_CLUB_STATUS.ACTIVE, isDefault: clubsCountBefore === 0 }, conn);
+      if (invitation.requires_member_profile) {
+        await usersRepository.setRequiresProfileCompletion(userId, club.id, true, conn);
+      }
       if (roleIdToAssign) {
         await rolesRepository.assignToUser({ userId, roleId: roleIdToAssign, clubId: club.id, assignedBy: userId }, conn);
       }
       if (clubsCountBefore === 0) await usersRepository.setDefaultClub(userId, club.id, conn);
-      if (invitation) {
-        await invitationsRepository.recordUse({ invitationId: invitation.id, userId }, conn);
-      }
+      await invitationsRepository.recordUse({ invitationId: invitation.id, userId }, conn);
     });
 
     await auditRepository.logActivity({ userId, clubId: club.id, description: 'Se unió al club mediante código de invitación' });

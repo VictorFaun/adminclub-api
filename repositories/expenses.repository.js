@@ -18,23 +18,23 @@ class ExpensesRepository extends BaseRepository {
   }
 
   /** Solo gastos NO archivados — mismo criterio que charges.repository.js#findByClub. */
-  async findByClub(clubId, conn = pool) {
+  async findByClub(clubId, { sortBy = 'name', sortOrder = 'ASC' } = {}, conn = pool) {
     const [rows] = await conn.query(
       `SELECT e.*, ec.name AS category_name, ec.color AS category_color
        FROM expenses e
        LEFT JOIN expense_categories ec ON ec.id = e.category_id
-       WHERE e.club_id = ? AND e.deleted_at IS NULL AND e.archived_at IS NULL ORDER BY e.name ASC`,
+       WHERE e.club_id = ? AND e.deleted_at IS NULL AND e.archived_at IS NULL ORDER BY e.${sortBy} ${sortOrder}`,
       [clubId]
     );
     return rows;
   }
 
-  async findArchivedByClub(clubId, conn = pool) {
+  async findArchivedByClub(clubId, { sortBy = 'archived_at', sortOrder = 'DESC' } = {}, conn = pool) {
     const [rows] = await conn.query(
       `SELECT e.*, ec.name AS category_name, ec.color AS category_color
        FROM expenses e
        LEFT JOIN expense_categories ec ON ec.id = e.category_id
-       WHERE e.club_id = ? AND e.deleted_at IS NULL AND e.archived_at IS NOT NULL ORDER BY e.archived_at DESC`,
+       WHERE e.club_id = ? AND e.deleted_at IS NULL AND e.archived_at IS NOT NULL ORDER BY e.${sortBy} ${sortOrder}`,
       [clubId]
     );
     return rows;

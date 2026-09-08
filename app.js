@@ -9,7 +9,6 @@ const path = require('path');
 const env = require('./config/env');
 const corsOptions = require('./config/cors');
 const loggerMiddleware = require('./middlewares/logger.middleware');
-const { generalRateLimit } = require('./middlewares/rateLimit.middleware');
 const { notFoundMiddleware, errorMiddleware } = require('./middlewares/error.middleware');
 const routes = require('./routes');
 
@@ -36,8 +35,12 @@ app.use(compression());
 // --- Logging ---
 app.use(loggerMiddleware);
 
-// --- Rate limiting general ---
-app.use(env.apiPrefix, generalRateLimit);
+// Rate limiting general por IP quitado de acá: contaba TODAS las requests de todos los
+// módulos contra un solo balde compartido, así que navegar la app a fondo (varias requests
+// por página: listados, stats, notificaciones, etc.) lo agotaba fácilmente y bloqueaba con
+// 429 absolutamente todo, incluido login. Los endpoints sensibles ya tienen su propio límite
+// más estricto (`authRateLimit`/`strictAuthRateLimit` en routes/auth.routes.js) — ese es el
+// único rate limiting que corresponde para esta app.
 
 // --- Archivos estáticos (logos, banners, avatares) ---
 app.use('/uploads', express.static(path.join(__dirname, env.upload.dir)));

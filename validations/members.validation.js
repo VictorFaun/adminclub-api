@@ -13,8 +13,6 @@ const commonFields = [
   body('userId').optional({ nullable: true }).isInt({ min: 1 }),
   body('groupIds').optional().isArray(),
   body('groupIds.*').optional().isInt({ min: 1 }),
-  body('tagIds').optional().isArray(),
-  body('tagIds.*').optional().isInt({ min: 1 }),
   body('customFields').optional().isObject().withMessage('customFields debe ser un objeto.'),
 ];
 
@@ -22,6 +20,21 @@ const createMember = [
   body('firstName').trim().notEmpty().withMessage('El primer nombre es obligatorio.').isLength({ max: 100 }),
   body('lastName').trim().notEmpty().withMessage('El primer apellido es obligatorio.').isLength({ max: 100 }),
   ...commonFields,
+];
+
+// Autoservicio (POST /members/me, ver members.service.js#createSelf): mismos campos base que
+// createMember, MENOS los administrativos (status/userId/groupIds) — esos no los decide
+// quien completa su propia ficha.
+const createMemberSelf = [
+  body('firstName').trim().notEmpty().withMessage('El primer nombre es obligatorio.').isLength({ max: 100 }),
+  body('lastName').trim().notEmpty().withMessage('El primer apellido es obligatorio.').isLength({ max: 100 }),
+  body('middleName').optional({ nullable: true }).trim().isLength({ max: 100 }),
+  body('secondLastName').optional({ nullable: true }).trim().isLength({ max: 100 }),
+  body('email').optional({ nullable: true }).trim().isEmail().withMessage('Correo inválido.').isLength({ max: 255 }),
+  body('phone').optional({ nullable: true }).trim().isLength({ max: 30 }),
+  body('rut').optional({ nullable: true }).trim().isLength({ max: 20 }),
+  body('birthDate').optional({ nullable: true }).isISO8601().withMessage('Fecha de nacimiento inválida.'),
+  body('customFields').optional().isObject().withMessage('customFields debe ser un objeto.'),
 ];
 
 const updateMember = [
@@ -42,4 +55,4 @@ const listMembers = [
   query('linked').optional().isIn(['yes', 'no']),
 ];
 
-module.exports = { memberId, createMember, updateMember, linkUser, listMembers };
+module.exports = { memberId, createMember, createMemberSelf, updateMember, linkUser, listMembers };

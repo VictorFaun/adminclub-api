@@ -7,6 +7,7 @@ const createInvitation = [
   body('expiresAt').optional({ nullable: true }).isISO8601().withMessage('expiresAt debe ser una fecha válida.'),
   body('defaultRoleId').optional({ nullable: true }).isInt({ min: 1 }),
   body('note').optional({ nullable: true }).trim().isLength({ max: 255 }),
+  body('requiresMemberProfile').optional().isBoolean().withMessage('requiresMemberProfile debe ser booleano.'),
 ];
 
 const listInvitations = [

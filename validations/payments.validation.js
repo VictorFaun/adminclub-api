@@ -50,6 +50,13 @@ const exemptInstance = [
   body('type').optional().isIn(['frozen', 'not_applicable']).withMessage('Tipo de exención inválido.'),
 ];
 
+const exemptMany = [
+  body('instanceIds').isArray({ min: 1, max: 60 }).withMessage('Debes seleccionar al menos un período.'),
+  body('instanceIds.*').isInt({ min: 1 }).withMessage('Identificador de período inválido.'),
+  body('reason').optional({ nullable: true }).trim().isLength({ max: 255 }),
+  body('type').optional().isIn(['frozen', 'not_applicable']).withMessage('Tipo de exención inválido.'),
+];
+
 const chargeIdParam = [param('chargeId').isInt({ min: 1 }).withMessage('Identificador de cobro inválido.')];
 const settlementId = [param('id').isInt({ min: 1 }).withMessage('Identificador de transferencia inválido.')];
 const listSettlements = [
@@ -57,12 +64,17 @@ const listSettlements = [
   param('periodKey')
     .matches(/^(\d{4}-\d{2}|\d{4}|unico)$/)
     .withMessage('Período inválido.'),
+  // Un período puede tener varios responsables (uno por grupo) — cada uno con su propio saldo,
+  // ver charges.repository.js#resolveResponsibles. Sin esto no habría forma de saber de CUÁL se
+  // pide el detalle.
+  query('responsibleMemberId').isInt({ min: 1 }).withMessage('Responsable inválido.'),
 ];
 const createSettlement = [
   ...chargeIdParam,
   body('periodKey')
     .matches(/^(\d{4}-\d{2}|\d{4}|unico)$/)
     .withMessage('Período inválido.'),
+  body('responsibleMemberId').isInt({ min: 1 }).withMessage('Responsable inválido.'),
   body('amount').isFloat({ min: 0.01 }).withMessage('El monto debe ser mayor a cero.'),
   body('transferredAt').optional().isISO8601().withMessage('Fecha de transferencia inválida.'),
   body('note').optional({ nullable: true }).trim().isLength({ max: 255 }),
@@ -83,6 +95,7 @@ module.exports = {
   createPayment,
   updatePayment,
   exemptInstance,
+  exemptMany,
   listSettlements,
   createSettlement,
   updateSettlement,

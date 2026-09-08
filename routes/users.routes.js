@@ -15,6 +15,10 @@ router.use(authMiddleware);
 router.get('/me', controller.me);
 router.put('/me', sanitizeBody, validation.updateMe, handleValidation, controller.updateMe);
 router.post('/me/avatar', uploadFor('avatars').single('avatar'), controller.updateMyAvatar);
+// Preferencias de UI por usuario y por club activo (ver userSettings.service.js) — clubId sale
+// de X-Club-Id, igual que /me y /me (PUT) de arriba, no de clubContextMiddleware.
+router.get('/me/settings', controller.getMySettings);
+router.put('/me/settings', sanitizeBody, controller.updateMySettings);
 
 // --- administración de plataforma (todos los usuarios, sin club activo) ---
 // Prefijo literal '/platform' registrado ANTES de clubContextMiddleware y de las rutas
@@ -42,6 +46,13 @@ router.put(
   validation.updateGlobalStatus,
   handleValidation,
   controller.updateStatusGlobal
+);
+router.delete(
+  '/platform/:id',
+  requireFunction(FUNCTIONS.DELETE_ALL_USERS),
+  validation.userId,
+  handleValidation,
+  controller.removeGlobal
 );
 
 // --- gestión de miembros del club activo ---

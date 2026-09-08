@@ -142,15 +142,57 @@ class AuditRepository {
     );
   }
 
-  async paginateAuditLogs(clubId, { limit, offset }) {
+  async paginateAuditLogs(
+    clubId,
+    { limit, offset, sortBy = 'created_at', sortOrder = 'DESC', dateFrom, dateTo, action, entityType, userId }
+  ) {
+    const conditions = ['a.club_id <=> ?'];
+    const params = [clubId];
+    if (dateFrom) {
+      conditions.push('a.created_at >= ?');
+      params.push(`${dateFrom} 00:00:00`);
+    }
+    if (dateTo) {
+      conditions.push('a.created_at <= ?');
+      params.push(`${dateTo} 23:59:59`);
+    }
+    if (action) {
+      conditions.push('a.action = ?');
+      params.push(action);
+    }
+    if (entityType) {
+      conditions.push('a.entity_type = ?');
+      params.push(entityType);
+    }
+    if (userId) {
+      conditions.push('a.user_id = ?');
+      params.push(userId);
+    }
+    const whereSql = conditions.join(' AND ');
+
     const [rows] = await pool.query(
       `SELECT a.*, u.username, u.email FROM audit_logs a
        LEFT JOIN users u ON u.id = a.user_id
-       WHERE a.club_id <=> ? ORDER BY a.created_at DESC LIMIT ? OFFSET ?`,
-      [clubId, limit, offset]
+       WHERE ${whereSql} ORDER BY a.${sortBy} ${sortOrder} LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
     );
-    const [countRows] = await pool.query('SELECT COUNT(*) AS total FROM audit_logs WHERE club_id <=> ?', [clubId]);
+    const [countRows] = await pool.query(`SELECT COUNT(*) AS total FROM audit_logs a WHERE ${whereSql}`, params);
     return { rows: await this._withEntityNames(rows), total: countRows[0].total };
+  }
+
+  /** Catálogos para poblar los selects de filtro de auditoría — valores realmente usados hasta
+   * ahora en este club (no un enum fijo, `action`/`entity_type` son strings libres puestos por
+   * cada servicio al llamar `logAction`). */
+  async distinctActions(clubId) {
+    const [rows] = await pool.query('SELECT DISTINCT action FROM audit_logs WHERE club_id <=> ? ORDER BY action', [clubId]);
+    return rows.map((r) => r.action);
+  }
+
+  async distinctEntityTypes(clubId) {
+    const [rows] = await pool.query('SELECT DISTINCT entity_type FROM audit_logs WHERE club_id <=> ? ORDER BY entity_type', [
+      clubId,
+    ]);
+    return rows.map((r) => r.entity_type);
   }
 
   async recentActivity(clubId, limit = 10) {

@@ -7,6 +7,14 @@ const { authRateLimit, strictAuthRateLimit } = require('../middlewares/rateLimit
 
 router.post('/register', strictAuthRateLimit, sanitizeBody, validation.register, handleValidation, controller.register);
 router.post('/login', authRateLimit, sanitizeBody, validation.login, handleValidation, controller.login);
+router.post(
+  '/google',
+  authRateLimit,
+  sanitizeBody,
+  validation.loginWithGoogle,
+  handleValidation,
+  controller.loginWithGoogle
+);
 router.post('/refresh', authRateLimit, controller.refresh);
 router.post('/logout', controller.logout);
 router.post('/logout-all', authMiddleware, controller.logoutAll);

@@ -51,9 +51,16 @@ const uploadBanner = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, { bannerUrl: toAbsoluteMediaUrl(bannerUrl) }, 'Banner actualizado correctamente.');
 });
 
-const regenerateInviteCode = asyncHandler(async (req, res) => {
-  const inviteCode = await clubsService.regenerateInviteCode(req.club.id, req.user.id);
-  return ApiResponse.ok(res, { inviteCode }, 'Código de invitación regenerado correctamente.');
+const removeLogo = asyncHandler(async (req, res) => {
+  await clubsRepository.updateById(req.club.id, { logo_url: null });
+  deleteUploadedFile(req.club.logo_url);
+  return ApiResponse.ok(res, null, 'Logo eliminado correctamente.');
+});
+
+const removeBanner = asyncHandler(async (req, res) => {
+  await clubsRepository.updateById(req.club.id, { banner_url: null });
+  deleteUploadedFile(req.club.banner_url);
+  return ApiResponse.ok(res, null, 'Banner eliminado correctamente.');
 });
 
 const stats = asyncHandler(async (req, res) => {
@@ -100,7 +107,8 @@ module.exports = {
   remove,
   uploadLogo,
   uploadBanner,
-  regenerateInviteCode,
+  removeLogo,
+  removeBanner,
   stats,
   joinByCode,
   requestAccess,

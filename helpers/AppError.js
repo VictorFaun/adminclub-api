@@ -21,8 +21,8 @@ class AppError extends Error {
     return new AppError(message, 401);
   }
 
-  static forbidden(message = 'No autorizado.') {
-    return new AppError(message, 403);
+  static forbidden(message = 'No autorizado.', details = null) {
+    return new AppError(message, 403, details);
   }
 
   static notFound(message = 'Recurso no encontrado.') {

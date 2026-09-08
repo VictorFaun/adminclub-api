@@ -2,6 +2,9 @@ const asyncHandler = require('../helpers/asyncHandler');
 const ApiResponse = require('../helpers/ApiResponse');
 const usersService = require('../services/users.service');
 const usersRepository = require('../repositories/users.repository');
+const userSettingsService = require('../services/userSettings.service');
+const AppError = require('../helpers/AppError');
+const { isValidTimezone } = require('../helpers/timezones');
 const { toAbsoluteMediaUrl, deleteUploadedFile } = require('../helpers/mediaUrl');
 
 const list = asyncHandler(async (req, res) => {
@@ -69,6 +72,11 @@ const updateStatusGlobal = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, user, 'Estado del usuario actualizado correctamente.');
 });
 
+const removeGlobal = asyncHandler(async (req, res) => {
+  await usersService.removeGlobal(Number(req.params.id), req.user.id);
+  return ApiResponse.ok(res, null, 'Usuario eliminado correctamente.');
+});
+
 const me = asyncHandler(async (req, res) => {
   const clubId = Number(req.headers['x-club-id']) || null;
   const user = await usersService.getDetail(req.user.id, clubId);
@@ -78,11 +86,38 @@ const me = asyncHandler(async (req, res) => {
 const updateMe = asyncHandler(async (req, res) => {
   const clubId = Number(req.headers['x-club-id']) || null;
   const updates = {};
-  if (req.body.username !== undefined) updates.username = req.body.username;
+  if (req.body.username !== undefined) {
+    if (await usersRepository.usernameExists(req.body.username, req.user.id)) {
+      throw AppError.conflict('Ya existe una cuenta registrada con este nombre de usuario.');
+    }
+    updates.username = req.body.username;
+  }
   if (req.body.phone !== undefined) updates.phone = req.body.phone;
+  if (req.body.timezone !== undefined) {
+    // `null` = usar la del club (ver resolución en cascada en platform-timezone.state.ts) — solo
+    // se valida cuando viene un valor real, no cuando el usuario elige "volver a heredar".
+    if (req.body.timezone !== null && !isValidTimezone(req.body.timezone)) {
+      throw AppError.badRequest('Zona horaria inválida.');
+    }
+    updates.timezone = req.body.timezone;
+  }
   if (Object.keys(updates).length) await usersRepository.updateById(req.user.id, updates);
   const user = await usersService.getDetail(req.user.id, clubId);
   return ApiResponse.ok(res, user, 'Perfil actualizado correctamente.');
+});
+
+const getMySettings = asyncHandler(async (req, res) => {
+  const clubId = Number(req.headers['x-club-id']) || null;
+  if (!clubId) throw AppError.badRequest('Debes especificar un club (header X-Club-Id).');
+  const settings = await userSettingsService.getMine(req.user.id, clubId);
+  return ApiResponse.ok(res, settings, 'Preferencias obtenidas correctamente.');
+});
+
+const updateMySettings = asyncHandler(async (req, res) => {
+  const clubId = Number(req.headers['x-club-id']) || null;
+  if (!clubId) throw AppError.badRequest('Debes especificar un club (header X-Club-Id).');
+  const settings = await userSettingsService.updateMine(req.user.id, clubId, req.body.settings || {}, req.user.id);
+  return ApiResponse.ok(res, settings, 'Preferencias actualizadas correctamente.');
 });
 
 const updateMyAvatar = asyncHandler(async (req, res) => {
@@ -108,7 +143,10 @@ module.exports = {
   me,
   updateMe,
   updateMyAvatar,
+  getMySettings,
+  updateMySettings,
   listAllPlatform,
   updateGlobal,
   updateStatusGlobal,
+  removeGlobal,
 };

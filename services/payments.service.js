@@ -14,16 +14,17 @@ const { withTransaction } = require('../config/database');
 const { FUNCTIONS, CHARGE_EXEMPT_TYPE } = require('../config/constants');
 
 const MATRIX_MONTH_LABELS = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
-// Ventana centrada en el período actual (o en el `anchor` pedido) que muestra la matriz de
-// "Pagos" — no todo el historial, para no armar una tabla gigante con un cobro muy antiguo; los
-// botones "anterior/siguiente" recorren de a un período por clic (ver getChargeMatrix). El ANCHO
-// de la ventana ahora lo decide el frontend según cuántas columnas entran sin scroll horizontal
-// (ver `columns` en getChargeMatrix) — este es solo el valor por defecto si no manda ninguno.
-const DEFAULT_WINDOW_SIZE = 12;
+// Ventana que muestra la matriz de "Pagos" — no todo el historial, para no armar una tabla
+// gigante con un cobro muy antiguo; los botones "anterior/siguiente" recorren de a un período por
+// clic (ver getChargeMatrix). El ANCHO de la ventana es fijo (ver treasury-payments.page.ts#
+// PERIOD_WINDOW_SIZE) — este es solo el valor por defecto si no manda ninguno.
+const DEFAULT_WINDOW_SIZE = 10;
 // Cuántos meses trae el gráfico "Ingresos a Tesorería" del dashboard (ver getDashboard).
 const DASHBOARD_CHART_MONTHS = 6;
 const MIN_WINDOW_SIZE = 1;
-const MAX_WINDOW_SIZE = 18;
+// Tope duro en 10 — pedido explícito, ver treasury-payments.page.ts#PERIOD_WINDOW_SIZE (mismo
+// límite del lado del frontend; este es el respaldo real del backend por si algo pidiera más).
+const MAX_WINDOW_SIZE = 10;
 
 // Mismos helpers de fecha que chargeInstances.service.js (duplicados a propósito: son dos
 // funciones de una línea, no vale la pena exportarlas solo para esto).
@@ -201,34 +202,26 @@ class PaymentsService {
 
   /** Columnas de la matriz de un cobro, según su recurrencia — mismo formato de `period_label`
    * que chargeInstances.service.js#_computePeriods (`YYYY-MM`/`YYYY`/`'unico'`), así las celdas
-   * calzan con las instancias ya generadas sin transformación. Ventana de tamaño fijo (12 meses
-   * o 9 años). Sin `anchor`, se centra en el período ACTUAL (o se corre al primer período
-   * aplicable si centrar dejaría columnas antes de que el cobro empezara a aplicar — ver
-   * `_firstApplicableMonthIndex`). CON `anchor` (al usar los botones "anterior/siguiente"), este
-   * YA ES el primer período de la ventana (no un centro) — el frontend lo arma tomando el primer
-   * `period.key` de la respuesta anterior y sumando/restando un período, así cada clic mueve la
-   * ventana exactamente 1 período, se vea o no clampeada — con `anchor` como "centro" (versión
-   * anterior), un clic podía no mover nada visible si la ventana todavía estaba pegada al
-   * clamp, obligando a apretar varias veces antes de que "se notara". `canGoBack`/`canGoForward`
-   * le dicen al frontend si aún queda margen para deshabilitar los botones en el límite exacto.
-   * Los períodos sin instancia generada quedan con celda `null` en getChargeMatrix (ahí se arma
-   * una celda "virtual" pendiente/atrasada según la fecha, sin esperar a que el cron la cree). */
-  /** Cuánto retrocede la ventana desde el período actual (el resto, `windowSize - 1 - back`,
-   * queda adelante) — misma proporción que los valores fijos de antes (más adelante que atrás,
-   * ej. 12 → 5/6) para que el período actual quede levemente a la izquierda del centro en vez de
-   * exactamente al medio. */
-  _windowBack(windowSize) {
-    return Math.floor((windowSize - 1) / 2);
-  }
-
-  /** `windowSize` = cuántas columnas de período mostrar — la decide el frontend según cuántas
-   * entran sin scroll horizontal en la pantalla actual (ver `columns` en getChargeMatrix); si no
-   * llega, se usa `DEFAULT_WINDOW_SIZE`. Clampeada a [MIN_WINDOW_SIZE, MAX_WINDOW_SIZE]. */
+   * calzan con las instancias ya generadas sin transformación. Sin `anchor`, la ventana TERMINA
+   * en el período ACTUAL (pedido explícito: hoy siempre a la derecha) y arranca `size` períodos
+   * atrás; si el cobro empezó a aplicar hace menos de `size` períodos, el arranque se clampea al
+   * primero REAL (`_firstApplicableMonthIndex`) y la ventana se completa hacia ADELANTE con
+   * períodos futuros para no quedar más angosta que `size` (pedido explícito: siempre se
+   * muestran `size` columnas salvo que el cobro realmente tenga menos períodos aplicables en
+   * total que eso — ver `_clampWindow`). CON `anchor` (al usar los botones "anterior/siguiente"),
+   * este YA ES el primer período de la ventana (no un centro) — el frontend lo arma tomando el
+   * primer `period.key` de la respuesta anterior y sumando/restando un período, así cada clic
+   * mueve la ventana exactamente 1 período, se vea o no clampeada. `canGoBack`/`canGoForward` le
+   * dicen al frontend si aún queda margen para deshabilitar los botones en el límite exacto. Los
+   * períodos sin instancia generada quedan con celda `null` en getChargeMatrix (ahí se arma una
+   * celda "virtual" pendiente/atrasada según la fecha, sin esperar a que el cron la cree). */
+  /** `windowSize` = cuántas columnas de período mostrar — fija (ver treasury-payments.page.ts#
+   * PERIOD_WINDOW_SIZE); si no llega, se usa `DEFAULT_WINDOW_SIZE`. Clampeada a
+   * [MIN_WINDOW_SIZE, MAX_WINDOW_SIZE]. */
   _matrixPeriods(charge, anchor, windowSize) {
     if (charge.recurrence === 'once') return { periods: [{ key: 'unico', label: 'Único' }], canGoBack: false, canGoForward: false };
 
     const size = Math.max(MIN_WINDOW_SIZE, Math.min(MAX_WINDOW_SIZE, windowSize || DEFAULT_WINDOW_SIZE));
-    const back = this._windowBack(size);
 
     if (charge.recurrence === 'monthly') {
       const firstIndex = this._firstApplicableMonthIndex(charge);
@@ -236,17 +229,21 @@ class PaymentsService {
 
       const match = anchor ? /^(\d{4})-(\d{2})$/.exec(anchor) : null;
       let windowStart;
+      let windowEnd;
       if (match) {
-        windowStart = Math.max(Number(match[1]) * 12 + Number(match[2]), firstIndex);
+        windowStart = Number(match[1]) * 12 + Number(match[2]);
+        windowEnd = windowStart + size - 1;
       } else {
+        // Sin anchor (vista por defecto): la ventana TERMINA en el mes actual y arranca `size`
+        // meses atrás — el clamp de abajo se encarga de correrla hacia adelante si el cobro es
+        // más nuevo que eso.
         const now = new Date();
         const todayIndex = now.getUTCFullYear() * 12 + (now.getUTCMonth() + 1);
-        windowStart = Math.max(todayIndex - back, firstIndex);
+        windowEnd = todayIndex;
+        windowStart = windowEnd - size + 1;
       }
 
-      let windowEnd = windowStart + size - 1;
-      if (lastIndex !== null) windowEnd = Math.min(windowEnd, lastIndex);
-      if (windowEnd < windowStart) windowEnd = windowStart;
+      ({ windowStart, windowEnd } = this._clampWindow(windowStart, windowEnd, firstIndex, lastIndex, size));
 
       const periods = [];
       for (let idx = windowStart; idx <= windowEnd; idx += 1) {
@@ -261,19 +258,44 @@ class PaymentsService {
     const firstYear = this._firstApplicableYear(charge);
     const lastYear = this._lastApplicableYear(charge);
     let windowStart;
+    let windowEnd;
     if (anchor && /^\d{4}$/.test(anchor)) {
-      windowStart = Math.max(Number(anchor), firstYear);
+      windowStart = Number(anchor);
+      windowEnd = windowStart + size - 1;
     } else {
-      windowStart = Math.max(new Date().getUTCFullYear() - back, firstYear);
+      // Mismo criterio que el mensual de arriba: termina en el año actual, arranca `size` años
+      // atrás — el clamp de abajo la corre hacia adelante si el cobro es más nuevo que eso.
+      const thisYear = new Date().getUTCFullYear();
+      windowEnd = thisYear;
+      windowStart = windowEnd - size + 1;
     }
 
-    let windowEnd = windowStart + size - 1;
-    if (lastYear !== null) windowEnd = Math.min(windowEnd, lastYear);
-    if (windowEnd < windowStart) windowEnd = windowStart;
+    ({ windowStart, windowEnd } = this._clampWindow(windowStart, windowEnd, firstYear, lastYear, size));
 
     const periods = [];
     for (let y = windowStart; y <= windowEnd; y += 1) periods.push({ key: String(y), label: String(y) });
     return { periods, canGoBack: windowStart > firstYear, canGoForward: lastYear === null || windowEnd < lastYear };
+  }
+
+  /** Ajusta `[windowStart, windowEnd]` (índices de mes o años, según recurrencia) para que quede
+   * dentro de `[firstIndex, lastIndex]` sin perder ancho si es evitable: si se pasa del límite
+   * inferior, EMPUJA el final hacia adelante en vez de solo mover el arranque (y viceversa con el
+   * límite superior, empujando el arranque hacia atrás) — así la ventana solo queda más angosta
+   * que `size` cuando el rango real disponible (`lastIndex - firstIndex + 1`) es menor que
+   * `size`, nunca por estar pegada a un borde con margen de sobra del otro lado. `lastIndex`
+   * puede ser `null` (cobro sin fecha de término), en cuyo caso no hay límite superior que
+   * respetar. */
+  _clampWindow(windowStart, windowEnd, firstIndex, lastIndex, size) {
+    if (windowStart < firstIndex) {
+      windowStart = firstIndex;
+      windowEnd = windowStart + size - 1;
+    }
+    if (lastIndex !== null && windowEnd > lastIndex) {
+      windowEnd = lastIndex;
+      windowStart = Math.max(firstIndex, windowEnd - size + 1);
+    }
+    if (windowEnd < windowStart) windowEnd = windowStart;
+    return { windowStart, windowEnd };
   }
 
   _matrixCellToDto(row, paidAmount) {

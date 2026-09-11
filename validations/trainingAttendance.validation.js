@@ -6,7 +6,7 @@ const trainingIdParam = [param('trainingId').isInt({ min: 1 }).withMessage('Iden
 const trainingMatrix = [
   ...trainingIdParam,
   query('offset').optional().isInt({ min: -100, max: 100 }).withMessage('Página inválida.'),
-  query('columns').optional().isInt({ min: 1, max: 18 }).withMessage('Cantidad de columnas inválida.'),
+  query('columns').optional().isInt({ min: 1, max: 5 }).withMessage('Cantidad de columnas inválida.'),
 ];
 
 const markAttendance = [

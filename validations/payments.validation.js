@@ -9,9 +9,9 @@ const chargeMatrix = [
     .optional()
     .matches(/^(\d{4}-\d{2}|\d{4})$/)
     .withMessage('Período inválido.'),
-  // Cuántas columnas de período pedir — las decide el frontend según cuántas entran sin scroll
-  // horizontal (ver payments.service.js#_matrixPeriods, que igual las clampea 1-18).
-  query('columns').optional().isInt({ min: 1, max: 18 }).withMessage('Cantidad de columnas inválida.'),
+  // Cuántas columnas de período pedir — fijo en el frontend, tope duro en 10 (ver
+  // payments.service.js#_matrixPeriods/MAX_WINDOW_SIZE).
+  query('columns').optional().isInt({ min: 1, max: 10 }).withMessage('Cantidad de columnas inválida.'),
 ];
 const ensureInstance = [
   param('chargeId').isInt({ min: 1 }).withMessage('Identificador de cobro inválido.'),

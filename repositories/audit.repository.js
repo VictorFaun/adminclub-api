@@ -108,6 +108,61 @@ class AuditRepository {
       r.forEach((x) => names.set(`charge_instance:${x.id}`, x.label));
     }
 
+    const chargeSettlementIds = [...(idsByType.charge_settlement ?? [])];
+    if (chargeSettlementIds.length) {
+      const [r] = await pool.query(
+        `SELECT cs.id, CONCAT_WS(' ', c.name, cs.period_label) AS label FROM charge_settlements cs
+         INNER JOIN charges c ON c.id = cs.charge_id WHERE cs.id IN (?)`,
+        [chargeSettlementIds]
+      );
+      r.forEach((x) => names.set(`charge_settlement:${x.id}`, x.label));
+    }
+
+    const expenseIds = [...(idsByType.expense ?? [])];
+    if (expenseIds.length) {
+      const [r] = await pool.query('SELECT id, name FROM expenses WHERE id IN (?)', [expenseIds]);
+      r.forEach((x) => names.set(`expense:${x.id}`, x.name));
+    }
+
+    const expenseCategoryIds = [...(idsByType.expense_category ?? [])];
+    if (expenseCategoryIds.length) {
+      const [r] = await pool.query('SELECT id, name FROM expense_categories WHERE id IN (?)', [expenseCategoryIds]);
+      r.forEach((x) => names.set(`expense_category:${x.id}`, x.name));
+    }
+
+    const expensePaymentIds = [...(idsByType.expense_payment ?? [])];
+    if (expensePaymentIds.length) {
+      const [r] = await pool.query(
+        `SELECT ep.id, CONCAT_WS(' ', e.name, ei.period_label) AS label FROM expense_payments ep
+         INNER JOIN expense_instances ei ON ei.id = ep.expense_instance_id
+         INNER JOIN expenses e ON e.id = ei.expense_id WHERE ep.id IN (?)`,
+        [expensePaymentIds]
+      );
+      r.forEach((x) => names.set(`expense_payment:${x.id}`, x.label));
+    }
+
+    const memberFieldIds = [...(idsByType.member_field ?? [])];
+    if (memberFieldIds.length) {
+      const [r] = await pool.query('SELECT id, label FROM member_fields WHERE id IN (?)', [memberFieldIds]);
+      r.forEach((x) => names.set(`member_field:${x.id}`, x.label));
+    }
+
+    const trainingIds = [...(idsByType.training ?? [])];
+    if (trainingIds.length) {
+      const [r] = await pool.query('SELECT id, name FROM trainings WHERE id IN (?)', [trainingIds]);
+      r.forEach((x) => names.set(`training:${x.id}`, x.name));
+    }
+
+    const trainingAttendanceIds = [...(idsByType.training_attendance ?? [])];
+    if (trainingAttendanceIds.length) {
+      const [r] = await pool.query(
+        `SELECT ta.id, CONCAT_WS(' ', t.name, ta.session_date) AS label FROM training_attendances ta
+         INNER JOIN trainings t ON t.id = ta.training_id WHERE ta.id IN (?)`,
+        [trainingAttendanceIds]
+      );
+      r.forEach((x) => names.set(`training_attendance:${x.id}`, x.label));
+    }
+
     return rows.map((row) => {
       const key = row.entity_type && row.entity_id ? `${row.entity_type}:${row.entity_id}` : null;
       const entityName = (key && names.get(key)) ?? this._fallbackNameFromChanges(row);

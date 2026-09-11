@@ -54,7 +54,14 @@ class RolesService {
 
   /** Crea el rol por defecto (Administrador) para un club recién creado. */
   async seedDefaultRolesForClub(clubId, conn) {
-    const allFunctions = await functionsRepository.findAllGrouped(conn);
+    // `findClubAssignableGrouped` (no `findAllGrouped`) es la barrera real: filtra por
+    // `is_club_assignable = 1` en la propia base de datos, así que aunque
+    // `defaultClubRoles.js#ALL_CLUB_FUNCTIONS` quedara desactualizado (como pasaba antes de
+    // este fix — su lista hardcodeada excluía solo 3 de las 10 funcionalidades de plataforma
+    // reales, dejando que el "Administrador" de CUALQUIER club nuevo quedara con VIEW_ALL_USERS,
+    // VIEW_PLATFORM_SETTINGS, etc., viendo/editando datos de TODA la plataforma) un código de
+    // plataforma nunca resuelve a un id acá y `.filter(Boolean)` de abajo lo descarta solo.
+    const allFunctions = await functionsRepository.findClubAssignableGrouped(conn);
     const functionIdByCode = new Map(allFunctions.map((f) => [f.code, f.id]));
     let adminRoleId = null;
 

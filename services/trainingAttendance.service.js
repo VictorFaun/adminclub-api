@@ -13,8 +13,10 @@ const { FUNCTIONS } = require('../config/constants');
 // suficientes sin depender de que el cron corra todos los días.
 const GENERATION_WINDOW_DAYS = 56;
 const MIN_WINDOW_SIZE = 1;
-const MAX_WINDOW_SIZE = 18;
-const DEFAULT_WINDOW_SIZE = 12;
+// Tope duro en 5 — pedido explícito, ver training-attendance.page.ts#SESSION_WINDOW_SIZE (mismo
+// límite del lado del frontend; este es el respaldo real del backend por si algo pidiera más).
+const MAX_WINDOW_SIZE = 5;
+const DEFAULT_WINDOW_SIZE = 5;
 const MARKABLE_STATUSES = ['pending', 'attended', 'absent', 'exempt'];
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -211,7 +213,17 @@ class TrainingAttendanceService {
    * pagina por PÁGINA COMPLETA en vez de "1 columna corrida": `offset` es un entero (0 = la
    * página que incluye hoy, ±1 = página siguiente/anterior completa), sin fechas de por medio —
    * evita que el frontend tenga que conocer la lista completa de fechas reales solo para
-   * calcular "la fecha 1 posición antes/después". */
+   * calcular "la fecha 1 posición antes/después".
+   *
+   * Sin offset (vista por defecto), la ventana TERMINA en la sesión de hoy (pedido explícito: hoy
+   * siempre a la derecha, mismo criterio que payments.service.js#_matrixPeriods) y arranca hasta
+   * `size - 1` sesiones atrás; si hay menos sesiones anteriores que eso, el arranque se clampea a
+   * la primera sesión real y la ventana se completa hacia ADELANTE con sesiones futuras (nunca
+   * se rellena con columnas vacías) — así siempre se muestran `size` sesiones salvo que el
+   * entrenamiento realmente tenga menos que eso en total. `startIdx` se clampea contra
+   * `dates.length - size` (no solo `dates.length - 1`) por el mismo motivo: evita que una página
+   * completa hacia adelante/atrás "aterrice" pegada al borde con menos columnas de las que
+   * realmente hay disponibles para mostrar. */
   async _matrixSessionDates(trainingId, offset, columns) {
     const [rows] = await pool.query('SELECT DISTINCT session_date FROM training_attendances WHERE training_id = ? ORDER BY session_date ASC', [
       trainingId,
@@ -222,10 +234,12 @@ class TrainingAttendanceService {
     const size = Math.max(MIN_WINDOW_SIZE, Math.min(MAX_WINDOW_SIZE, columns || DEFAULT_WINDOW_SIZE));
     const todayStr = formatDateOnly(new Date());
     let todayIdx = dates.findIndex((d) => d >= todayStr);
-    if (todayIdx === -1) todayIdx = dates.length;
+    if (todayIdx === -1) todayIdx = dates.length - 1;
 
-    let startIdx = todayIdx + (offset || 0) * size;
-    startIdx = Math.max(0, Math.min(startIdx, dates.length - 1));
+    const baseStart = Math.max(0, todayIdx - size + 1);
+    const maxStart = Math.max(0, dates.length - size);
+    let startIdx = baseStart + (offset || 0) * size;
+    startIdx = Math.max(0, Math.min(startIdx, maxStart));
     const endIdx = Math.min(dates.length - 1, startIdx + size - 1);
     return { dates: dates.slice(startIdx, endIdx + 1), canGoBack: startIdx > 0, canGoForward: endIdx < dates.length - 1 };
   }

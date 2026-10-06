@@ -20,13 +20,18 @@ const createClub = [
 const updateClub = [
   ...clubId,
   body('name').optional().trim().isLength({ min: 1, max: 150 }),
+  // Formato fino (caracteres permitidos) y unicidad: clubs.service.js#update.
+  body('publicCode').optional().isString().trim().isLength({ min: 3, max: 40 }).withMessage('El código debe tener entre 3 y 40 caracteres.'),
   body('description').optional({ nullable: true }).trim().isLength({ max: 500 }),
   body('primaryColor').optional().matches(HEX_COLOR).withMessage('Color primario inválido.'),
   body('secondaryColor').optional().matches(HEX_COLOR).withMessage('Color secundario inválido.'),
   body('theme').optional().isIn(['light', 'dark', 'auto']),
   body('isPublic').optional().isBoolean().toBoolean(),
+  body('showLogoOnBanner').optional().isBoolean().toBoolean(),
   body('timezone').optional().trim().custom(isValidTimezone).withMessage('Zona horaria inválida.'),
 ];
+
+const checkPublicCode = [...clubId, query('code').isString().trim().isLength({ max: 60 })];
 
 const listPublic = [
   query('page').optional().isInt({ min: 1 }),
@@ -65,4 +70,4 @@ const updateSettings = [
   }),
 ];
 
-module.exports = { clubId, createClub, updateClub, listPublic, joinByCode, requestAccess, resolveJoinRequest, updateSettings };
+module.exports = { checkPublicCode, clubId, createClub, updateClub, listPublic, joinByCode, requestAccess, resolveJoinRequest, updateSettings };

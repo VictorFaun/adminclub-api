@@ -6,11 +6,17 @@ const membersRepository = require('../repositories/members.repository');
 const auditRepository = require('../repositories/audit.repository');
 const membersService = require('./members.service');
 const chargeInstancesService = require('./chargeInstances.service');
+const treasuryAccountsService = require('./treasuryAccounts.service');
+const treasuryAccountsRepository = require('../repositories/treasuryAccounts.repository');
 const permissionService = require('./permission.service');
 const expensesRepository = require('../repositories/expenses.repository');
 const expensePaymentsRepository = require('../repositories/expensePayments.repository');
 const AppError = require('../helpers/AppError');
+const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const { withTransaction } = require('../config/database');
+const memberMembershipsRepository = require('../repositories/memberMemberships.repository');
+const { COVERAGE_REASONS, coversChargePeriod, chargePeriodReason, proratedAmount } = require('../helpers/membership');
+const clubPolicyService = require('./clubPolicy.service');
 const { FUNCTIONS, CHARGE_EXEMPT_TYPE } = require('../config/constants');
 
 const MATRIX_MONTH_LABELS = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
@@ -20,7 +26,7 @@ const MATRIX_MONTH_LABELS = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'A
 // PERIOD_WINDOW_SIZE) — este es solo el valor por defecto si no manda ninguno.
 const DEFAULT_WINDOW_SIZE = 10;
 // Cuántos meses trae el gráfico "Ingresos a Tesorería" del dashboard (ver getDashboard).
-const DASHBOARD_CHART_MONTHS = 6;
+const DASHBOARD_CHART_MONTHS = 12;
 const MIN_WINDOW_SIZE = 1;
 // Tope duro en 10 — pedido explícito, ver treasury-payments.page.ts#PERIOD_WINDOW_SIZE (mismo
 // límite del lado del frontend; este es el respaldo real del backend por si algo pidiera más).
@@ -48,6 +54,11 @@ class PaymentsService {
       // _validatePaidToMemberId en create()/update()).
       paidToMemberId: payment.paid_to_member_id,
       paidToMemberName: payment.paid_to_member_name ?? null,
+      // Cuenta de Tesorería donde entró el pago directo (guardada al registrarlo; sigue nombrada
+      // aunque la cuenta se haya eliminado después).
+      treasuryAccountId: payment.treasury_account_id ?? null,
+      treasuryAccountName: payment.treasury_account_name ?? null,
+      treasuryAccountDeleted: !!payment.treasury_account_deleted_at,
       amount: Number(payment.amount),
       paidAt: payment.paid_at,
       note: payment.note,
@@ -99,6 +110,8 @@ class PaymentsService {
       chargeResponsibleMemberId: responsibleInfo?.resolved?.memberId ?? null,
       chargeResponsibleMemberName: responsibleInfo?.resolved?.memberName ?? null,
       chargeResponsibles: responsibleInfo?.all ?? [],
+      // Cuenta de Tesorería del cobro (datos de transferencia), `null` si no hay — ver treasuryAccounts.service.js.
+      chargeTreasuryAccount: responsibleInfo?.treasuryAccount ?? null,
       periodLabel: row.period_label,
       amount: Number(row.amount),
       dueDate: row.due_date,
@@ -218,6 +231,45 @@ class PaymentsService {
   /** `windowSize` = cuántas columnas de período mostrar — fija (ver treasury-payments.page.ts#
    * PERIOD_WINDOW_SIZE); si no llega, se usa `DEFAULT_WINDOW_SIZE`. Clampeada a
    * [MIN_WINDOW_SIZE, MAX_WINDOW_SIZE]. */
+  /**
+   * Años que se pueden elegir en la vista del cobro: desde el primer año en que aplica hasta el de
+   * su fecha de término; sin término, hasta el año siguiente al actual (nunca más allá).
+   */
+  _chargeYears(charge) {
+    if (charge.recurrence === 'once') return [];
+    const nextYear = new Date().getUTCFullYear() + 1;
+    let first;
+    let last;
+    if (charge.recurrence === 'monthly') {
+      first = Math.floor((this._firstApplicableMonthIndex(charge) - 1) / 12);
+      const lastIndex = this._lastApplicableMonthIndex(charge);
+      last = lastIndex === null ? nextYear : Math.floor((lastIndex - 1) / 12);
+    } else {
+      first = this._firstApplicableYear(charge);
+      const lastYear = this._lastApplicableYear(charge);
+      last = lastYear === null ? nextYear : lastYear;
+    }
+    if (last < first) last = first;
+    const years = [];
+    for (let y = first; y <= last; y += 1) years.push(y);
+    return years;
+  }
+
+  /** Columnas de UN año: mensual → los meses de ese año en que aplica el cobro (rotulados solo con
+   * el mes, el año va en el selector); anual → ese único año. */
+  _yearPeriods(charge, year) {
+    if (charge.recurrence === 'yearly') return [{ key: String(year), label: String(year) }];
+    const firstIndex = this._firstApplicableMonthIndex(charge);
+    const lastIndex = this._lastApplicableMonthIndex(charge);
+    const periods = [];
+    for (let month = 1; month <= 12; month += 1) {
+      const idx = year * 12 + month;
+      if (idx < firstIndex || (lastIndex !== null && idx > lastIndex)) continue;
+      periods.push({ key: `${year}-${pad(month)}`, label: MATRIX_MONTH_LABELS[month - 1] });
+    }
+    return periods;
+  }
+
   _matrixPeriods(charge, anchor, windowSize) {
     if (charge.recurrence === 'once') return { periods: [{ key: 'unico', label: 'Único' }], canGoBack: false, canGoForward: false };
 
@@ -330,9 +382,24 @@ class PaymentsService {
    * de la ventana mostrada simplemente no se ha generado aún. Se calcula igual que una instancia
    * real: vencida y sin pago → "overdue" (atrasado); si no, "pending" (en blanco). No se guarda
    * en la base — si el admin interactúa con la celda, ensureInstance recién ahí la crea. */
-  _virtualCellToDto(charge, periodKey, amount) {
+  /** `notApplicableReason`: el miembro no estaba en el club en ese período ("Antes de su ingreso"
+   * o "Retirado", ver helpers/membership.js) — no se le cobra: "no aplica". */
+  _virtualCellToDto(charge, periodKey, amount, notApplicableReason = null) {
     const dueDate = this._dueDateForPeriod(charge, periodKey);
     const isOverdue = dueDate < new Date();
+    if (notApplicableReason) {
+      return {
+        id: null,
+        periodLabel: periodKey,
+        amount: Number(amount),
+        paidAmount: 0,
+        dueDate: dueDate.toISOString(),
+        status: 'exempt',
+        displayStatus: 'not_applicable',
+        exemptReason: notApplicableReason,
+        exemptType: 'not_applicable',
+      };
+    }
     return {
       id: null,
       periodLabel: periodKey,
@@ -363,6 +430,8 @@ class PaymentsService {
       chargeResponsibleMemberId: responsibleInfo?.resolved?.memberId ?? null,
       chargeResponsibleMemberName: responsibleInfo?.resolved?.memberName ?? null,
       chargeResponsibles: responsibleInfo?.all ?? [],
+      // Cuenta de Tesorería del cobro (datos de transferencia), `null` si no hay — ver treasuryAccounts.service.js.
+      chargeTreasuryAccount: responsibleInfo?.treasuryAccount ?? null,
       periodLabel: periodKey,
       amount: Number(amount),
       dueDate: dueDate.toISOString(),
@@ -390,6 +459,8 @@ class PaymentsService {
    * {resolved,all}>` ya armado por `listForMember` (una vez por cobro distinto) — ver
    * `_instanceToDto`. */
   async _computeMissingPastInstances(instanceRows, memberId, responsibleByCharge) {
+    // Los períodos en que el miembro estaba retirado no se "inventan" como pendientes.
+    const intervals = await memberMembershipsRepository.findByMember(memberId);
     const byCharge = new Map();
     for (const row of instanceRows) {
       if (!byCharge.has(row.charge_id)) byCharge.set(row.charge_id, []);
@@ -404,6 +475,8 @@ class PaymentsService {
       // eslint-disable-next-line no-await-in-loop
       const amount = (await chargesRepository.resolveAmounts(chargeId, [memberId], charge.amount)).get(memberId);
       const responsibleInfo = responsibleByCharge.get(chargeId) ?? null;
+      // eslint-disable-next-line no-await-in-loop
+      const policy = await clubPolicyService.getMonthPolicy(charge.club_id);
 
       if (charge.recurrence === 'monthly') {
         const existing = new Set(
@@ -424,7 +497,9 @@ class PaymentsService {
           if (existing.has(idx)) continue;
           const year = Math.floor((idx - 1) / 12);
           const month = idx - year * 12;
-          virtual.push(this._virtualInstanceToDto(charge, `${year}-${pad(month)}`, amount, responsibleInfo));
+          const key = `${year}-${pad(month)}`;
+          if (!coversChargePeriod(intervals, 'monthly', key, null, policy)) continue;
+          virtual.push(this._virtualInstanceToDto(charge, key, proratedAmount(amount, intervals, 'monthly', key, policy), responsibleInfo));
         }
       } else {
         const existing = new Set(periodLabels.map(Number));
@@ -437,6 +512,7 @@ class PaymentsService {
 
         for (let y = startYear; y <= endYear; y += 1) {
           if (existing.has(y)) continue;
+          if (!coversChargePeriod(intervals, 'yearly', String(y), null, policy)) continue;
           virtual.push(this._virtualInstanceToDto(charge, String(y), amount, responsibleInfo));
         }
       }
@@ -518,6 +594,9 @@ class PaymentsService {
       uuid: row.uuid,
       chargeId: row.charge_id,
       responsibleMemberId: row.responsible_member_id,
+      treasuryAccountId: row.treasury_account_id ?? null,
+      treasuryAccountName: row.treasury_account_name ?? null,
+      treasuryAccountDeleted: !!row.treasury_account_deleted_at,
       periodLabel: row.period_label,
       amount: Number(row.amount),
       transferredAt: row.transferred_at,
@@ -563,6 +642,7 @@ class PaymentsService {
     const id = await chargeSettlementsRepository.createSettlement({
       chargeId,
       responsibleMemberId: data.responsibleMemberId,
+      treasuryAccountId: charge.purpose === 'external' ? null : ((await treasuryAccountsService.resolveForCharge(charge))?.id ?? null),
       periodLabel: data.periodKey,
       amount: data.amount,
       transferredAt: data.transferredAt || new Date(),
@@ -640,7 +720,7 @@ class PaymentsService {
    * complementar la ficha por miembro (que muestra "qué debe un miembro" en todos sus cobros).
    * Respeta el mismo acceso compuesto que el resto del módulo: solo aparecen filas de miembros
    * visibles tanto por Miembros como por Pagos (getVisibleMemberIds). */
-  async getChargeMatrix(clubId, chargeId, { anchor, columns } = {}, actorId, authContext) {
+  async getChargeMatrix(clubId, chargeId, { anchor, columns, year } = {}, actorId, authContext) {
     const charge = await chargesRepository.findActiveById(chargeId);
     if (!charge || charge.club_id !== clubId) throw AppError.notFound('Cobro no encontrado.');
 
@@ -652,26 +732,45 @@ class PaymentsService {
       amount: Number(charge.amount),
       status: charge.status,
       purpose: charge.purpose,
+      // Cuenta de Tesorería del cobro (datos para el botón "Ver cuenta"); `null` si no hay.
+      treasuryAccount: await treasuryAccountsService.resolveForCharge(charge),
       responsibles: (await chargesRepository.getResponsibleMembers(charge.id)).map((r) => ({
         memberId: r.memberId,
         memberName: r.memberName,
         groupId: r.groupId,
         groupName: r.groupName,
+        account: r.account,
       })),
     };
-    const { periods, canGoBack, canGoForward } = this._matrixPeriods(charge, anchor || null, columns || null);
+    // Vista por año (la que usa la app): `year` elige cuál; sin `year` ni `anchor`, el año actual
+    // (acotado a los años del cobro). `anchor`/`columns` quedan por compatibilidad (ventana móvil).
+    const years = this._chargeYears(charge);
+    let selectedYear = null;
+    let periods;
+    let canGoBack = false;
+    let canGoForward = false;
+    if (charge.recurrence !== 'once' && (year || !anchor)) {
+      const wanted = Number(year) || new Date().getUTCFullYear();
+      selectedYear = Math.min(Math.max(wanted, years[0]), years[years.length - 1]);
+      periods = this._yearPeriods(charge, selectedYear);
+      canGoBack = selectedYear > years[0];
+      canGoForward = selectedYear < years[years.length - 1];
+    } else {
+      ({ periods, canGoBack, canGoForward } = this._matrixPeriods(charge, anchor || null, columns || null));
+    }
     const rawSettlements = await this._computeSettlements(charge, periods);
 
     const { memberIds, scopedToMemberId } = await this._resolveChargeParticipants(charge, actorId, authContext);
     const settlements = scopedToMemberId ? this._filterSettlementsToResponsible(rawSettlements, scopedToMemberId) : rawSettlements;
 
-    if (!memberIds.length) return { charge: chargeDto, periods, canGoBack, canGoForward, rows: [], settlements };
+    if (!memberIds.length) return { charge: chargeDto, periods, canGoBack, canGoForward, rows: [], settlements, years, year: selectedYear };
 
-    const [members, instances, amounts, responsibleByMember] = await Promise.all([
+    const [allMembers, instances, amounts, responsibleByMember, membershipsByMember] = await Promise.all([
       membersRepository.findNamesByIds(memberIds, clubId),
       chargeInstancesRepository.findForChargeAndMembers(chargeId, memberIds),
       chargesRepository.resolveAmounts(chargeId, memberIds, charge.amount),
       chargesRepository.resolveResponsibles(chargeId, memberIds),
+      memberMembershipsRepository.findByMembers(memberIds),
     ]);
     const paidByInstance = await chargeInstancesRepository.sumAllocationsForInstances(instances.map((i) => i.id));
 
@@ -681,10 +780,20 @@ class PaymentsService {
       cellLookup.get(inst.member_id).set(inst.period_label, inst);
     }
 
+    // Un miembro aparece en lo que se está viendo si estuvo en el club en alguno de esos períodos
+    // o tiene algo registrado en ellos: un retirado sale hasta su último año, no para siempre.
+    const shownKeys = new Set(periods.map((p) => p.key));
+    const policy = await clubPolicyService.getMonthPolicy(charge.club_id);
+    const coveredIn = (m, key) => coversChargePeriod(membershipsByMember.get(m.id), charge.recurrence, key, this._dueDateForPeriod(charge, key), policy);
+    // (un período marcado "no aplica — Retirado" no cuenta como registro: no lo mantiene visible)
+    const hasRecordIn = (m) => [...(cellLookup.get(m.id)?.entries() ?? [])].some(([k, inst]) => shownKeys.has(k) && !(inst.status === 'exempt' && COVERAGE_REASONS.includes(inst.exempt_reason)));
+    const members = allMembers.filter((m) => periods.some((p) => coveredIn(m, p.key)) || hasRecordIn(m));
+
     const rows = members
       .map((m) => ({
         memberId: m.id,
         memberName: this._shortName(m),
+        memberAvatarUrl: m.avatar_url ? toAbsoluteMediaUrl(m.avatar_url) : null,
         // Responsable RESUELTO (con prioridad de grupo) para ESTE miembro puntual — ya no "el"
         // responsable del cobro, ver charges.repository.js#resolveResponsibles.
         responsibleMemberId: responsibleByMember.get(m.id)?.memberId ?? null,
@@ -692,15 +801,24 @@ class PaymentsService {
         // Usado por el filtro por grupo del frontend (treasury-payments.page.ts) — mismo criterio
         // de parseo de CSV que members.service.js#findOptions.
         groupIds: m.group_ids ? m.group_ids.split(',').map(Number) : [],
+        // Retirado: se sigue mostrando por su historial, pero ya no se le cobran períodos nuevos.
+        inactive: m.status === 'inactive',
         cells: periods.reduce((acc, p) => {
           const inst = cellLookup.get(m.id)?.get(p.key);
-          acc[p.key] = inst ? this._matrixCellToDto(inst, paidByInstance[inst.id] ?? 0) : this._virtualCellToDto(charge, p.key, amounts.get(m.id));
+          acc[p.key] = inst
+            ? this._matrixCellToDto(inst, paidByInstance[inst.id] ?? 0)
+            : this._virtualCellToDto(
+                charge,
+                p.key,
+                proratedAmount(amounts.get(m.id), membershipsByMember.get(m.id), charge.recurrence, p.key, policy),
+                chargePeriodReason(membershipsByMember.get(m.id), charge.recurrence, p.key, this._dueDateForPeriod(charge, p.key), policy)
+              );
           return acc;
         }, {}),
       }))
       .sort((a, b) => a.memberName.localeCompare(b.memberName));
 
-    return { charge: chargeDto, periods, canGoBack, canGoForward, rows, settlements };
+    return { charge: chargeDto, periods, canGoBack, canGoForward, rows, settlements, years, year: selectedYear };
   }
 
   /** ¿El actor es responsable de ALGO en este cobro (cualquier grupo, o "todos los grupos")? Gate
@@ -726,7 +844,9 @@ class PaymentsService {
    * responsable pero hoy no resuelve para nadie (ej. su grupo quedó vacío), no es un error: se
    * devuelve una lista vacía, igual que el camino normal ante un scope vacío. */
   async _resolveChargeParticipants(charge, actorId, authContext) {
-    const participantIds = await chargesRepository.expandTargetMemberIds(charge.id);
+    // Incluye a los inactivos que tienen períodos en este cobro: si no, al retirarse un socio su
+    // historial desaparecía de la matriz (y sus pagos de los totales por período).
+    const participantIds = await chargesRepository.expandTargetMemberIds(charge.id, undefined, { inactive: 'all' });
     if (permissionService.hasAnyFunction(authContext, [FUNCTIONS.VIEW_PAYMENTS, FUNCTIONS.VIEW_PAYMENTS_SCOPED])) {
       const visibleMemberIds = await this.getVisibleMemberIds(authContext, actorId, charge.club_id);
       const memberIds = visibleMemberIds === null ? participantIds : participantIds.filter((id) => visibleMemberIds.includes(id));
@@ -796,6 +916,25 @@ class PaymentsService {
     return /^\d{4}$/.test(row.period_label);
   }
 
+  /**
+   * Crea las instancias de los períodos pasados (y de los que vencen antes de `untilDate`) que le
+   * corresponden al miembro pero nunca se generaron — p. ej. un cobro creado con fecha de inicio en
+   * el pasado (el cron solo genera el período actual + el siguiente). La matriz y la ficha ya los
+   * muestran como "virtuales"; la página pública de pagos necesita que existan para poder pagarlos.
+   * Respeta la membresía (no crea períodos de cuando estaba retirado o antes de su ingreso).
+   */
+  async materializeMissingForMember(memberId, untilDate) {
+    const rows = (await chargeInstancesRepository.findForMember(memberId)).filter((r) => this._matchesCurrentRecurrence(r));
+    const missing = await this._computeMissingPastInstances(rows, memberId, new Map());
+    let created = 0;
+    for (const v of missing) {
+      if (new Date(v.dueDate) > untilDate) continue;
+      // eslint-disable-next-line no-await-in-loop
+      if (await chargeInstancesService.ensureInstance(v.chargeId, memberId, v.periodLabel)) created += 1;
+    }
+    return created;
+  }
+
   async listForMember(clubId, memberId, actorId, authContext) {
     await this.assertMemberPaymentsAccessible(clubId, memberId, actorId, authContext);
 
@@ -814,13 +953,16 @@ class PaymentsService {
     // distinto entre sus instancias, ya no es "el" responsable único del cobro, ver
     // charges.repository.js#resolveResponsibles.
     const chargeIds = [...new Set(instanceRows.map((r) => r.charge_id))];
+    const clubAccounts = await treasuryAccountsRepository.findByClub(clubId);
     const responsibleEntries = await Promise.all(
       chargeIds.map(async (chargeId) => {
         const [resolvedMap, all] = await Promise.all([
           chargesRepository.resolveResponsibles(chargeId, [memberId]),
           chargesRepository.getResponsibleMembers(chargeId),
         ]);
-        return [chargeId, { resolved: resolvedMap.get(memberId) ?? null, all: all.map((r) => ({ memberId: r.memberId, memberName: r.memberName })) }];
+        const charge = await chargesRepository.findActiveById(chargeId);
+        const treasuryAccount = charge ? await treasuryAccountsService.resolveForCharge(charge, clubAccounts) : null;
+        return [chargeId, { resolved: resolvedMap.get(memberId) ?? null, all: all.map((r) => ({ memberId: r.memberId, memberName: r.memberName, account: r.account })), treasuryAccount }];
       })
     );
     const responsibleByCharge = new Map(responsibleEntries);
@@ -921,12 +1063,17 @@ class PaymentsService {
     const responsibleIds = (await chargesRepository.getResponsibleMembers(charge.id)).map((r) => r.memberId);
     this._validatePaidToMemberId(charge, paidToMemberId, responsibleIds);
 
+    // Cuenta de Tesorería donde entra el dinero (solo pago directo): la del cobro AHORA — queda
+    // guardada en el pago, así su historial no cambia si el cobro cambia de cuenta después.
+    const treasuryAccountId = paidToMemberId === null ? ((await treasuryAccountsService.resolveForCharge(charge))?.id ?? null) : null;
+
     const paymentId = await withTransaction(async (conn) => {
       const id = await paymentsRepository.createPayment(
         {
           clubId,
           memberId: data.memberId,
           paidToMemberId,
+          treasuryAccountId,
           amount: data.amount,
           paidAt: data.paidAt || new Date(),
           note: data.note || null,
@@ -990,11 +1137,16 @@ class PaymentsService {
 
     // Mismo criterio que create(): solo un responsable del cobro o Tesorería (`null`) son
     // destinatarios válidos (y en un cobro externo, SOLO alguno de los responsables).
+    let treasuryAccountUpdate;
     if (data.paidToMemberId !== undefined) {
       const instance = await chargeInstancesRepository.findActiveById(allocation.charge_instance_id);
       const charge = await chargesRepository.findActiveById(instance.charge_id);
       const responsibleIds = (await chargesRepository.getResponsibleMembers(charge.id)).map((r) => r.memberId);
       this._validatePaidToMemberId(charge, data.paidToMemberId, responsibleIds);
+      if (data.paidToMemberId !== null) treasuryAccountUpdate = null;
+      else if (payment.paid_to_member_id !== null || payment.treasury_account_id === null) {
+        treasuryAccountUpdate = (await treasuryAccountsService.resolveForCharge(charge))?.id ?? null;
+      }
     }
 
     await withTransaction(async (conn) => {
@@ -1003,6 +1155,7 @@ class PaymentsService {
       if (data.paidAt !== undefined) updates.paid_at = data.paidAt;
       if (data.note !== undefined) updates.note = data.note || null;
       if (data.paidToMemberId !== undefined) updates.paid_to_member_id = data.paidToMemberId;
+      if (treasuryAccountUpdate !== undefined) updates.treasury_account_id = treasuryAccountUpdate;
       if (Object.keys(updates).length) await paymentsRepository.updateById(paymentId, updates, conn);
       if (data.amount !== undefined) {
         await paymentsRepository.updateAllocationAmount(allocation.id, newAmount, conn);
@@ -1126,8 +1279,19 @@ class PaymentsService {
 
     await this.assertChargeMemberPaymentAccessible(charge, memberId, actorId, authContext);
 
-    const participantIds = await chargesRepository.expandTargetMemberIds(chargeId);
+    const participantIds = await chargesRepository.expandTargetMemberIds(chargeId, undefined, { inactive: 'all' });
     if (!participantIds.includes(memberId)) throw AppError.badRequest('Este miembro no participa de este cobro.');
+
+    // Un miembro retirado puede tener deuda o historial de ANTES de su baja (pagarla, o marcarla
+    // "no aplica"), pero no se le cargan períodos que vencen después.
+    if (/^(\d{4}-\d{2}|\d{4}|unico)$/.test(periodKey)) {
+      const intervals = await memberMembershipsRepository.findByMember(memberId);
+      const policy = await clubPolicyService.getMonthPolicy(charge.club_id);
+      const reason = chargePeriodReason(intervals, charge.recurrence, periodKey, this._dueDateForPeriod(charge, periodKey), policy);
+      if (reason) {
+        throw AppError.badRequest(reason === 'Retirado' ? 'El miembro estaba retirado del club en ese período: no le corresponde.' : 'Ese período es anterior al ingreso del miembro: no le corresponde.');
+      }
+    }
 
     const instance = await chargeInstancesService.ensureInstance(chargeId, memberId, periodKey);
     if (!instance) throw AppError.badRequest('Período inválido para este cobro.');
@@ -1171,6 +1335,7 @@ class PaymentsService {
     let overdueMembersCount = null;
     let pendingFromResponsibles = null;
     let incomeByMonth = null;
+    let accountBalances = null;
 
     if (hasPaymentAccess) {
       const access = await this._resolveAccess(authContext, actorId, clubId);
@@ -1196,6 +1361,10 @@ class PaymentsService {
       overdueMembersCount = overdue;
       pendingFromResponsibles = Math.max(0, heldByResponsibles - settledAllTime);
       incomeByMonth = this._sumMonthlyMaps(directByMonth, settledByMonth, DASHBOARD_CHART_MONTHS);
+
+      // Saldo por cuenta de Tesorería: solo con acceso COMPLETO a pagos y a gastos — es un saldo
+      // real (entradas − gastos ± transferencias), y a medias no cuadraría con el total.
+      if (access.full && hasExpenseAccess) accountBalances = await treasuryAccountsService.balances(clubId);
     }
 
     // El gráfico se arma si el actor ve AL MENOS una de las dos series — el lado sin acceso
@@ -1205,7 +1374,7 @@ class PaymentsService {
         ? this._buildMonthlySeries(incomeByMonth ?? {}, expensesByMonth, DASHBOARD_CHART_MONTHS)
         : null;
 
-    return { activeChargesCount, activeExpensesCount, treasuryTotal, incomeTotal, expensesTotal, overdueMembersCount, pendingFromResponsibles, monthlyTreasury };
+    return { activeChargesCount, activeExpensesCount, treasuryTotal, incomeTotal, expensesTotal, overdueMembersCount, pendingFromResponsibles, monthlyTreasury, accountBalances };
   }
 
   /** Suma dos mapas `{ 'YYYY-MM': total }` en uno solo — usado para combinar pagos directos +

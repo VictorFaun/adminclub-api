@@ -42,4 +42,32 @@ const strictAuthRateLimit = rateLimit({
   max: env.security.authRateLimitMax,
 });
 
-module.exports = { generalRateLimit, authRateLimit, strictAuthRateLimit };
+/** Vista pública de pago (sin sesión): lectura moderada por IP. */
+const publicPaymentsReadRateLimit = rateLimit({
+  ...baseOptions,
+  windowMs: env.security.rateLimitWindowMin * 60 * 1000,
+  max: 60,
+});
+
+/** Consulta por RUT (sin sesión): estricto, para que no sirva de buscador masivo de RUT. */
+const publicPaymentsLookupRateLimit = rateLimit({
+  ...baseOptions,
+  windowMs: env.security.rateLimitWindowMin * 60 * 1000,
+  max: 20,
+});
+
+/** Subida de comprobantes desde la vista pública: mucho más estricto (cada request guarda un archivo). */
+const publicPaymentsUploadRateLimit = rateLimit({
+  ...baseOptions,
+  windowMs: env.security.rateLimitWindowMin * 60 * 1000,
+  max: 10,
+});
+
+/** Envío del formulario público de inscripción (sin sesión): pocas por IP, cada una es una solicitud. */
+const publicMemberFormSubmitRateLimit = rateLimit({
+  ...baseOptions,
+  windowMs: env.security.rateLimitWindowMin * 60 * 1000,
+  max: 10,
+});
+
+module.exports = { publicMemberFormSubmitRateLimit, generalRateLimit, authRateLimit, strictAuthRateLimit, publicPaymentsReadRateLimit, publicPaymentsLookupRateLimit, publicPaymentsUploadRateLimit };

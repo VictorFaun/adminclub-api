@@ -41,10 +41,11 @@ class TrainingsService {
     };
   }
 
-  /** Al menos un horario es obligatorio ("cuántos entrenamientos a la semana hay y qué días y
-   * horarios" — pedido explícito, sin esto un entrenamiento no genera ninguna sesión). */
+  /** El horario semanal es opcional (arreglo vacío = días manuales). */
   _assertSchedulesValid(schedules) {
-    if (!schedules || !schedules.length) throw AppError.badRequest('Agrega al menos un día y horario de entrenamiento.');
+    // Puede no haber horario semanal: en ese caso los días se agregan a mano desde la matriz de
+    // asistencia (ver trainingAttendance.service.js#addSession).
+    if (!schedules) throw AppError.badRequest('Horario inválido.');
     for (const s of schedules) {
       if (!DAYS_OF_WEEK.includes(Number(s.dayOfWeek))) throw AppError.badRequest('Día de la semana inválido.');
       if (!/^\d{2}:\d{2}(:\d{2})?$/.test(s.startTime)) throw AppError.badRequest('Hora de inicio inválida.');

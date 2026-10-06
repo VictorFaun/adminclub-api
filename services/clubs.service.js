@@ -7,6 +7,7 @@ const joinRequestsRepository = require('../repositories/joinRequests.repository'
 const invitationsRepository = require('../repositories/invitations.repository');
 const auditRepository = require('../repositories/audit.repository');
 const rolesService = require('./roles.service');
+const membersService = require('./members.service');
 const AppError = require('../helpers/AppError');
 const { withTransaction } = require('../config/database');
 const { parsePagination, buildMeta } = require('../helpers/pagination');
@@ -14,9 +15,35 @@ const slugify = require('../utils/slugify');
 const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const { CLUB_STATUS, USER_CLUB_STATUS, JOIN_REQUEST_STATUS } = require('../config/constants');
 const { diffValue, buildDiff } = require('../helpers/auditDiff');
+
+const PUBLIC_CODE_REGEX = /^[A-Za-z0-9](?:[A-Za-z0-9-]{1,38})[A-Za-z0-9]$/;
 const platformSettingsRepository = require('../repositories/platformSettings.repository');
+const treasuryAccountsRepository = require('../repositories/treasuryAccounts.repository');
+const memberFieldsService = require('./memberFields.service');
+const { DEFAULT_TREASURY_ACCOUNT_NAME } = require('../helpers/paymentAccount');
+const { showLogoOnBanner, setShowLogoOnBanner } = require('../helpers/clubBranding');
 
 const SORTABLE = ['created_at', 'name', 'status'];
+const permissionService = require('./permission.service');
+const { FUNCTIONS } = require('../config/constants');
+
+const clp = (n) => `$${Math.round(Number(n) || 0).toLocaleString('es-CL')}`;
+const amountOf = (changes) => {
+  const v = changes && typeof changes === 'object' ? changes.amount : null;
+  const n = v && typeof v === 'object' ? v.to ?? v.value : v;
+  return Number(n) > 0 ? ` de ${clp(n)}` : '';
+};
+/** Frase (sin el autor delante) y tipo de cada evento de la actividad del dashboard. */
+const ACTIVITY_TEXT = {
+  PAYMENT_CREATED: (name, ch) => ['payment', `registró un pago${amountOf(ch)}${name ? ` de ${name}` : ''}`],
+  PAYMENT_PROOF_SUBMITTED: () => ['proof', 'Llegó un comprobante de pago por revisar'],
+  PAYMENT_PROOF_APPROVED: () => ['proof', 'aprobó un comprobante de pago'],
+  MEMBER_CREATED: (name) => ['member', `agregó a ${name ?? 'un miembro'}`],
+  MEMBER_APPLICATION_SUBMITTED: (name) => ['application', `Nueva solicitud de inscripción${name ? ` de ${name}` : ''}`],
+  MEMBER_APPLICATION_APPROVED: (name) => ['application', `aceptó la solicitud${name ? ` de ${name}` : ''}`],
+  EXPENSE_PAYMENT_CREATED: (name) => ['expense', `pagó el gasto ${name ?? ''}`.trim()],
+  CHARGE_CREATED: (name) => ['charge', `creó el cobro ${name ?? ''}`.trim()],
+};
 
 class ClubsService {
   toDto(club) {
@@ -53,6 +80,24 @@ class ClubsService {
     return candidate;
   }
 
+  /**
+   * Código público personalizado (el de `/pay/<código>`): 3 a 40 caracteres, letras, números y
+   * guiones (sin guion al inicio/fin). Se guarda tal cual se escribe, pero la unicidad no distingue
+   * mayúsculas (la columna es case-insensitive: "Trawen" y "trawen" serían el mismo enlace).
+   */
+  _assertPublicCodeFormat(code) {
+    if (!PUBLIC_CODE_REGEX.test(code)) {
+      throw AppError.badRequest('El código debe tener entre 3 y 40 caracteres: letras, números y guiones (sin guion al inicio ni al final).');
+    }
+  }
+
+  /** ¿Está libre este código? (para validar mientras se escribe). `excludeClubId`: el propio club. */
+  async checkPublicCode(code, excludeClubId) {
+    const value = String(code ?? '').trim();
+    if (!PUBLIC_CODE_REGEX.test(value)) return { code: value, valid: false, available: false };
+    return { code: value, valid: true, available: !(await clubsRepository.publicCodeExists(value, excludeClubId)) };
+  }
+
   async create({ name, description, primaryColor, secondaryColor, theme, isPublic, timezone }, creatorId) {
     const publicCode = await this._generateUniquePublicCode(name);
     // El frontend manda la zona horaria detectada del DISPOSITIVO de quien crea el club
@@ -79,6 +124,10 @@ class ClubsService {
       );
 
       const adminRoleId = await rolesService.seedDefaultRolesForClub(id, conn);
+      // Todo club parte con una cuenta de Tesorería (sin datos) — ver treasuryAccounts.service.js.
+      await treasuryAccountsRepository.create(id, { name: DEFAULT_TREASURY_ACCOUNT_NAME, bankName: null, accountType: null, accountNumber: null, holderName: null, holderRut: null, email: null, notes: null }, conn);
+      // Ficha de miembro precargada con los campos sugeridos (100% editable desde Configuración).
+      await memberFieldsService.addSuggested(id, null, conn);
       await usersRepository.clearDefaultClub(creatorId, conn);
       await usersRepository.addToClub({ userId: creatorId, clubId: id, status: USER_CLUB_STATUS.ACTIVE, isDefault: true }, conn);
       if (adminRoleId) {
@@ -97,7 +146,7 @@ class ClubsService {
   async getById(clubId) {
     const club = await clubsRepository.findActiveById(clubId);
     if (!club) throw AppError.notFound('Club no encontrado.');
-    return this.toDto(club);
+    return { ...this.toDto(club), showLogoOnBanner: await showLogoOnBanner(clubId) };
   }
 
   async update(clubId, data, actorId) {
@@ -107,7 +156,16 @@ class ClubsService {
     const updates = {};
     if (data.name !== undefined && data.name !== club.name) {
       updates.name = data.name;
-      updates.public_code = await this._generateUniquePublicCode(data.name, clubId);
+    }
+    if (data.publicCode !== undefined) {
+      const code = String(data.publicCode).trim();
+      if (code !== club.public_code) {
+        this._assertPublicCodeFormat(code);
+        if (await clubsRepository.publicCodeExists(code, clubId)) {
+          throw AppError.conflict(`El código "${code}" ya está en uso por otro club. Elige uno distinto.`);
+        }
+        updates.public_code = code;
+      }
     }
     if (data.description !== undefined) updates.description = data.description;
     if (data.primaryColor !== undefined) updates.primary_color = data.primaryColor;
@@ -121,15 +179,25 @@ class ClubsService {
     if (Object.keys(updates).length) {
       await clubsRepository.updateById(clubId, updates);
     }
+    let logoChange;
+    if (data.showLogoOnBanner !== undefined) {
+      const before = await showLogoOnBanner(clubId);
+      if (before !== !!data.showLogoOnBanner) {
+        await setShowLogoOnBanner(clubId, !!data.showLogoOnBanner);
+        logoChange = diffValue(before, !!data.showLogoOnBanner);
+      }
+    }
 
     const changes = buildDiff({
       name: updates.name !== undefined ? diffValue(club.name, updates.name) : undefined,
+      publicCode: updates.public_code !== undefined ? diffValue(club.public_code, updates.public_code) : undefined,
       description: updates.description !== undefined ? diffValue(club.description, updates.description) : undefined,
       primaryColor: updates.primary_color !== undefined ? diffValue(club.primary_color, updates.primary_color) : undefined,
       secondaryColor: updates.secondary_color !== undefined ? diffValue(club.secondary_color, updates.secondary_color) : undefined,
       theme: updates.theme !== undefined ? diffValue(club.theme, updates.theme) : undefined,
       timezone: updates.timezone !== undefined ? diffValue(club.timezone, updates.timezone) : undefined,
       isPublic: updates.is_public !== undefined ? diffValue(!!club.is_public, !!updates.is_public) : undefined,
+      showLogoOnBanner: logoChange,
     });
     // Si se envió el formulario sin cambiar nada, no queda nada que auditar — evita
     // ensuciar el historial con "Actualizó la información del club" sin ningún detalle.
@@ -172,19 +240,37 @@ class ClubsService {
     return { items: rows.map((r) => this.toDto(r)), meta: buildMeta({ page, limit, total }) };
   }
 
-  async getStats(clubId) {
-    const [usersCount, activeMembersCount, invitationsCount, recentActivity] = await Promise.all([
+  async getStats(clubId, authContext = null) {
+    const [usersCount, activeMembersCount, invitationsCount, joins, events] = await Promise.all([
       clubsRepository.countUsers(clubId),
       membersRepository.countByClubAndStatus(clubId, 'active'),
       clubsRepository.countActiveInvitations(clubId),
       auditRepository.recentActivity(clubId, 10),
+      this._activityEvents(clubId, authContext),
     ]);
-    return {
-      usersCount,
-      activeMembersCount,
-      invitationsCount,
-      recentActivity: recentActivity.map((entry) => ({ ...entry, avatar_url: toAbsoluteMediaUrl(entry.avatar_url) })),
-    };
+    // Actividad = uniones al club (activity_logs) + lo que pasa en el día a día (pagos,
+    // comprobantes, solicitudes, altas), lo más reciente primero.
+    const recentActivity = [...joins.map((j) => ({ ...j, kind: 'join' })), ...events]
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+      .slice(0, 10)
+      .map((entry) => ({ ...entry, avatar_url: toAbsoluteMediaUrl(entry.avatar_url) }));
+    return { usersCount, activeMembersCount, invitationsCount, recentActivity };
+  }
+
+  /** Eventos de audit_logs para la actividad del dashboard, solo de los módulos que el actor puede ver. */
+  async _activityEvents(clubId, authContext) {
+    const can = (codes) => !authContext || permissionService.hasAnyFunction(authContext, codes);
+    const actions = [];
+    if (can([FUNCTIONS.VIEW_PAYMENTS])) actions.push('PAYMENT_CREATED', 'PAYMENT_PROOF_SUBMITTED', 'PAYMENT_PROOF_APPROVED');
+    if (can([FUNCTIONS.VIEW_MEMBERS])) actions.push('MEMBER_CREATED', 'MEMBER_APPLICATION_SUBMITTED', 'MEMBER_APPLICATION_APPROVED');
+    if (can([FUNCTIONS.VIEW_EXPENSES])) actions.push('EXPENSE_PAYMENT_CREATED');
+    if (can([FUNCTIONS.VIEW_CHARGES])) actions.push('CHARGE_CREATED');
+    if (!actions.length) return [];
+    const rows = await auditRepository.recentByActions(clubId, actions, 10);
+    return rows.map((r) => {
+      const [kind, description] = ACTIVITY_TEXT[r.action](r.entity_name, r.changes);
+      return { id: `a${r.id}`, user_id: r.user_id, username: r.username, avatar_url: r.avatar_url, description, created_at: r.created_at, kind };
+    });
   }
 
   /**
@@ -239,6 +325,11 @@ class ClubsService {
       }
 
       await usersRepository.addToClub({ userId, clubId: club.id, status: USER_CLUB_STATUS.ACTIVE, isDefault: clubsCountBefore === 0 }, conn);
+      // Volver a unirse tras haber sido retirado también reactiva su ficha si el retiro la archivó.
+      if (existing?.status === USER_CLUB_STATUS.WITHDRAWN) {
+        const member = await membersRepository.findByUserId(userId, club.id, conn);
+        if (member) await membersService.applyStatus(member, 'active', userId, conn);
+      }
       if (invitation.requires_member_profile) {
         await usersRepository.setRequiresProfileCompletion(userId, club.id, true, conn);
       }

@@ -38,6 +38,15 @@ class InvitationsRepository extends BaseRepository {
     return { rows, total: countRows[0].total };
   }
 
+  async updateFields(invitationId, { maxUses, expiresAt, defaultRoleId, requiresMemberProfile, note, status }, conn = pool) {
+    await conn.query(
+      `UPDATE invitations
+       SET max_uses = ?, expires_at = ?, default_role_id = ?, requires_member_profile = ?, note = ?, status = ?
+       WHERE id = ?`,
+      [maxUses, expiresAt, defaultRoleId, requiresMemberProfile, note, status, invitationId]
+    );
+  }
+
   async incrementUse(invitationId, conn = pool) {
     await conn.query('UPDATE invitations SET uses_count = uses_count + 1 WHERE id = ?', [invitationId]);
   }

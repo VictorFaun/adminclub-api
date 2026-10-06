@@ -9,3 +9,4 @@ coverage/
 *.local
 .DS_Store
 Thumbs.db
+private_uploads/

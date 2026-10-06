@@ -8,9 +8,9 @@ class NotificationsRepository extends BaseRepository {
 
   async createNotification(data, conn = pool) {
     const [result] = await conn.query(
-      `INSERT INTO notifications (user_id, club_id, type, title, message, link)
-       VALUES (:userId, :clubId, :type, :title, :message, :link)`,
-      data
+      `INSERT INTO notifications (user_id, club_id, type, title, message, link, image_url)
+       VALUES (:userId, :clubId, :type, :title, :message, :link, :imageUrl)`,
+      { imageUrl: null, ...data }
     );
     return result.insertId;
   }

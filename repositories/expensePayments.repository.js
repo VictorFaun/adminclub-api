@@ -7,7 +7,12 @@ class ExpensePaymentsRepository extends BaseRepository {
   }
 
   async findActiveById(id, conn = pool) {
-    const [rows] = await conn.query('SELECT * FROM expense_payments WHERE id = ? LIMIT 1', [id]);
+    const [rows] = await conn.query(
+      `SELECT ep.*, ta.name AS treasury_account_name, ta.deleted_at AS treasury_account_deleted_at
+       FROM expense_payments ep LEFT JOIN treasury_accounts ta ON ta.id = ep.treasury_account_id
+       WHERE ep.id = ? LIMIT 1`,
+      [id]
+    );
     return rows[0] || null;
   }
 
@@ -15,9 +20,11 @@ class ExpensePaymentsRepository extends BaseRepository {
    * (un período puede acumular varios abonos). */
   async findByInstance(instanceId, conn = pool) {
     const [rows] = await conn.query(
-      `SELECT ep.*, u.username AS registered_by_username
+      `SELECT ep.*, u.username AS registered_by_username,
+              ta.name AS treasury_account_name, ta.deleted_at AS treasury_account_deleted_at
        FROM expense_payments ep
        LEFT JOIN users u ON u.id = ep.registered_by
+       LEFT JOIN treasury_accounts ta ON ta.id = ep.treasury_account_id
        WHERE ep.expense_instance_id = ? ORDER BY ep.paid_at DESC`,
       [instanceId]
     );
@@ -26,8 +33,8 @@ class ExpensePaymentsRepository extends BaseRepository {
 
   async createPayment(data, conn = pool) {
     const [result] = await conn.query(
-      `INSERT INTO expense_payments (uuid, club_id, expense_instance_id, amount, paid_at, note, registered_by)
-       VALUES (UUID(), :clubId, :expenseInstanceId, :amount, :paidAt, :note, :registeredBy)`,
+      `INSERT INTO expense_payments (uuid, club_id, expense_instance_id, treasury_account_id, amount, paid_at, note, registered_by)
+       VALUES (UUID(), :clubId, :expenseInstanceId, :treasuryAccountId, :amount, :paidAt, :note, :registeredBy)`,
       data
     );
     return result.insertId;

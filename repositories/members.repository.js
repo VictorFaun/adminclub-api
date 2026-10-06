@@ -1,5 +1,9 @@
 const { pool } = require('../config/database');
 const BaseRepository = require('./BaseRepository');
+const { PROFILE_COLS, profileJoin } = require('../helpers/memberProfileSql');
+
+// Los datos del miembro (nombres, identificador, nacimiento, foto…) son campos de su ficha: se
+// leen de la vista `member_profiles` con los mismos nombres de columna de siempre.
 
 class MembersRepository extends BaseRepository {
   constructor() {
@@ -7,13 +11,13 @@ class MembersRepository extends BaseRepository {
   }
 
   async findActiveById(id, conn = pool) {
-    const [rows] = await conn.query('SELECT * FROM members WHERE id = ? AND deleted_at IS NULL LIMIT 1', [id]);
+    const [rows] = await conn.query(`SELECT m.*, ${PROFILE_COLS} FROM members m ${profileJoin()} WHERE m.id = ? AND m.deleted_at IS NULL LIMIT 1`, [id]);
     return rows[0] || null;
   }
 
   async findByUserId(userId, clubId, conn = pool) {
     const [rows] = await conn.query(
-      'SELECT * FROM members WHERE user_id = ? AND club_id = ? AND deleted_at IS NULL LIMIT 1',
+      `SELECT m.*, ${PROFILE_COLS} FROM members m ${profileJoin()} WHERE m.user_id = ? AND m.club_id = ? AND m.deleted_at IS NULL LIMIT 1`,
       [userId, clubId]
     );
     return rows[0] || null;
@@ -27,23 +31,85 @@ class MembersRepository extends BaseRepository {
     await conn.query('UPDATE members SET user_id = NULL WHERE user_id = ?', [userId]);
   }
 
-  async rutExists(rut, clubId, excludeMemberId = null, conn = pool) {
-    const sql = excludeMemberId
-      ? 'SELECT id FROM members WHERE rut = ? AND club_id = ? AND id != ? AND deleted_at IS NULL LIMIT 1'
-      : 'SELECT id FROM members WHERE rut = ? AND club_id = ? AND deleted_at IS NULL LIMIT 1';
-    const params = excludeMemberId ? [rut, clubId, excludeMemberId] : [rut, clubId];
-    const [rows] = await conn.query(sql, params);
-    return rows.length > 0;
-  }
-
   async createMember(data, conn = pool) {
     const [result] = await conn.query(
-      `INSERT INTO members
-        (uuid, club_id, first_name, middle_name, last_name, second_last_name, email, phone, rut, birth_date, user_id, status, created_by)
-       VALUES (UUID(), :clubId, :firstName, :middleName, :lastName, :secondLastName, :email, :phone, :rut, :birthDate, :userId, :status, :createdBy)`,
+      `INSERT INTO members (uuid, club_id, user_id, status, created_by)
+       VALUES (UUID(), :clubId, :userId, :status, :createdBy)`,
       data
     );
     return result.insertId;
+  }
+
+  /** Miembros ACTIVOS con cumpleaños en los próximos `days` días (0 = hoy), ordenados por cercanía.
+   * `days_until` se calcula sobre la próxima fecha de cumpleaños (este año, o el siguiente si ya
+   * pasó). `memberIds` = whitelist (scope) o null para todo el club. `search` filtra por nombre y
+   * `groupId` por grupo — mismos filtros (y mismo orden de placeholders JOIN-antes-que-WHERE) que
+   * `paginateByClub`. */
+  async findUpcomingBirthdays(clubId, days, memberIds, { search, groupId } = {}, conn = pool) {
+    if (memberIds && !memberIds.length) return [];
+    const joins = [];
+    const joinParams = [];
+    if (groupId) {
+      joins.push('INNER JOIN member_group_members mgm_f ON mgm_f.member_id = m.id AND mgm_f.group_id = ?');
+      joinParams.push(groupId);
+    }
+    const whereParams = [clubId];
+    let scopeSql = '';
+    if (memberIds) {
+      scopeSql = 'AND m.id IN (?)';
+      whereParams.push(memberIds);
+    }
+    let searchSql = '';
+    if (search) {
+      searchSql = 'AND (mp.first_name LIKE ? OR mp.middle_name LIKE ? OR mp.last_name LIKE ? OR mp.second_last_name LIKE ?)';
+      whereParams.push(...Array(4).fill(`%${search}%`));
+    }
+    const joinSql = joins.join(' ');
+    const [rows] = await conn.query(
+      `SELECT t.*, DATEDIFF(t.next_birthday, CURDATE()) AS days_until FROM (
+         SELECT m.*, ${PROFILE_COLS}, IF(
+           DATE_ADD(mp.birth_date, INTERVAL TIMESTAMPDIFF(YEAR, mp.birth_date, CURDATE()) YEAR) >= CURDATE(),
+           DATE_ADD(mp.birth_date, INTERVAL TIMESTAMPDIFF(YEAR, mp.birth_date, CURDATE()) YEAR),
+           DATE_ADD(mp.birth_date, INTERVAL TIMESTAMPDIFF(YEAR, mp.birth_date, CURDATE()) + 1 YEAR)
+         ) AS next_birthday
+         FROM members m ${profileJoin()} ${joinSql}
+         WHERE m.club_id = ? AND m.deleted_at IS NULL AND m.status = 'active' AND mp.birth_date IS NOT NULL ${scopeSql} ${searchSql}
+       ) t
+       WHERE DATEDIFF(t.next_birthday, CURDATE()) BETWEEN 0 AND ?
+       ORDER BY days_until ASC, t.first_name ASC`,
+      [...joinParams, ...whereParams, days]
+    );
+    return rows;
+  }
+
+  // --- Documentos adjuntos (privados) ---
+
+  async findDocuments(memberId, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT d.*, u.username AS uploaded_by_username FROM member_documents d
+       LEFT JOIN users u ON u.id = d.uploaded_by
+       WHERE d.member_id = ? ORDER BY d.created_at DESC`,
+      [memberId]
+    );
+    return rows;
+  }
+
+  async findDocument(documentId, conn = pool) {
+    const [rows] = await conn.query('SELECT * FROM member_documents WHERE id = ? LIMIT 1', [documentId]);
+    return rows[0] || null;
+  }
+
+  async createDocument(data, conn = pool) {
+    const [result] = await conn.query(
+      `INSERT INTO member_documents (uuid, club_id, member_id, field_id, name, file_path, mime_type, size_bytes, uploaded_by)
+       VALUES (UUID(), :clubId, :memberId, :fieldId, :name, :filePath, :mimeType, :sizeBytes, :uploadedBy)`,
+      data
+    );
+    return result.insertId;
+  }
+
+  async deleteDocument(documentId, conn = pool) {
+    await conn.query('DELETE FROM member_documents WHERE id = ?', [documentId]);
   }
 
   async softDelete(id, conn = pool) {
@@ -57,7 +123,7 @@ class MembersRepository extends BaseRepository {
    * VIEW_MEMBERS_SCOPED; si viene un arreglo VACÍO, el llamador debe evitar llamar acá y
    * devolver una página vacía directamente, sin query).
    */
-  async paginateByClub(clubId, { limit, offset, sortBy, sortOrder, search, status, groupId, linked, memberIds }) {
+  async paginateByClub(clubId, { limit, offset, sortBy, sortOrder, search, status, groupId, linked, memberIds, fieldFilters = [], hiddenFieldIds = [] }) {
     const whereParams = [clubId];
     const where = ['m.club_id = ?', 'm.deleted_at IS NULL'];
     const joins = [];
@@ -68,14 +134,34 @@ class MembersRepository extends BaseRepository {
       whereParams.push(status);
     }
     if (search) {
-      where.push(
-        '(m.first_name LIKE ? OR m.middle_name LIKE ? OR m.last_name LIKE ? OR m.second_last_name LIKE ? OR m.email LIKE ? OR m.rut LIKE ?)'
-      );
-      whereParams.push(...Array(6).fill(`%${search}%`));
+      // Busca en CUALQUIER dato de la ficha (nombre, identificador, correo, campos propios del club).
+      // Los campos sensibles no entran en la búsqueda de quien no puede verlos.
+      const hidden = hiddenFieldIds.length ? ' AND sv.field_id NOT IN (?)' : '';
+      where.push(`EXISTS (SELECT 1 FROM member_field_values sv WHERE sv.member_id = m.id AND (sv.value LIKE ? OR sv.value LIKE ?)${hidden})`);
+      // Un RUT/identificador se guarda sin puntos: los que tipee quien busca se ignoran.
+      whereParams.push(`%${search}%`, `%${search.replace(/\./g, '')}%`);
+      if (hiddenFieldIds.length) whereParams.push(hiddenFieldIds);
     }
     if (groupId) {
       joins.push('INNER JOIN member_group_members mgm_f ON mgm_f.member_id = m.id AND mgm_f.group_id = ?');
       joinParams.push(groupId);
+    }
+    // Filtros por campos de la ficha: `{ fieldId, type, values }`. Opciones: alguno de los valores;
+    // selección múltiple: contiene alguno; Sí/No: exacto (un "No" incluye a quien no tiene valor).
+    for (const f of fieldFilters) {
+      if (f.type === 'boolean' && f.values.length === 1 && f.values[0] === 'false') {
+        where.push("NOT EXISTS (SELECT 1 FROM member_field_values fv WHERE fv.member_id = m.id AND fv.field_id = ? AND fv.value = 'true')");
+        whereParams.push(f.fieldId);
+      } else if (f.type === 'multiselect') {
+        where.push(`EXISTS (SELECT 1 FROM member_field_values fv WHERE fv.member_id = m.id AND fv.field_id = ? AND (${f.values.map(() => 'fv.value LIKE ?').join(' OR ')}))`);
+        whereParams.push(f.fieldId, ...f.values.map((v) => `%${JSON.stringify(v)}%`));
+      } else if (f.type === 'text') {
+        where.push('EXISTS (SELECT 1 FROM member_field_values fv WHERE fv.member_id = m.id AND fv.field_id = ? AND fv.value LIKE ?)');
+        whereParams.push(f.fieldId, `%${f.values[0]}%`);
+      } else {
+        where.push('EXISTS (SELECT 1 FROM member_field_values fv WHERE fv.member_id = m.id AND fv.field_id = ? AND fv.value IN (?))');
+        whereParams.push(f.fieldId, f.values);
+      }
     }
     if (linked === 'yes') where.push('m.user_id IS NOT NULL');
     if (linked === 'no') where.push('m.user_id IS NULL');
@@ -94,8 +180,8 @@ class MembersRepository extends BaseRepository {
     const baseParams = [...joinParams, ...whereParams];
 
     const [rows] = await pool.query(
-      `SELECT m.* FROM members m ${joinSql} WHERE ${whereSql}
-       ORDER BY m.${sortBy} ${sortOrder} LIMIT ? OFFSET ?`,
+      `SELECT m.*, ${PROFILE_COLS} FROM members m ${profileJoin()} ${joinSql} WHERE ${whereSql}
+       ORDER BY ${['first_name', 'last_name'].includes(sortBy) ? 'mp' : 'm'}.${sortBy} ${sortOrder} LIMIT ? OFFSET ?`,
       [...baseParams, limit, offset]
     );
     const [countRows] = await pool.query(`SELECT COUNT(*) AS total FROM members m ${joinSql} WHERE ${whereSql}`, baseParams);
@@ -108,13 +194,14 @@ class MembersRepository extends BaseRepository {
    * una consulta aparte por cada uno. */
   async findOptions(clubId, conn = pool) {
     const [rows] = await conn.query(
-      `SELECT m.id, m.first_name, m.middle_name, m.last_name, m.second_last_name,
+      `SELECT m.id, mp.first_name, mp.middle_name, mp.last_name, mp.second_last_name,
               GROUP_CONCAT(DISTINCT mgm.group_id) AS group_ids
        FROM members m
+       ${profileJoin()}
        LEFT JOIN member_group_members mgm ON mgm.member_id = m.id
        WHERE m.club_id = ? AND m.deleted_at IS NULL
        GROUP BY m.id
-       ORDER BY m.first_name ASC, m.last_name ASC`,
+       ORDER BY mp.first_name ASC, mp.last_name ASC`,
       [clubId]
     );
     return rows;
@@ -133,15 +220,21 @@ class MembersRepository extends BaseRepository {
    * payments.service.js#getChargeMatrix para armar las filas (una por miembro) sin tener que
    * pedir la ficha completa de cada uno. `group_ids` (CSV, mismo criterio que `findOptions`) —
    * lo necesita el filtro por grupo de la matriz de pagos. */
+  async findIdsByClub(clubId, conn = pool) {
+    const [rows] = await conn.query('SELECT id FROM members WHERE club_id = ? AND deleted_at IS NULL', [clubId]);
+    return rows.map((r) => r.id);
+  }
+
   async findNamesByIds(ids, clubId, conn = pool) {
     if (!ids.length) return [];
     const [rows] = await conn.query(
-      `SELECT m.id, m.first_name, m.middle_name, m.last_name, m.second_last_name,
+      `SELECT m.id, mp.first_name, mp.middle_name, mp.last_name, mp.second_last_name, mp.avatar_url, m.status, m.deactivated_at,
               GROUP_CONCAT(DISTINCT mgm.group_id) AS group_ids
        FROM members m
+       ${profileJoin()}
        LEFT JOIN member_group_members mgm ON mgm.member_id = m.id
        WHERE m.id IN (?) AND m.club_id = ? AND m.deleted_at IS NULL
-       GROUP BY m.id ORDER BY m.first_name ASC, m.last_name ASC`,
+       GROUP BY m.id ORDER BY mp.first_name ASC, mp.last_name ASC`,
       [ids, clubId]
     );
     return rows;
@@ -230,6 +323,11 @@ class MembersRepository extends BaseRepository {
        ON DUPLICATE KEY UPDATE value = VALUES(value)`,
       [values]
     );
+  }
+
+  async deleteFieldValues(memberId, fieldIds, conn = pool) {
+    if (!fieldIds.length) return;
+    await conn.query('DELETE FROM member_field_values WHERE member_id = ? AND field_id IN (?)', [memberId, fieldIds]);
   }
 
   async countByClub(clubId, conn = pool) {

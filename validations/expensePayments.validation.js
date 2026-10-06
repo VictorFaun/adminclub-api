@@ -26,6 +26,7 @@ const createPayment = [
   body('amount').isFloat({ min: 0.01 }).withMessage('El monto debe ser mayor a cero.'),
   body('paidAt').optional().isISO8601().withMessage('Fecha de pago inválida.'),
   body('note').optional({ nullable: true }).trim().isLength({ max: 255 }),
+  body('treasuryAccountId').optional({ nullable: true }).isInt({ min: 1 }).withMessage('Cuenta de Tesorería inválida.'),
 ];
 
 const updatePayment = [
@@ -33,6 +34,7 @@ const updatePayment = [
   body('amount').optional().isFloat({ min: 0.01 }).withMessage('El monto debe ser mayor a cero.'),
   body('paidAt').optional().isISO8601().withMessage('Fecha de pago inválida.'),
   body('note').optional({ nullable: true }).trim().isLength({ max: 255 }),
+  body('treasuryAccountId').optional({ nullable: true }).isInt({ min: 1 }).withMessage('Cuenta de Tesorería inválida.'),
 ];
 
 module.exports = { expenseIdParam, instanceIdParam, paymentId, periods, ensureInstance, createPayment, updatePayment };

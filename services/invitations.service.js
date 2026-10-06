@@ -31,19 +31,72 @@ class InvitationsService {
     };
   }
 
+  /** Elegir el rol con el que entrará quien use la invitación es, en la práctica, asignar un
+   * rol: exige ASSIGN_USER_ROLES. Devuelve el rol ya validado, o `fallback` si el actor no lo tiene
+   * (se ignora lo que haya mandado el cliente en vez de confiar en que el frontend ocultó el selector). */
+  async _resolveDefaultRole(clubId, actorId, requestedRoleId, fallback = null) {
+    const authContext = await permissionService.buildAuthorizationContext(actorId, clubId);
+    if (!permissionService.hasFunction(authContext, FUNCTIONS.ASSIGN_USER_ROLES)) return fallback;
+    if (!requestedRoleId) return null;
+    const role = await rolesRepository.findById(requestedRoleId);
+    if (!role || role.club_id !== clubId) throw AppError.badRequest('El rol predeterminado no pertenece a este club.');
+    return requestedRoleId;
+  }
+
+  async update(clubId, invitationId, { maxUses, expiresAt, defaultRoleId, note, requiresMemberProfile }, actorId) {
+    const invitation = await invitationsRepository.findById(invitationId);
+    if (!invitation || invitation.club_id !== clubId) throw AppError.notFound('Invitación no encontrada.');
+
+    const newMaxUses = maxUses || null;
+    const newExpiresAt = expiresAt ? new Date(expiresAt) : null;
+    if (newMaxUses !== null && newMaxUses < invitation.uses_count) {
+      throw AppError.unprocessable(`Los usos máximos no pueden ser menores a los ya realizados (${invitation.uses_count}).`);
+    }
+
+    // Si el actor no puede asignar roles, el rol de la invitación se conserva tal cual.
+    const newRoleId = await this._resolveDefaultRole(clubId, actorId, defaultRoleId, invitation.default_role_id);
+
+    // 'revoked' es una decisión explícita (solo se cambia con reactivate). Para el resto, el
+    // estado se recalcula con los nuevos límites: p. ej. subir `maxUses` de una agotada la
+    // reactiva, y bajar la expiración al pasado la marca 'expired'.
+    let status = invitation.status;
+    if (status !== 'revoked') {
+      if (newExpiresAt && newExpiresAt < new Date()) status = 'expired';
+      else if (newMaxUses !== null && invitation.uses_count >= newMaxUses) status = 'exhausted';
+      else status = 'active';
+    }
+
+    await invitationsRepository.updateFields(invitationId, {
+      maxUses: newMaxUses,
+      expiresAt: newExpiresAt,
+      defaultRoleId: newRoleId,
+      requiresMemberProfile: requiresMemberProfile ? 1 : 0,
+      note: note || null,
+      status,
+    });
+
+    await auditRepository.logAction({
+      userId: actorId,
+      clubId,
+      action: 'INVITATION_UPDATED',
+      entityType: 'invitation',
+      entityId: invitationId,
+      changes: {
+        maxUses: { from: invitation.max_uses, to: newMaxUses },
+        expiresAt: { from: invitation.expires_at, to: newExpiresAt },
+        ...(status !== invitation.status ? { status: { from: invitation.status, to: status } } : {}),
+      },
+    });
+
+    return this.toDto(await invitationsRepository.findById(invitationId));
+  }
+
   async create(clubId, { maxUses, expiresAt, defaultRoleId, note, requiresMemberProfile }, actorId) {
     // Elegir el rol con el que entrará quien use la invitación es, en la práctica,
     // asignar un rol: exige el mismo permiso (ASSIGN_USER_ROLES) que hacerlo a mano
     // desde el perfil de un usuario. Si el actor no lo tiene, se ignora lo que haya
     // mandado el cliente en vez de confiar en que el frontend ocultó el selector.
-    const authContext = await permissionService.buildAuthorizationContext(actorId, clubId);
-    const canAssignRoles = permissionService.hasFunction(authContext, FUNCTIONS.ASSIGN_USER_ROLES);
-    defaultRoleId = canAssignRoles ? defaultRoleId : null;
-
-    if (defaultRoleId) {
-      const role = await rolesRepository.findById(defaultRoleId);
-      if (!role || role.club_id !== clubId) throw AppError.badRequest('El rol predeterminado no pertenece a este club.');
-    }
+    defaultRoleId = await this._resolveDefaultRole(clubId, actorId, defaultRoleId);
 
     let code;
     do {

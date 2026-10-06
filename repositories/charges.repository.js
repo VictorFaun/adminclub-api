@@ -1,4 +1,5 @@
 const { pool } = require('../config/database');
+const { parseAccount } = require('../helpers/paymentAccount');
 const BaseRepository = require('./BaseRepository');
 
 class ChargesRepository extends BaseRepository {
@@ -91,8 +92,8 @@ class ChargesRepository extends BaseRepository {
   async createCharge(data, conn = pool) {
     const [result] = await conn.query(
       `INSERT INTO charges
-        (uuid, club_id, name, description, color, amount, recurrence, start_date, due_day, due_month, end_date, status, purpose, created_by)
-       VALUES (UUID(), :clubId, :name, :description, :color, :amount, :recurrence, :startDate, :dueDay, :dueMonth, :endDate, :status, :purpose, :createdBy)`,
+        (uuid, club_id, name, description, color, amount, recurrence, start_date, due_day, due_month, end_date, status, purpose, treasury_account_id, created_by)
+       VALUES (UUID(), :clubId, :name, :description, :color, :amount, :recurrence, :startDate, :dueDay, :dueMonth, :endDate, :status, :purpose, :treasuryAccountId, :createdBy)`,
       data
     );
     return result.insertId;
@@ -164,24 +165,32 @@ class ChargesRepository extends BaseRepository {
    * apretados (picker de responsables, badges de "pagado a"), ver payments.service.js. */
   async getResponsibleMembers(chargeId, conn = pool) {
     const [rows] = await conn.query(
-      `SELECT crm.member_id, crm.group_id, crm.position,
-              NULLIF(CONCAT_WS(' ', m.first_name, m.last_name), '') AS member_name,
+      `SELECT crm.member_id, crm.group_id, crm.position, crm.account,
+              NULLIF(CONCAT_WS(' ', mp.first_name, mp.last_name), '') AS member_name,
               mg.name AS group_name
        FROM charge_responsible_members crm
-       INNER JOIN members m ON m.id = crm.member_id
+       INNER JOIN members m ON m.id = crm.member_id LEFT JOIN member_profiles mp ON mp.member_id = m.id
        LEFT JOIN member_groups mg ON mg.id = crm.group_id
        WHERE crm.charge_id = ? ORDER BY crm.position ASC`,
       [chargeId]
     );
-    return rows.map((r) => ({ memberId: r.member_id, memberName: r.member_name, groupId: r.group_id, groupName: r.group_name, position: r.position }));
+    return rows.map((r) => ({
+      memberId: r.member_id,
+      memberName: r.member_name,
+      groupId: r.group_id,
+      groupName: r.group_name,
+      position: r.position,
+      account: parseAccount(r.account),
+    }));
   }
 
-  /** `targets`: `[{memberId, groupId}]` (`groupId` puede ser `null` = "todos los grupos"). */
+  /** `targets`: `[{memberId, groupId, account}]` (`groupId` puede ser `null` = "todos los grupos";
+   * `account` = datos de la cuenta que usa ese responsable, ya normalizados, o `null`). */
   async setResponsibleMembers(chargeId, targets, conn = pool) {
     await conn.query('DELETE FROM charge_responsible_members WHERE charge_id = ?', [chargeId]);
     if (targets.length) {
-      await conn.query('INSERT INTO charge_responsible_members (charge_id, member_id, group_id, position) VALUES ?', [
-        targets.map((t, i) => [chargeId, t.memberId, t.groupId ?? null, i]),
+      await conn.query('INSERT INTO charge_responsible_members (charge_id, member_id, group_id, position, account) VALUES ?', [
+        targets.map((t, i) => [chargeId, t.memberId, t.groupId ?? null, i, t.account ? JSON.stringify(t.account) : null]),
       ]);
     }
   }
@@ -210,22 +219,22 @@ class ChargesRepository extends BaseRepository {
     if (!memberIds.length) return result;
 
     const [wildcardRows] = await conn.query(
-      `SELECT crm.member_id, NULLIF(CONCAT_WS(' ', m.first_name, m.last_name), '') AS member_name
-       FROM charge_responsible_members crm INNER JOIN members m ON m.id = crm.member_id
+      `SELECT crm.member_id, crm.account, NULLIF(CONCAT_WS(' ', mp.first_name, mp.last_name), '') AS member_name
+       FROM charge_responsible_members crm INNER JOIN members m ON m.id = crm.member_id LEFT JOIN member_profiles mp ON mp.member_id = m.id
        WHERE crm.charge_id = ? AND crm.group_id IS NULL ORDER BY crm.position ASC LIMIT 1`,
       [chargeId]
     );
     if (wildcardRows.length) {
-      const fallback = { memberId: wildcardRows[0].member_id, memberName: wildcardRows[0].member_name };
+      const fallback = { memberId: wildcardRows[0].member_id, memberName: wildcardRows[0].member_name, account: parseAccount(wildcardRows[0].account) };
       for (const id of memberIds) result.set(id, fallback);
     }
 
     const [groupRows] = await conn.query(
-      `SELECT mgm.member_id, crm.member_id AS responsible_member_id,
-              NULLIF(CONCAT_WS(' ', m.first_name, m.last_name), '') AS responsible_member_name
+      `SELECT mgm.member_id, crm.member_id AS responsible_member_id, crm.account,
+              NULLIF(CONCAT_WS(' ', mp.first_name, mp.last_name), '') AS responsible_member_name
        FROM charge_responsible_members crm
        INNER JOIN member_group_members mgm ON mgm.group_id = crm.group_id
-       INNER JOIN members m ON m.id = crm.member_id
+       INNER JOIN members m ON m.id = crm.member_id LEFT JOIN member_profiles mp ON mp.member_id = m.id
        WHERE crm.charge_id = ? AND crm.group_id IS NOT NULL AND mgm.member_id IN (?)
        ORDER BY crm.position ASC`,
       [chargeId, memberIds]
@@ -234,7 +243,7 @@ class ChargesRepository extends BaseRepository {
     for (const row of groupRows) {
       if (seen.has(row.member_id)) continue;
       seen.add(row.member_id);
-      result.set(row.member_id, { memberId: row.responsible_member_id, memberName: row.responsible_member_name });
+      result.set(row.member_id, { memberId: row.responsible_member_id, memberName: row.responsible_member_name, account: parseAccount(row.account) });
     }
 
     return result;
@@ -277,10 +286,17 @@ class ChargesRepository extends BaseRepository {
    * que usa chargeInstances.service.js para generar/actualizar períodos — se recalcula en cada
    * corrida (no se guarda), así que un miembro agregado a un grupo apuntado empieza a
    * generársele desde la próxima corrida sin ningún paso manual. */
-  async expandTargetMemberIds(chargeId, conn = pool) {
+  /**
+   * `inactive`: qué hacer con los miembros inactivos (retirados) que siguen apuntados al cobro:
+   *  - 'none' (default): fuera — no se les generan períodos nuevos.
+   *  - 'all': todos — la matriz decide qué filas mostrar según su historial de pertenencia (ver
+   *    helpers/membership.js), y se pueden gestionar los períodos en que sí estaba.
+   */
+  async expandTargetMemberIds(chargeId, conn = pool, { inactive = 'none' } = {}) {
+    const statusFilter = inactive === 'all' ? "m.status IN ('active', 'inactive')" : "m.status = 'active'";
     const [rows] = await conn.query(
       `SELECT DISTINCT m.id FROM members m
-       WHERE m.deleted_at IS NULL AND m.id IN (
+       WHERE m.deleted_at IS NULL AND ${statusFilter} AND m.id IN (
          SELECT member_id FROM charge_target_members WHERE charge_id = ?
          UNION
          SELECT mgm.member_id FROM charge_target_groups ctg

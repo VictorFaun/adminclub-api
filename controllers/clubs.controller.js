@@ -68,6 +68,11 @@ const stats = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, data, 'Estadísticas del club obtenidas correctamente.');
 });
 
+const checkPublicCode = asyncHandler(async (req, res) => {
+  const data = await clubsService.checkPublicCode(req.query.code, req.club.id);
+  return ApiResponse.ok(res, data, 'Disponibilidad del código obtenida correctamente.');
+});
+
 const joinByCode = asyncHandler(async (req, res) => {
   const club = await clubsService.joinByCode(req.body.code, req.user.id);
   return ApiResponse.ok(res, club, 'Te has unido al club correctamente.');
@@ -111,6 +116,7 @@ module.exports = {
   removeBanner,
   stats,
   joinByCode,
+  checkPublicCode,
   requestAccess,
   listJoinRequests,
   resolveJoinRequest,

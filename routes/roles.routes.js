@@ -31,6 +31,9 @@ router.put(
   controller.update
 );
 
+// Roles sugeridos (Tesorería, Secretaría, Entrenador, Directiva) para un club que no los tenga.
+router.post('/suggested', requireFunction(FUNCTIONS.CREATE_ROLE), controller.addSuggested);
+
 router.post(
   '/:id/duplicate',
   requireFunction(FUNCTIONS.CREATE_ROLE),

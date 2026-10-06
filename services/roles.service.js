@@ -53,6 +53,21 @@ class RolesService {
   }
 
   /** Crea el rol por defecto (Administrador) para un club recién creado. */
+/** Agrega a un club existente los roles sugeridos que todavía no tenga (por nombre). */
+  async addSuggested(clubId, actorId) {
+    const allFunctions = await functionsRepository.findClubAssignableGrouped();
+    const functionIdByCode = new Map(allFunctions.map((f) => [f.code, f.id]));
+    const added = [];
+    for (const template of DEFAULT_CLUB_ROLES.SUGGESTED_CLUB_ROLES) {
+      if (await rolesRepository.findByNameInScope(template.name, clubId)) continue;
+      const roleId = await rolesRepository.createRole({ clubId, name: template.name, description: template.description, scope: ROLE_SCOPE.CLUB, color: template.color, isSystem: false });
+      await rolesRepository.setFunctions(roleId, template.functionCodes.map((code) => functionIdByCode.get(code)).filter(Boolean));
+      added.push(template.name);
+    }
+    if (added.length) await auditRepository.logAction({ userId: actorId, clubId, action: 'ROLES_SUGGESTED_ADDED', entityType: 'role', entityId: null, changes: { added } });
+    return { added };
+  }
+
   async seedDefaultRolesForClub(clubId, conn) {
     // `findClubAssignableGrouped` (no `findAllGrouped`) es la barrera real: filtra por
     // `is_club_assignable = 1` en la propia base de datos, así que aunque

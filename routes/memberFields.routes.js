@@ -8,7 +8,17 @@ const { FUNCTIONS } = require('../config/constants');
 // Montado bajo /members/fields — authMiddleware/clubContextMiddleware ya aplicados por el
 // router padre (members.routes.js).
 
-router.get('/', requireFunction(FUNCTIONS.VIEW_MEMBER_FIELDS), controller.list);
+// La ficha es 100% configurable: quien ve, crea o edita miembros necesita leer sus campos para
+// armar el formulario y mostrar la ficha (son solo la definición del formulario, no datos).
+const FIELD_READERS = [
+  FUNCTIONS.VIEW_MEMBER_FIELDS,
+  FUNCTIONS.VIEW_MEMBERS,
+  FUNCTIONS.VIEW_MEMBERS_SCOPED,
+  FUNCTIONS.CREATE_MEMBERS,
+  FUNCTIONS.EDIT_MEMBERS,
+];
+router.get('/', requireFunction(...FIELD_READERS), controller.list);
+router.get('/catalog', requireFunction(...FIELD_READERS), controller.catalog);
 
 // VIEW_MEMBER_FIELDS es prerrequisito de TODA operación, no solo del listado: `requireFunction`
 // es OR entre los codes que recibe en una sola llamada, así que para exigir "VIEW Y ADEMÁS
@@ -25,6 +35,19 @@ router.post(
   handleValidation,
   controller.create
 );
+
+router.put(
+  '/order',
+  requireFunction(FUNCTIONS.VIEW_MEMBER_FIELDS),
+  requireFunction(FUNCTIONS.EDIT_MEMBER_FIELDS),
+  sanitizeBody,
+  validation.reorder,
+  handleValidation,
+  controller.reorder
+);
+
+// Agrega a la ficha los campos sugeridos que falten (nombres, RUT, nacimiento, correo…).
+router.post('/suggested', requireFunction(FUNCTIONS.VIEW_MEMBER_FIELDS), requireFunction(FUNCTIONS.CREATE_MEMBER_FIELDS), controller.addSuggested);
 
 router.put(
   '/:id',

@@ -1,3 +1,4 @@
+const fs = require('fs');
 const env = require('../config/env');
 const logger = require('../helpers/logger');
 const AppError = require('../helpers/AppError');
@@ -25,6 +26,7 @@ function mapKnownErrors(err) {
 
   // Multer
   if (err.code === 'LIMIT_FILE_SIZE') return AppError.badRequest('El archivo excede el tamaño máximo permitido.');
+  if (err.code === 'LIMIT_FILE_COUNT') return AppError.badRequest('Se enviaron demasiados archivos.');
 
   // CORS
   if (err.message === 'No permitido por la política de CORS') return AppError.forbidden('Origen no permitido.');
@@ -35,6 +37,10 @@ function mapKnownErrors(err) {
 /** Middleware de manejo de errores centralizado. Debe registrarse al final de la app. */
 // eslint-disable-next-line no-unused-vars
 function errorMiddleware(err, req, res, next) {
+  // Una request con archivos (multer) que termina en error no debe dejarlos huérfanos en disco
+  // (si el service ya los movió a su destino, el unlink simplemente no encuentra nada).
+  if (Array.isArray(req.files)) for (const f of req.files) if (f?.path) fs.unlink(f.path, () => {});
+
   const knownError = mapKnownErrors(err);
   const appError = knownError || err;
 

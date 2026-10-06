@@ -106,6 +106,34 @@ class TrainingsRepository extends BaseRepository {
     }
   }
 
+  // --- Días especiales / cancelados / modificados (ver sql/041_training_sessions.sql) ---
+
+  async getSessionOverrides(trainingId, conn = pool) {
+    const [rows] = await conn.query(
+      'SELECT id, session_date, kind, start_time, end_time, note FROM training_sessions WHERE training_id = ? ORDER BY session_date ASC',
+      [trainingId]
+    );
+    return rows;
+  }
+
+  async findSessionOverride(trainingId, sessionDate, conn = pool) {
+    const [rows] = await conn.query('SELECT * FROM training_sessions WHERE training_id = ? AND session_date = ? LIMIT 1', [trainingId, sessionDate]);
+    return rows[0] || null;
+  }
+
+  async upsertSessionOverride({ trainingId, sessionDate, kind, startTime, endTime, note, createdBy }, conn = pool) {
+    await conn.query(
+      `INSERT INTO training_sessions (training_id, session_date, kind, start_time, end_time, note, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE kind = VALUES(kind), start_time = VALUES(start_time), end_time = VALUES(end_time), note = VALUES(note)`,
+      [trainingId, sessionDate, kind, startTime || null, endTime || null, note || null, createdBy || null]
+    );
+  }
+
+  async deleteSessionOverride(trainingId, sessionDate, conn = pool) {
+    await conn.query('DELETE FROM training_sessions WHERE training_id = ? AND session_date = ?', [trainingId, sessionDate]);
+  }
+
   // --- Targets (miembros / grupos / exclusiones) — mirror de charges.repository.js, sin monto ---
 
   async getTargetMembers(trainingId, conn = pool) {
@@ -147,10 +175,12 @@ class TrainingsRepository extends BaseRepository {
   /** Miembros ACTIVOS a quienes aplica hoy este entrenamiento: unión de miembros puntuales +
    * miembros de los grupos apuntados, menos las exclusiones — mirror de
    * charges.repository.js#expandTargetMemberIds. */
-  async expandTargetMemberIds(trainingId, conn = pool) {
+  /** `inactive`: igual que charges.repository.js#expandTargetMemberIds — 'none' (default) o 'all'. */
+  async expandTargetMemberIds(trainingId, conn = pool, { inactive = 'none' } = {}) {
+    const statusFilter = inactive === 'all' ? "m.status IN ('active', 'inactive')" : "m.status = 'active'";
     const [rows] = await conn.query(
       `SELECT DISTINCT m.id FROM members m
-       WHERE m.deleted_at IS NULL AND m.id IN (
+       WHERE m.deleted_at IS NULL AND ${statusFilter} AND m.id IN (
          SELECT member_id FROM training_target_members WHERE training_id = ?
          UNION
          SELECT mgm.member_id FROM training_target_groups ttg
@@ -168,10 +198,10 @@ class TrainingsRepository extends BaseRepository {
   async getResponsibleMembers(trainingId, conn = pool) {
     const [rows] = await conn.query(
       `SELECT trm.member_id, trm.group_id, trm.position,
-              NULLIF(CONCAT_WS(' ', m.first_name, m.last_name), '') AS member_name,
+              NULLIF(CONCAT_WS(' ', mp.first_name, mp.last_name), '') AS member_name,
               mg.name AS group_name
        FROM training_responsible_members trm
-       INNER JOIN members m ON m.id = trm.member_id
+       INNER JOIN members m ON m.id = trm.member_id LEFT JOIN member_profiles mp ON mp.member_id = m.id
        LEFT JOIN member_groups mg ON mg.id = trm.group_id
        WHERE trm.training_id = ? ORDER BY trm.position ASC`,
       [trainingId]
@@ -203,8 +233,8 @@ class TrainingsRepository extends BaseRepository {
     if (!memberIds.length) return result;
 
     const [wildcardRows] = await conn.query(
-      `SELECT trm.member_id, NULLIF(CONCAT_WS(' ', m.first_name, m.last_name), '') AS member_name
-       FROM training_responsible_members trm INNER JOIN members m ON m.id = trm.member_id
+      `SELECT trm.member_id, NULLIF(CONCAT_WS(' ', mp.first_name, mp.last_name), '') AS member_name
+       FROM training_responsible_members trm INNER JOIN members m ON m.id = trm.member_id LEFT JOIN member_profiles mp ON mp.member_id = m.id
        WHERE trm.training_id = ? AND trm.group_id IS NULL ORDER BY trm.position ASC LIMIT 1`,
       [trainingId]
     );
@@ -215,10 +245,10 @@ class TrainingsRepository extends BaseRepository {
 
     const [groupRows] = await conn.query(
       `SELECT mgm.member_id, trm.member_id AS responsible_member_id,
-              NULLIF(CONCAT_WS(' ', m.first_name, m.last_name), '') AS responsible_member_name
+              NULLIF(CONCAT_WS(' ', mp.first_name, mp.last_name), '') AS responsible_member_name
        FROM training_responsible_members trm
        INNER JOIN member_group_members mgm ON mgm.group_id = trm.group_id
-       INNER JOIN members m ON m.id = trm.member_id
+       INNER JOIN members m ON m.id = trm.member_id LEFT JOIN member_profiles mp ON mp.member_id = m.id
        WHERE trm.training_id = ? AND trm.group_id IS NOT NULL AND mgm.member_id IN (?)
        ORDER BY trm.position ASC`,
       [trainingId, memberIds]

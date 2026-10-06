@@ -3,8 +3,8 @@ const auditRepository = require('../repositories/audit.repository');
 const { parsePagination, buildMeta } = require('../helpers/pagination');
 
 class DashboardService {
-  async getOverview(clubId) {
-    return clubsService.getStats(clubId);
+  async getOverview(clubId, authContext = null) {
+    return clubsService.getStats(clubId, authContext);
   }
 
   async getAuditLogs(clubId, query, isSuperAdmin) {

@@ -1,4 +1,7 @@
 const chargesRepository = require('../repositories/charges.repository');
+const memberMembershipsRepository = require('../repositories/memberMemberships.repository');
+const { coversChargePeriod, proratedAmount } = require('../helpers/membership');
+const clubPolicyService = require('./clubPolicy.service');
 const chargeInstancesRepository = require('../repositories/chargeInstances.repository');
 const { CHARGE_RECURRENCE } = require('../config/constants');
 
@@ -32,6 +35,10 @@ function formatDateOnly(date) {
  * gratis), así nunca falta un período por vencer y un miembro agregado a un grupo apuntado
  * empieza a generársele desde la próxima corrida sin ningún paso manual.
  */
+/** Tope de períodos pasados que la generación crea hacia atrás. */
+const MAX_BACKFILL_MONTHS = 36;
+const MAX_BACKFILL_YEARS = 10;
+
 class ChargeInstancesService {
   /** Períodos a generar para un cobro, respetando `start_date`/`end_date` — no genera periodos
    * fuera de esa ventana (ej. un cobro que ya terminó no sigue generando meses). */
@@ -44,10 +51,16 @@ class ChargeInstancesService {
     const endDate = charge.end_date ? new Date(charge.end_date) : null;
     const periods = [];
 
+    // Desde el inicio del cobro (con tope hacia atrás) hasta el período siguiente al actual: los
+    // períodos pasados que nunca se generaron (cobro creado con inicio en el pasado, p. ej. un club
+    // que empieza a usar la plataforma a mitad de año) también se crean, para que la matriz, el
+    // dashboard, la ficha y la página pública de pagos muestren las mismas deudas.
     if (charge.recurrence === CHARGE_RECURRENCE.MONTHLY) {
-      let year = referenceDate.getUTCFullYear();
-      let month = referenceDate.getUTCMonth() + 1;
-      for (let i = 0; i < 2; i += 1) {
+      const refIndex = referenceDate.getUTCFullYear() * 12 + referenceDate.getUTCMonth();
+      const startIndex = Math.max(startDate.getUTCFullYear() * 12 + startDate.getUTCMonth(), refIndex - MAX_BACKFILL_MONTHS);
+      let year = Math.floor(startIndex / 12);
+      let month = (startIndex % 12) + 1;
+      for (let i = 0; i <= refIndex + 1 - startIndex; i += 1) {
         const day = clampDay(year, month, charge.due_day);
         const dueDate = new Date(Date.UTC(year, month - 1, day));
         if (dueDate >= startDate && (!endDate || dueDate <= endDate)) {
@@ -61,8 +74,9 @@ class ChargeInstancesService {
       }
     } else {
       // yearly
-      let year = referenceDate.getUTCFullYear();
-      for (let i = 0; i < 2; i += 1) {
+      const refYear = referenceDate.getUTCFullYear();
+      let year = Math.max(startDate.getUTCFullYear(), refYear - MAX_BACKFILL_YEARS);
+      for (let i = 0; i <= refYear + 1 - Math.max(startDate.getUTCFullYear(), refYear - MAX_BACKFILL_YEARS); i += 1) {
         const day = clampDay(year, charge.due_month, charge.due_day);
         const dueDate = new Date(Date.UTC(year, charge.due_month - 1, day));
         if (dueDate >= startDate && (!endDate || dueDate <= endDate)) {
@@ -89,13 +103,20 @@ class ChargeInstancesService {
 
     // Monto por miembro (default < grupo < etiqueta < miembro específico) — se resuelve UNA vez
     // para todos los miembros del cobro, no por fila, para no repetir las mismas queries por
-    // cada período generado (típicamente 2, current+next).
+    // cada período generado.
     const amounts = await chargesRepository.resolveAmounts(chargeId, memberIds, charge.amount);
+    // Solo los períodos en que cada miembro está en el club (desde su ingreso, sin sus retiros).
+    const memberships = await memberMembershipsRepository.findByMembers(memberIds);
+    // Política del club para el mes de ingreso/retiro (mensuales): cuál aplica y si se prorratea.
+    const policy = await clubPolicyService.getMonthPolicy(charge.club_id);
 
     const rows = [];
     for (const period of periods) {
       for (const memberId of memberIds) {
-        rows.push({ chargeId, memberId, periodLabel: period.label, amount: amounts.get(memberId), dueDate: period.dueDate });
+        const intervals = memberships.get(memberId);
+        if (!coversChargePeriod(intervals, charge.recurrence, period.label, period.dueDate, policy)) continue;
+        const amount = proratedAmount(amounts.get(memberId), intervals, charge.recurrence, period.label, policy);
+        rows.push({ chargeId, memberId, periodLabel: period.label, amount, dueDate: period.dueDate });
       }
     }
     return chargeInstancesRepository.bulkInsertIgnore(rows);
@@ -128,7 +149,10 @@ class ChargeInstancesService {
     }
 
     const amounts = await chargesRepository.resolveAmounts(chargeId, [memberId], charge.amount);
-    await chargeInstancesRepository.bulkInsertIgnore([{ chargeId, memberId, periodLabel: periodKey, amount: amounts.get(memberId), dueDate }]);
+    const policy = await clubPolicyService.getMonthPolicy(charge.club_id);
+    const intervals = await memberMembershipsRepository.findByMember(memberId);
+    const amount = proratedAmount(amounts.get(memberId), intervals, charge.recurrence, periodKey, policy);
+    await chargeInstancesRepository.bulkInsertIgnore([{ chargeId, memberId, periodLabel: periodKey, amount, dueDate }]);
     return chargeInstancesRepository.findByChargeMemberPeriod(chargeId, memberId, periodKey);
   }
 

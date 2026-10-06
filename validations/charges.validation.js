@@ -19,6 +19,11 @@ const targetFields = [
   body('responsibles').optional().isArray(),
   body('responsibles.*.memberId').isInt({ min: 1 }).withMessage('Responsable inválido.'),
   body('responsibles.*.groupId').optional({ nullable: true }).isInt({ min: 1 }).withMessage('Grupo inválido.'),
+  // Datos de la cuenta que usa cada responsable (opcional) — ver helpers/paymentAccount.js.
+  body('responsibles.*.account').optional({ nullable: true }).isObject().withMessage('Datos de cuenta inválidos.'),
+  body('responsibles.*.account.email').optional({ nullable: true, checkFalsy: true }).isEmail().withMessage('Correo de la cuenta inválido.'),
+  // Cuenta de Tesorería del cobro — obligatoria si el club tiene 2+ (ver treasuryAccounts.service.js).
+  body('treasuryAccountId').optional({ nullable: true }).isInt({ min: 1 }).withMessage('Cuenta de Tesorería inválida.'),
 ];
 
 const createCharge = [

@@ -14,28 +14,6 @@ class UsersRepository extends BaseRepository {
     return rows[0] || null;
   }
 
-  /** Login acepta correo O nombre de usuario — una sola query en vez de intentar `findByEmail`
-   * y recién si falla `findByUsername`, para no duplicar el viaje a la base de datos en el caso
-   * común (usuario real, encuentra en el primer intento igual). */
-  async findByIdentifier(identifier, conn = pool) {
-    const [rows] = await conn.query('SELECT * FROM users WHERE (email = ? OR username = ?) AND deleted_at IS NULL LIMIT 1', [
-      identifier,
-      identifier,
-    ]);
-    return rows[0] || null;
-  }
-
-  async usernameExists(username, excludeUserId = null, conn = pool) {
-    const params = [username];
-    let sql = 'SELECT id FROM users WHERE username = ?';
-    if (excludeUserId) {
-      sql += ' AND id != ?';
-      params.push(excludeUserId);
-    }
-    const [rows] = await conn.query(`${sql} LIMIT 1`, params);
-    return rows.length > 0;
-  }
-
   async emailExists(email, excludeUserId = null, conn = pool) {
     const params = [email];
     let sql = 'SELECT id FROM users WHERE email = ? AND deleted_at IS NULL';
@@ -56,7 +34,7 @@ class UsersRepository extends BaseRepository {
     return result.insertId;
   }
 
-  /** Login con Google — mismo criterio que `findByIdentifier`: `deleted_at IS NULL` para que una
+  /** Login con Google — mismo criterio que `findByEmail`: `deleted_at IS NULL` para que una
    * cuenta eliminada no siga resolviendo. */
   async findByGoogleId(googleId, conn = pool) {
     const [rows] = await conn.query('SELECT * FROM users WHERE google_id = ? AND deleted_at IS NULL LIMIT 1', [googleId]);
@@ -114,6 +92,9 @@ class UsersRepository extends BaseRepository {
     if (status) {
       where.push(clubId ? 'uc.status = ?' : 'u.status = ?');
       params.push(status);
+    } else if (clubId) {
+      // Los retirados no aparecen en el listado normal del club — solo con el filtro explícito.
+      where.push("uc.status <> 'withdrawn'");
     }
     if (search) {
       // El EXISTS matchea por nombre de CUALQUIER club al que pertenezca el usuario, sin
@@ -148,7 +129,7 @@ class UsersRepository extends BaseRepository {
     const [rows] = await conn.query(
       `SELECT c.*, uc.status AS membership_status, uc.is_default, uc.joined_at, uc.requires_profile_completion
        FROM user_clubs uc INNER JOIN clubs c ON c.id = uc.club_id
-       WHERE uc.user_id = ? AND c.deleted_at IS NULL
+       WHERE uc.user_id = ? AND c.deleted_at IS NULL AND uc.status <> 'withdrawn'
        ORDER BY uc.is_default DESC, c.name ASC`,
       [userId]
     );
@@ -161,7 +142,7 @@ class UsersRepository extends BaseRepository {
     const [rows] = await conn.query(
       `SELECT uc.user_id AS user_id, c.id, c.name, uc.status AS membership_status, uc.is_default
        FROM user_clubs uc INNER JOIN clubs c ON c.id = uc.club_id
-       WHERE uc.user_id IN (?) AND c.deleted_at IS NULL
+       WHERE uc.user_id IN (?) AND c.deleted_at IS NULL AND uc.status <> 'withdrawn'
        ORDER BY uc.is_default DESC, c.name ASC`,
       [userIds]
     );

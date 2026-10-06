@@ -69,8 +69,8 @@ class AuditRepository {
     const memberIds = [...(idsByType.member ?? [])];
     if (memberIds.length) {
       const [r] = await pool.query(
-        `SELECT id, CONCAT_WS(' ', first_name, middle_name, last_name, second_last_name) AS full_name
-         FROM members WHERE id IN (?)`,
+        `SELECT member_id AS id, CONCAT_WS(' ', first_name, middle_name, last_name, second_last_name) AS full_name
+         FROM member_profiles WHERE member_id IN (?)`,
         [memberIds]
       );
       r.forEach((x) => names.set(`member:${x.id}`, x.full_name));
@@ -91,8 +91,8 @@ class AuditRepository {
     const paymentIds = [...(idsByType.payment ?? [])];
     if (paymentIds.length) {
       const [r] = await pool.query(
-        `SELECT p.id, CONCAT_WS(' ', m.first_name, m.last_name) AS member_name FROM payments p
-         INNER JOIN members m ON m.id = p.member_id WHERE p.id IN (?)`,
+        `SELECT p.id, CONCAT_WS(' ', mp.first_name, mp.last_name) AS member_name FROM payments p
+         LEFT JOIN member_profiles mp ON mp.member_id = p.member_id WHERE p.id IN (?)`,
         [paymentIds]
       );
       r.forEach((x) => names.set(`payment:${x.id}`, x.member_name));
@@ -161,6 +161,36 @@ class AuditRepository {
         [trainingAttendanceIds]
       );
       r.forEach((x) => names.set(`training_attendance:${x.id}`, x.label));
+    }
+
+    // Solicitud de inscripción: el nombre está en su ficha (JSON por código de campo), según los
+    // campos con uso especial "Nombre"/"Apellido" del club.
+    const applicationIds = [...(idsByType.member_application ?? [])];
+    if (applicationIds.length) {
+      const [apps] = await pool.query('SELECT id, club_id, fields FROM member_applications WHERE id IN (?)', [applicationIds]);
+      const clubIdsOfApps = [...new Set(apps.map((a) => a.club_id))];
+      const [nameFields] = clubIdsOfApps.length
+        ? await pool.query("SELECT club_id, code, role FROM member_fields WHERE club_id IN (?) AND role IN ('first_name', 'last_name')", [clubIdsOfApps])
+        : [[]];
+      for (const a of apps) {
+        let data = a.fields;
+        if (typeof data === 'string') {
+          try {
+            data = JSON.parse(data);
+          } catch {
+            data = {};
+          }
+        }
+        const codeOf = (role) => nameFields.find((f) => f.club_id === a.club_id && f.role === role)?.code;
+        const label = [data?.[codeOf('first_name')], data?.[codeOf('last_name')]].filter(Boolean).join(' ');
+        if (label) names.set(`member_application:${a.id}`, label);
+      }
+    }
+
+    const accountIds = [...(idsByType.treasury_account ?? [])];
+    if (accountIds.length) {
+      const [r] = await pool.query('SELECT id, name FROM treasury_accounts WHERE id IN (?)', [accountIds]);
+      r.forEach((x) => names.set(`treasury_account:${x.id}`, x.name));
     }
 
     return rows.map((row) => {
@@ -258,6 +288,18 @@ class AuditRepository {
       [clubId, limit]
     );
     return rows;
+  }
+
+  /** Últimas acciones de ciertos tipos (pagos, comprobantes, solicitudes…) con el nombre de la
+   * entidad resuelto — alimenta la "Actividad" del dashboard junto con `recentActivity`. */
+  async recentByActions(clubId, actions, limit = 10, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT a.*, u.username, u.avatar_url FROM audit_logs a
+       LEFT JOIN users u ON u.id = a.user_id
+       WHERE a.club_id = ? AND a.action IN (?) ORDER BY a.created_at DESC, a.id DESC LIMIT ?`,
+      [clubId, actions, limit]
+    );
+    return this._withEntityNames(rows);
   }
 
   /** Igual que `recentActivity`, pero de `audit_logs` (acciones administrativas estructuradas)

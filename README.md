@@ -101,7 +101,7 @@ Prefijo base: `/api/v1`. Salvo que se indique "público", todos los endpoints re
 | `PUT /users/:id` | Edita los datos de un usuario del club | `EDIT_USERS` |
 | `PUT /users/:id/status` | Suspende o reactiva a un usuario en el club | `SUSPEND_USERS` |
 | `PUT /users/:id/roles` | Reemplaza los roles asignados a un usuario en el club | `ASSIGN_USER_ROLES` |
-| `DELETE /users/:id` | Elimina (remueve) a un usuario del club activo | `DELETE_USERS` |
+| `DELETE /users/:id` | RETIRA a un usuario del club activo (membresía `withdrawn`, no borra datos; reversible con `PUT /users/:id/status`). Body opcional `memberAction`: `keep` \| `deactivate` \| `delete` — qué hacer con su ficha de miembro | `DELETE_USERS` |
 | `GET /users/platform` | Lista TODOS los usuarios de la plataforma, sin importar club (búsqueda, filtros, paginación) | `VIEW_ALL_USERS` |
 | `PUT /users/platform/:id` | Edita los datos básicos de cualquier usuario de la plataforma | `EDIT_ALL_USERS` |
 | `PUT /users/platform/:id/status` | Suspende o reactiva la cuenta global de cualquier usuario de la plataforma | `SUSPEND_ALL_USERS` |
@@ -154,7 +154,39 @@ Prefijo base: `/api/v1`. Salvo que se indique "público", todos los endpoints re
 |---|---|---|
 | `GET /invitations` | Lista las invitaciones creadas en el club activo | `VIEW_INVITATIONS` |
 | `POST /invitations` | Crea una invitación (con límite de usos, expiración y rol por defecto opcionales) | `CREATE_INVITATIONS` |
+| `PUT /invitations/:id` | Edita una invitación (usos máximos, expiración, rol, nota, ficha requerida); recalcula su estado | `EDIT_INVITATIONS` |
 | `PUT /invitations/:id/revoke` | Revoca una invitación activa | `REVOKE_INVITATIONS` |
+
+### Miembros — fichas, cumpleaños, documentos (`/members`)
+
+| Método y ruta | Descripción | Requiere |
+|---|---|---|
+| `GET /members/birthdays?days=30` | Próximos cumpleaños de miembros activos (respeta el alcance del actor) | `VIEW_MEMBERS` / `VIEW_MEMBERS_SCOPED` |
+| `GET\|PUT /members/birthdays/settings` | Preferencia PROPIA del correo de cumpleaños (`enabled`, `daysBefore`) | `VIEW_MEMBERS` / `_SCOPED` |
+| `POST /members/birthdays/send-me` | Se envía a sí mismo el correo con los próximos cumpleaños (foto + datos) | `VIEW_MEMBERS` / `_SCOPED` |
+| `POST\|DELETE /members/:id/photo` | Sube/quita la foto de la ficha (pública, para plantillas de cumpleaños) | `EDIT_MEMBERS` |
+| `GET\|POST /members/:id/documents` | Lista / sube documentos adjuntos (PRIVADOS, `private_uploads/`, hasta 10MB) | `VIEW_MEMBERS` · `EDIT_MEMBERS` |
+| `GET /members/:id/documents/:docId/download` | Descarga autenticada de un documento | `VIEW_MEMBERS` / `_SCOPED` |
+| `DELETE /members/:id/documents/:docId` | Elimina un documento | `EDIT_MEMBERS` |
+| `GET\|PUT /members/fields/defaults` | Campos por defecto de la ficha (etiqueta / obligatorio / visible) | lectura: `VIEW_MEMBER_FIELDS`, `VIEW_MEMBERS`… · escritura: `EDIT_MEMBER_FIELDS` |
+
+### Comprobantes de pago (`/payment-proofs`) y vista pública (`/public/pay`)
+
+| Método y ruta | Descripción | Requiere |
+|---|---|---|
+| `GET /public/pay/:code` | **Sin sesión.** Bienvenida del club (nombre, logo, banner, colores). 404 si el club no activó la página (Tesorería → Configuración) | Rate limit por IP |
+| `GET /public/pay/:code/lookup?rut=` | **Sin sesión.** Cobros de quien tenga ese RUT (miembro activo): atrasados, pendientes y cobros recurrentes activos. RUT inexistente/mal escrito → `200 { found:false }` (nunca error) | Rate limit estricto (20/15 min) |
+| `POST /public/pay/:code/proofs` | **Sin sesión.** Sube un comprobante (`rut`, `chargeInstanceId`, `amount`, imagen/PDF ≤ 8MB) → queda `pending` | Rate limit estricto |
+| `GET|PUT /payment-proofs/settings` | Activa/desactiva la página pública de pagos del club | `VIEW_TREASURY_SETTINGS` · `EDIT_TREASURY_SETTINGS` |
+| `GET /payment-proofs?status=` · `/pending-count` | Lista / cuenta comprobantes del club (respeta alcance) | `VIEW_PAYMENTS` / `_SCOPED` |
+| `GET /payment-proofs/:id/file` | Descarga autenticada del comprobante | `VIEW_PAYMENTS` / `_SCOPED` |
+| `POST /payment-proofs/:id/approve` · `/reject` | Aprueba (registra el pago real) o rechaza con motivo | `CREATE_PAYMENTS` |
+
+### Gastos — detalle de categoría
+`GET /expense-categories/:id/summary` (`VIEW_EXPENSES`): totales, gastos asociados, serie mensual de pagos y últimos pagos.
+
+### Entrenamientos — días especiales (`/attendance/trainings/:id/sessions`)
+`POST` agrega un día (recuperación / día manual), `PUT /:date` cambia hora/nota, `POST /:date/cancel` y `/:date/restore`, `GET /cancelled`. Requieren `EDIT_TRAININGS` / `MARK_ATTENDANCE` o ser el entrenador responsable.
 
 ### Configuración (`/settings`)
 

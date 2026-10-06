@@ -20,7 +20,7 @@ const targetFields = [
 ];
 
 const scheduleFields = [
-  body('schedules').isArray({ min: 1 }).withMessage('Agrega al menos un día y horario de entrenamiento.'),
+  body('schedules').isArray().withMessage('El horario semanal debe ser un arreglo.'),
   body('schedules.*.dayOfWeek').isInt({ min: 1, max: 7 }).withMessage('Día de la semana inválido.'),
   body('schedules.*.startTime')
     .matches(/^\d{2}:\d{2}(:\d{2})?$/)
@@ -50,7 +50,7 @@ const updateTraining = [
   body('startDate').optional().isISO8601(),
   body('endDate').optional({ nullable: true }).isISO8601(),
   body('status').optional().isIn(['active', 'inactive']),
-  body('schedules').optional().isArray({ min: 1 }).withMessage('Agrega al menos un día y horario de entrenamiento.'),
+  body('schedules').optional().isArray().withMessage('El horario semanal debe ser un arreglo.'),
   body('schedules.*.dayOfWeek').if(body('schedules').exists()).isInt({ min: 1, max: 7 }).withMessage('Día de la semana inválido.'),
   body('schedules.*.startTime')
     .if(body('schedules').exists())

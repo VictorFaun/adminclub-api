@@ -43,8 +43,8 @@ const updateStatus = asyncHandler(async (req, res) => {
 });
 
 const remove = asyncHandler(async (req, res) => {
-  await usersService.removeFromClub(Number(req.params.id), req.club.id, req.user.id);
-  return ApiResponse.ok(res, null, 'Usuario eliminado del club correctamente.');
+  await usersService.removeFromClub(Number(req.params.id), req.club.id, req.user.id, req.body?.memberAction);
+  return ApiResponse.ok(res, null, 'Usuario retirado del club correctamente.');
 });
 
 const updateRoles = asyncHandler(async (req, res) => {
@@ -87,9 +87,6 @@ const updateMe = asyncHandler(async (req, res) => {
   const clubId = Number(req.headers['x-club-id']) || null;
   const updates = {};
   if (req.body.username !== undefined) {
-    if (await usersRepository.usernameExists(req.body.username, req.user.id)) {
-      throw AppError.conflict('Ya existe una cuenta registrada con este nombre de usuario.');
-    }
     updates.username = req.body.username;
   }
   if (req.body.phone !== undefined) updates.phone = req.body.phone;

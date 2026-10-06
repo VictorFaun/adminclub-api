@@ -25,6 +25,7 @@ module.exports = {
     ACTIVE: 'active',
     SUSPENDED: 'suspended',
     PENDING: 'pending',
+    WITHDRAWN: 'withdrawn',
   },
 
   INVITATION_STATUS: {
@@ -50,6 +51,9 @@ module.exports = {
     SUCCESS: 'success',
     WARNING: 'warning',
     ERROR: 'error',
+    // Generada por el cron de cumpleaños (birthdays.service.js) — nunca elegible desde el
+    // formulario de "Enviar notificación" (ver validations/notifications.validation.js).
+    BIRTHDAY: 'birthday',
   },
 
   TOKEN_TYPE: {
@@ -124,6 +128,7 @@ module.exports = {
     VIEW_INVITATIONS: 'VIEW_INVITATIONS',
     CREATE_INVITATIONS: 'CREATE_INVITATIONS',
     REVOKE_INVITATIONS: 'REVOKE_INVITATIONS',
+    EDIT_INVITATIONS: 'EDIT_INVITATIONS',
     DELETE_INVITATIONS: 'DELETE_INVITATIONS',
     MANAGE_JOIN_REQUESTS: 'MANAGE_JOIN_REQUESTS',
 
@@ -146,9 +151,11 @@ module.exports = {
     VIEW_MEMBER_GROUPS: 'VIEW_MEMBER_GROUPS',
     MANAGE_MEMBER_GROUPS: 'MANAGE_MEMBER_GROUPS',
     VIEW_MEMBER_FIELDS: 'VIEW_MEMBER_FIELDS',
+    VIEW_SENSITIVE_MEMBER_FIELDS: 'VIEW_SENSITIVE_MEMBER_FIELDS',
     CREATE_MEMBER_FIELDS: 'CREATE_MEMBER_FIELDS',
     EDIT_MEMBER_FIELDS: 'EDIT_MEMBER_FIELDS',
     DELETE_MEMBER_FIELDS: 'DELETE_MEMBER_FIELDS',
+    MANAGE_BIRTHDAY_TEMPLATE: 'MANAGE_BIRTHDAY_TEMPLATE',
 
     // Tesorería
     VIEW_TREASURY_DASHBOARD: 'VIEW_TREASURY_DASHBOARD',

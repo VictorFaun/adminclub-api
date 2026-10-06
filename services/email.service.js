@@ -12,7 +12,8 @@ const resendClient = env.email.resendApiKey ? new Resend(env.email.resendApiKey)
  * si no, se comporta como siempre (queda logueado en consola, útil en desarrollo sin proveedor).
  */
 class EmailService {
-  async send({ to, subject, html }) {
+  /** `attachments`: [{ filename, content: Buffer }] (ej. el recibo de un pago en PDF). */
+  async send({ to, subject, html, attachments = [] }) {
     if (!resendClient) {
       // `html` puede traer un token de un solo uso en claro (reset de contraseña, verificación
       // de email) o un código de invitación — logger.info() persiste TODO lo que se le pase a
@@ -23,7 +24,7 @@ class EmailService {
       // sin un proveedor de correo real) pero NO se persiste a disco.
       // eslint-disable-next-line no-console
       console.log(`[email] -> ${to} | ${subject}\n${html}`);
-      logger.info(`[email] -> ${to} | ${subject}`);
+      logger.info(`[email] -> ${to} | ${subject}${attachments.length ? ` | adjuntos: ${attachments.map((a) => a.filename).join(', ')}` : ''}`);
       return true;
     }
 
@@ -33,6 +34,7 @@ class EmailService {
         to,
         subject,
         html,
+        ...(attachments.length ? { attachments: attachments.map((a) => ({ filename: a.filename, content: a.content })) } : {}),
       });
       logger.info(`[email] enviado a ${to} | ${subject}`);
       return true;

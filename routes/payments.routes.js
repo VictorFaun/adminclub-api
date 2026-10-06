@@ -11,6 +11,14 @@ router.use(authMiddleware, clubContextMiddleware);
 
 router.get('/dashboard', requireFunction(FUNCTIONS.VIEW_TREASURY_DASHBOARD), controller.dashboard);
 
+// Recordatorios de deuda: ver deudores, configurar el envío automático y enviar ahora.
+router.get('/reminders', requireFunction(FUNCTIONS.VIEW_PAYMENTS, FUNCTIONS.VIEW_TREASURY_SETTINGS), controller.remindersPreview);
+router.put('/reminders/settings', requireFunction(FUNCTIONS.EDIT_TREASURY_SETTINGS), sanitizeBody, controller.updateRemindersSettings);
+router.post('/reminders/send', requireFunction(FUNCTIONS.EDIT_TREASURY_SETTINGS), controller.sendReminders);
+
+// Recibo en PDF de un pago.
+router.get('/:id/receipt', requireFunction(FUNCTIONS.VIEW_PAYMENTS, FUNCTIONS.VIEW_PAYMENTS_SCOPED), validation.paymentId, handleValidation, controller.receipt);
+
 router.get(
   '/members/:memberId',
   requireFunction(FUNCTIONS.VIEW_PAYMENTS, FUNCTIONS.VIEW_PAYMENTS_SCOPED),
@@ -24,6 +32,11 @@ router.get(
 // deja pasar a quien es responsable de ESTE cobro puntual (ver
 // payments.service.js#_resolveChargeParticipants, que hace el chequeo fino por cobro — acá solo
 // se exige tener ALGÚN cobro a cargo, ver requireFunctionOrResponsibleCharge).
+router.get(
+  '/charges/:chargeId/matrix/export',
+  requireFunctionOrResponsibleCharge(FUNCTIONS.VIEW_PAYMENTS, FUNCTIONS.VIEW_PAYMENTS_SCOPED),
+  controller.chargeMatrixExport
+);
 router.get(
   '/charges/:chargeId/matrix',
   requireFunctionOrResponsibleCharge(FUNCTIONS.VIEW_PAYMENTS, FUNCTIONS.VIEW_PAYMENTS_SCOPED),

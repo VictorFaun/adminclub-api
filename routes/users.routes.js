@@ -111,7 +111,7 @@ router.put(
 router.delete(
   '/:id',
   requireFunction(FUNCTIONS.DELETE_USERS),
-  validation.userId,
+  validation.removeUser,
   handleValidation,
   controller.remove
 );

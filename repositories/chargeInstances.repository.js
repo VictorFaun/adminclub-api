@@ -46,11 +46,46 @@ class ChargeInstancesRepository extends BaseRepository {
     const [rows] = await conn.query(
       `SELECT COUNT(DISTINCT ci.member_id) AS total FROM charge_instances ci
        INNER JOIN charges c ON c.id = ci.charge_id
+       INNER JOIN members m ON m.id = ci.member_id AND m.status = 'active'
        WHERE c.club_id = ? ${memberFilter} AND ci.status = 'pending' AND ci.due_date < CURDATE()
          AND c.deleted_at IS NULL AND c.archived_at IS NULL`,
       params
     );
     return rows[0].total;
+  }
+
+  /** Instancias de un miembro cuyo estado depende de su historial de pertenencia: pendientes sin
+   * abonos (pueden pasar a "no aplica — Retirado") y las ya marcadas por retiro (pueden volver a
+   * pendiente si ahora le corresponden). Ver members.service.js#syncCoverage. */
+  async findCoverageCandidates(memberId, reasons, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT ci.id, ci.charge_id, ci.period_label, ci.due_date, ci.status, ci.exempt_reason, ci.amount, c.recurrence, c.club_id, c.amount AS charge_amount
+       FROM charge_instances ci
+       INNER JOIN charges c ON c.id = ci.charge_id
+       WHERE ci.member_id = ?
+         AND ((ci.status = 'pending' AND NOT EXISTS (SELECT 1 FROM payment_allocations pa WHERE pa.charge_instance_id = ci.id))
+              OR (ci.status = 'exempt' AND ci.exempt_reason IN (?)))`,
+      [memberId, reasons]
+    );
+    return rows;
+  }
+
+  async markRetired(ids, reason, actorId, conn = pool) {
+    if (!ids.length) return;
+    await conn.query(
+      `UPDATE charge_instances SET status = 'exempt', exempt_type = 'not_applicable', exempt_reason = ?, exempt_by = ?, exempt_at = NOW()
+       WHERE id IN (?) AND status IN ('pending', 'exempt')`,
+      [reason, actorId || null, ids]
+    );
+  }
+
+  async unmarkRetired(ids, conn = pool) {
+    if (!ids.length) return;
+    await conn.query(
+      `UPDATE charge_instances SET status = 'pending', exempt_type = NULL, exempt_reason = NULL, exempt_by = NULL, exempt_at = NULL
+       WHERE id IN (?) AND status = 'exempt'`,
+      [ids]
+    );
   }
 
   /** Todas las instancias de UN cobro para un conjunto de miembros — usado por
@@ -137,6 +172,11 @@ class ChargeInstancesRepository extends BaseRepository {
    * `status = 'pending'`: una instancia `partial`/`paid` ya tiene plata real abonada contra el
    * monto viejo, tocarle el monto ahora dejaría su estado (y lo que "falta pagar") incoherente
    * con lo que la persona ya pagó. */
+  /** Ajusta el monto de UN período (p. ej. prorrateo del mes de ingreso/retiro). */
+  async updateAmount(id, amount, conn = pool) {
+    await conn.query('UPDATE charge_instances SET amount = ? WHERE id = ?', [amount, id]);
+  }
+
   async updateAmountForMember(chargeId, memberId, amount, fromDate, conn = pool) {
     const [result] = await conn.query(
       `UPDATE charge_instances SET amount = ?

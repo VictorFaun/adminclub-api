@@ -12,6 +12,8 @@ const chargeMatrix = [
   // Cuántas columnas de período pedir — fijo en el frontend, tope duro en 10 (ver
   // payments.service.js#_matrixPeriods/MAX_WINDOW_SIZE).
   query('columns').optional().isInt({ min: 1, max: 10 }).withMessage('Cantidad de columnas inválida.'),
+  // Vista por año (ver payments.service.js#getChargeMatrix).
+  query('year').optional().isInt({ min: 2000, max: 2100 }).withMessage('Año inválido.'),
 ];
 const ensureInstance = [
   param('chargeId').isInt({ min: 1 }).withMessage('Identificador de cobro inválido.'),

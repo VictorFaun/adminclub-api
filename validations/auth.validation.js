@@ -13,9 +13,7 @@ const register = [
 ];
 
 const login = [
-  // Acepta correo O nombre de usuario — a diferencia de `register`/`forgotPassword`, acá no se
-  // puede exigir formato de correo ni normalizarlo como tal (ver users.repository.js#findByIdentifier).
-  body('identifier').trim().notEmpty().withMessage('Ingresa tu correo o nombre de usuario.').isLength({ max: 160 }),
+  body('email').trim().isEmail().withMessage('Correo electrónico inválido.').normalizeEmail(NORMALIZE_EMAIL_OPTIONS).isLength({ max: 160 }),
   body('password').notEmpty().withMessage('La contraseña es obligatoria.'),
   body('rememberMe').optional().isBoolean().toBoolean(),
 ];

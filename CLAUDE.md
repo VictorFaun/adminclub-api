@@ -137,6 +137,16 @@ no la tiene (ver `invitations.service.js#create`).
 8. Registrar el router en **routes/index.js**: `router.use('/eventos', require('./eventos.routes'))`.
 9. Actualizar el listado de endpoints en **README.md**.
 
+## Archivos privados y jobs
+
+- Archivos que NO deben ser públicos (documentos de miembros, comprobantes de pago) van con `middlewares/privateUpload.middleware.js` a `private_uploads/` (fuera de `/uploads`, que se sirve estático) y se entregan solo por un endpoint autenticado que revalida el acceso.
+- Endpoints públicos (sin `authMiddleware`) hoy: `/public/pay/:code` (la persona se identifica con su RUT; solo si el club la activó) — siempre con rate limit y sin revelar más que lo mínimo.
+- Crons: `cron/birthdayEmails.cron.js` (08:00) manda el correo de cumpleaños a quien lo activó.
+
+## RUT
+
+Formato canónico único: `12345678-9` (sin puntos, con guion, verificador en mayúscula). `helpers/rut.js` normaliza/valida; `validations/members.validation.js#rutRule` lo aplica a todo RUT que entra por la API (acepta variantes y las guarda canónicas) y la migración 043 convirtió los existentes. Cualquier campo RUT nuevo debe usar `rutRule`/`normalizeRut`.
+
 ## No hacer
 
 - No leer `process.env` fuera de `config/env.js`.

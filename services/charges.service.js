@@ -4,11 +4,13 @@ const membersRepository = require('../repositories/members.repository');
 const memberGroupsRepository = require('../repositories/memberGroups.repository');
 const auditRepository = require('../repositories/audit.repository');
 const chargeInstancesService = require('./chargeInstances.service');
+const treasuryAccountsService = require('./treasuryAccounts.service');
 const permissionService = require('./permission.service');
 const AppError = require('../helpers/AppError');
 const { withTransaction } = require('../config/database');
 const { parseSort } = require('../helpers/pagination');
 const { diffValue, buildDiff } = require('../helpers/auditDiff');
+const { normalizeAccount } = require('../helpers/paymentAccount');
 const { CHARGE_RECURRENCE, FUNCTIONS } = require('../config/constants');
 
 const SORTABLE = ['name', 'amount', 'start_date', 'status', 'recurrence'];
@@ -38,6 +40,9 @@ class ChargesService {
       // pasa por Tesorería, y por eso exige responsable (ver _assertPurposeValid). Solo tiene
       // sentido para cobros únicos.
       purpose: charge.purpose,
+      // Cuenta de Tesorería a la que pertenece el cobro (`null` = sin elegir; con una sola cuenta en
+      // el club se usa esa, ver treasuryAccounts.service.js#resolveForCharge).
+      treasuryAccountId: charge.treasury_account_id ?? null,
       // Responsables del cobro — cada uno opcionalmente vinculado a un grupo específico
       // (`groupId: null` = "todos los grupos", el catch-all); opcional en total si `purpose` es
       // 'treasury' (ej. el entrenador que junta la plata antes de entregarla a tesorería,
@@ -45,7 +50,7 @@ class ChargesService {
       // 'external' (ver payments.service.js#_validatePaidToMemberId). Quién es "el" responsable
       // de un miembro puntual se resuelve con prioridad por grupo, ver
       // charges.repository.js#resolveResponsibles — no hay un solo responsable "del cobro".
-      responsibles: responsibles.map((r) => ({ memberId: r.memberId, memberName: r.memberName, groupId: r.groupId, groupName: r.groupName })),
+      responsibles: responsibles.map((r) => ({ memberId: r.memberId, memberName: r.memberName, groupId: r.groupId, groupName: r.groupName, account: r.account ?? null })),
       // `{id, amount}` — el nombre del target (grupo/miembro) es `id` en ambos para que el
       // frontend pueda pasarlos tal cual a <app-priced-target-picker>, sin remapear.
       targetGroups: targetGroups.map((g) => ({ id: g.groupId, amount: g.amount })),
@@ -118,6 +123,12 @@ class ChargesService {
    * quién pagarle (un cobro externo nunca admite Tesorería como destino, ver
    * payments.service.js#_validatePaidToMemberId). `recurrence`/`responsibleCount` ya vienen
    * resueltos (con lo existente si no cambiaron en un update). */
+  /** `{memberId, groupId, account}` — `account` (datos de la cuenta que usa ese responsable) se
+   * limpia a los campos conocidos; vacío = `null`. */
+  _normalizeResponsibles(list) {
+    return list.map((r) => ({ memberId: r.memberId, groupId: r.groupId ?? null, account: normalizeAccount(r.account) }));
+  }
+
   _assertPurposeValid(purpose, recurrence, responsibleCount) {
     if (purpose !== 'external') return;
     if (recurrence !== CHARGE_RECURRENCE.ONCE) throw AppError.badRequest('El destino "Externo" solo está disponible para cobros únicos.');
@@ -174,10 +185,11 @@ class ChargesService {
   async create(clubId, data, actorId) {
     const schedule = this._resolveSchedule(data);
     const targets = await this._resolveTargets(clubId, data);
-    const responsibles = data.responsibles || [];
+    const responsibles = this._normalizeResponsibles(data.responsibles || []);
     await this._assertResponsiblesValid(clubId, responsibles, targets.targetGroups.map((t) => t.groupId));
     const purpose = data.purpose || 'treasury';
     this._assertPurposeValid(purpose, data.recurrence, responsibles.length);
+    const treasuryAccountId = await treasuryAccountsService.assertValidForCharge(clubId, data.treasuryAccountId ?? null, purpose);
 
     const chargeId = await withTransaction(async (conn) => {
       const id = await chargesRepository.createCharge(
@@ -194,6 +206,7 @@ class ChargesService {
           endDate: data.endDate || null,
           status: data.status || 'active',
           purpose,
+          treasuryAccountId,
           createdBy: actorId,
         },
         conn
@@ -214,6 +227,17 @@ class ChargesService {
     return this.getById(clubId, chargeId);
   }
 
+  _assertImmutableFieldsUnchanged(charge, data) {
+    const toDateOnly = (value) => (value ? new Date(value).toISOString().slice(0, 10) : null);
+    const locked = [];
+    if (data.recurrence !== undefined && data.recurrence !== charge.recurrence) locked.push('la recurrencia');
+    if (data.startDate !== undefined && toDateOnly(data.startDate) !== toDateOnly(charge.start_date)) locked.push('la fecha de inicio');
+    if (data.purpose !== undefined && data.purpose !== charge.purpose) locked.push('el destino del dinero');
+    if (locked.length) {
+      throw AppError.unprocessable(`No se puede modificar ${locked.join(', ')} una vez creado el cobro.`);
+    }
+  }
+
   async update(clubId, chargeId, data, actorId) {
     const charge = await chargesRepository.findActiveById(chargeId);
     if (!charge || charge.club_id !== clubId) throw AppError.notFound('Cobro no encontrado.');
@@ -221,6 +245,10 @@ class ChargesService {
     // charge-archive-list.page.html), pero el service es la fuente de verdad — se exige
     // restaurarlo primero para evitar reactivar targets/generación de instancias a sus espaldas.
     if (charge.archived_at) throw AppError.conflict('Este cobro está archivado — restáuralo antes de editarlo.');
+
+    // Lo que define "qué es" el cobro no cambia una vez creado: de la recurrencia, la fecha de inicio
+    // y el destino del dinero cuelgan las instancias ya generadas, pagos y rendiciones.
+    this._assertImmutableFieldsUnchanged(charge, data);
 
     const recurrence = data.recurrence !== undefined ? data.recurrence : charge.recurrence;
     const schedule =
@@ -242,6 +270,10 @@ class ChargesService {
     if (data.endDate !== undefined) updates.end_date = data.endDate || null;
     if (data.status !== undefined) updates.status = data.status;
     if (data.purpose !== undefined) updates.purpose = data.purpose;
+    const finalPurposeForAccount = data.purpose !== undefined ? data.purpose : charge.purpose;
+    if (data.treasuryAccountId !== undefined) {
+      updates.treasury_account_id = await treasuryAccountsService.assertValidForCharge(clubId, data.treasuryAccountId, finalPurposeForAccount);
+    }
 
     const targetsChanged =
       data.targetMembers !== undefined || data.targetGroups !== undefined || data.exclusionMemberIds !== undefined;
@@ -257,6 +289,7 @@ class ChargesService {
     let responsibleCount = 0;
     if (responsiblesChanged) {
       const targetGroupIds = targets ? targets.targetGroups.map((t) => t.groupId) : (await chargesRepository.getTargetGroups(chargeId)).map((t) => t.groupId);
+      data.responsibles = this._normalizeResponsibles(data.responsibles);
       await this._assertResponsiblesValid(clubId, data.responsibles, targetGroupIds);
       responsibleCount = data.responsibles.length;
     } else {

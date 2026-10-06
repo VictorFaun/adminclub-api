@@ -56,6 +56,49 @@ class TrainingAttendancesRepository extends BaseRepository {
     return result.affectedRows;
   }
 
+  /** ¿Hay alguna asistencia YA marcada (no pendiente) en esa fecha? — impide cancelar un día con datos. */
+  async countMarkedForDate(trainingId, sessionDate, conn = pool) {
+    const [rows] = await conn.query(
+      "SELECT COUNT(*) AS total FROM training_attendances WHERE training_id = ? AND session_date = ? AND status <> 'pending'",
+      [trainingId, sessionDate]
+    );
+    return rows[0].total;
+  }
+
+  /** Borra las filas (pendientes) de una fecha — al cancelar un día o quitar uno extra. */
+  async deletePendingForDate(trainingId, sessionDate, conn = pool) {
+    const [result] = await conn.query("DELETE FROM training_attendances WHERE training_id = ? AND session_date = ? AND status = 'pending'", [trainingId, sessionDate]);
+    return result.affectedRows;
+  }
+
+  /** Asistencias de un miembro que dependen de su historial de pertenencia (sin marcar, o marcadas
+   * "no aplica — Retirado"). Ver members.service.js#syncCoverage. */
+  async findCoverageCandidates(memberId, reasons, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT id, session_date, status, exempt_reason FROM training_attendances
+       WHERE member_id = ? AND (status = 'pending' OR (status = 'exempt' AND exempt_reason IN (?)))`,
+      [memberId, reasons]
+    );
+    return rows;
+  }
+
+  async markRetired(ids, reason, actorId, conn = pool) {
+    if (!ids.length) return;
+    await conn.query(
+      `UPDATE training_attendances SET status = 'exempt', exempt_type = 'not_applicable', exempt_reason = ?, marked_by = ?, marked_at = NOW()
+       WHERE id IN (?) AND status IN ('pending', 'exempt')`,
+      [reason, actorId || null, ids]
+    );
+  }
+
+  async unmarkRetired(ids, conn = pool) {
+    if (!ids.length) return;
+    await conn.query(
+      "UPDATE training_attendances SET status = 'pending', exempt_type = NULL, exempt_reason = NULL WHERE id IN (?) AND status = 'exempt'",
+      [ids]
+    );
+  }
+
   async markAttendance(id, { status, exemptType, exemptReason, markedBy }, conn = pool) {
     await conn.query(
       'UPDATE training_attendances SET status = ?, exempt_type = ?, exempt_reason = ?, marked_by = ?, marked_at = NOW() WHERE id = ?',

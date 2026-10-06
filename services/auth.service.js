@@ -74,12 +74,6 @@ class AuthService {
   async register({ username, email, password }) {
     const exists = await usersRepository.emailExists(email);
     if (exists) throw AppError.conflict('Ya existe una cuenta registrada con este correo electrónico.');
-    // Necesario desde que `username` sirve también para iniciar sesión (uk_users_username,
-    // migración 031) — antes era solo un nombre para mostrar, ahora dos personas no pueden
-    // compartirlo sin ambigüedad de a cuál de las dos cuentas se refiere el login.
-    if (await usersRepository.usernameExists(username)) {
-      throw AppError.conflict('Ya existe una cuenta registrada con este nombre de usuario.');
-    }
     if (!isStrongPassword(password)) {
       throw AppError.badRequest('La contraseña no cumple con los requisitos de seguridad.');
     }
@@ -121,8 +115,8 @@ class AuthService {
     await tokensRepository.markUsed({ id: record.id, type: TOKEN_TYPE.VERIFY_EMAIL });
   }
 
-  async login({ identifier, password, ipAddress, userAgent }) {
-    const user = await usersRepository.findByIdentifier(identifier);
+  async login({ email, password, ipAddress, userAgent }) {
+    const user = await usersRepository.findByEmail(email);
     if (!user) throw AppError.unauthorized('Credenciales incorrectas.');
 
     // Cuenta creada 100% desde Google (`password_hash` NULL, ver `createUserFromGoogle`) —
@@ -198,7 +192,7 @@ class AuthService {
         await usersRepository.linkGoogleId(existingByEmail.id, payload.sub);
         user = await usersRepository.findById(existingByEmail.id);
       } else {
-        const username = await this._generateUsernameFromEmail(payload.email);
+        const username = this._generateUsernameFromEmail(payload.email);
         const userId = await usersRepository.createUserFromGoogle({
           username,
           email: payload.email,
@@ -234,19 +228,10 @@ class AuthService {
     return { user: this.sanitizeUser(user), accessToken, refreshToken, ...bootstrap };
   }
 
-  /** `juan.perez@gmail.com` → `juan.perez`, con sufijo numérico si ya existe (mismo criterio que
-   * la desduplicación de `031_username_unique.sql`, pero resuelto en el momento de crear la
-   * cuenta en vez de en una migración retroactiva). */
-  async _generateUsernameFromEmail(email) {
-    const base = email.split('@')[0].toLowerCase().replace(/[^a-z0-9._-]/g, '') || 'usuario';
-    let candidate = base;
-    let suffix = 0;
-    // eslint-disable-next-line no-await-in-loop
-    while (await usersRepository.usernameExists(candidate)) {
-      suffix += 1;
-      candidate = `${base}${suffix}`;
-    }
-    return candidate;
+  /** `juan.perez@gmail.com` → `juan.perez`. Ya no hace falta desduplicar: `username` es solo un
+   * nombre para mostrar y puede repetirse (migración 035). */
+  _generateUsernameFromEmail(email) {
+    return email.split('@')[0].toLowerCase().replace(/[^a-z0-9._-]/g, '') || 'usuario';
   }
 
   /** Determina el club activo tras login según las reglas de negocio del flujo inicial. */

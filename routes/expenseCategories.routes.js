@@ -11,6 +11,8 @@ router.use(authMiddleware, clubContextMiddleware);
 
 router.get('/', requireFunction(FUNCTIONS.VIEW_EXPENSES), controller.list);
 
+router.get('/:id/summary', requireFunction(FUNCTIONS.VIEW_EXPENSES), validation.categoryId, handleValidation, controller.summary);
+
 router.post('/', requireFunction(FUNCTIONS.CREATE_EXPENSES), sanitizeBody, validation.createCategory, handleValidation, controller.create);
 
 router.put('/:id', requireFunction(FUNCTIONS.EDIT_EXPENSES), sanitizeBody, validation.updateCategory, handleValidation, controller.update);

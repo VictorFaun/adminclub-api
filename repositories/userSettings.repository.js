@@ -14,6 +14,12 @@ class UserSettingsRepository {
     }, {});
   }
 
+  /** Todas las filas (de cualquier usuario/club) con esa clave — para jobs que recorren suscriptores. */
+  async findAllByKey(settingKey, conn = pool) {
+    const [rows] = await conn.query('SELECT user_id, club_id, setting_value FROM user_settings WHERE setting_key = ?', [settingKey]);
+    return rows;
+  }
+
   async upsertMany(userId, clubId, entries, conn = pool) {
     const keys = Object.keys(entries);
     if (!keys.length) return;

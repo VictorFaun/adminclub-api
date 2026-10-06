@@ -1,6 +1,8 @@
 const chargeStatusColorsRepository = require('../repositories/chargeStatusColors.repository');
 const auditRepository = require('../repositories/audit.repository');
 const AppError = require('../helpers/AppError');
+const clubPolicyService = require('./clubPolicy.service');
+const { MONTH_POLICY_OPTIONS } = require('../helpers/membership');
 
 const HEX_COLOR = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/;
 
@@ -26,6 +28,23 @@ const DEFAULT_COLORS = {
 };
 
 class TreasurySettingsService {
+  // ---------------------------------------------------------------- mes de ingreso / retiro
+  async getMonthPolicy(clubId) {
+    return { ...(await clubPolicyService.getMonthPolicy(clubId)), options: MONTH_POLICY_OPTIONS };
+  }
+
+  async updateMonthPolicy(clubId, policy, actorId) {
+    const previous = await clubPolicyService.getMonthPolicy(clubId);
+    const saved = await clubPolicyService.saveMonthPolicy(clubId, policy);
+    if (saved.join !== previous.join || saved.leave !== previous.leave) {
+      // Los períodos ya generados se ajustan a la nueva política (los pagados no se tocan).
+      // eslint-disable-next-line global-require
+      await require('./members.service').resyncClubCoverage(clubId, actorId);
+    }
+    await auditRepository.logAction({ userId: actorId, clubId, action: 'TREASURY_MONTH_POLICY_UPDATED', entityType: 'club', entityId: clubId, changes: { from: previous, to: saved } });
+    return this.getMonthPolicy(clubId);
+  }
+
   async getStatusColors(clubId) {
     const rows = await chargeStatusColorsRepository.findByClub(clubId);
     const byCode = new Map(rows.map((r) => [r.status_code, r.color]));

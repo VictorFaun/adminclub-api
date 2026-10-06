@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const env = require('../config/env');
 const AppError = require('../helpers/AppError');
+const { fixFileName } = require('./privateUpload.middleware');
 
 const UPLOAD_ROOT = path.join(__dirname, '..', env.upload.dir);
 // SVG deliberadamente excluido: a diferencia de un raster, un SVG puede llevar <script>/
@@ -39,6 +40,7 @@ function makeStorage(subdir) {
 }
 
 function fileFilter(req, file, cb) {
+  fixFileName(file);
   if (!ALLOWED_MIME_TO_EXT[file.mimetype]) {
     return cb(AppError.badRequest('Formato de imagen no permitido. Usa PNG, JPG o WEBP.'));
   }

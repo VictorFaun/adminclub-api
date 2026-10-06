@@ -12,9 +12,11 @@ class PaymentsRepository extends BaseRepository {
    * charges.repository.js#getResponsibleMembers para `responsible_member_name`. */
   async findActiveById(id, conn = pool) {
     const [rows] = await conn.query(
-      `SELECT p.*, NULLIF(CONCAT_WS(' ', ptm.first_name, ptm.middle_name, ptm.last_name, ptm.second_last_name), '') AS paid_to_member_name
+      `SELECT p.*, NULLIF(CONCAT_WS(' ', ptmp.first_name, ptmp.middle_name, ptmp.last_name, ptmp.second_last_name), '') AS paid_to_member_name,
+              ta.name AS treasury_account_name, ta.deleted_at AS treasury_account_deleted_at
        FROM payments p
-       LEFT JOIN members ptm ON ptm.id = p.paid_to_member_id
+       LEFT JOIN members ptm ON ptm.id = p.paid_to_member_id LEFT JOIN member_profiles ptmp ON ptmp.member_id = ptm.id
+       LEFT JOIN treasury_accounts ta ON ta.id = p.treasury_account_id
        WHERE p.id = ? LIMIT 1`,
       [id]
     );
@@ -30,13 +32,15 @@ class PaymentsRepository extends BaseRepository {
   async findByMember(memberId, conn = pool) {
     const [rows] = await conn.query(
       `SELECT p.*, u.username AS registered_by_username,
-              NULLIF(CONCAT_WS(' ', ptm.first_name, ptm.middle_name, ptm.last_name, ptm.second_last_name), '') AS paid_to_member_name
+              NULLIF(CONCAT_WS(' ', ptmp.first_name, ptmp.middle_name, ptmp.last_name, ptmp.second_last_name), '') AS paid_to_member_name,
+              ta.name AS treasury_account_name, ta.deleted_at AS treasury_account_deleted_at
        FROM payments p
        INNER JOIN payment_allocations pa ON pa.payment_id = p.id
        INNER JOIN charge_instances ci ON ci.id = pa.charge_instance_id
        INNER JOIN charges c ON c.id = ci.charge_id
        LEFT JOIN users u ON u.id = p.registered_by
-       LEFT JOIN members ptm ON ptm.id = p.paid_to_member_id
+       LEFT JOIN members ptm ON ptm.id = p.paid_to_member_id LEFT JOIN member_profiles ptmp ON ptmp.member_id = ptm.id
+       LEFT JOIN treasury_accounts ta ON ta.id = p.treasury_account_id
        WHERE p.member_id = ? AND c.deleted_at IS NULL
        ORDER BY p.paid_at DESC`,
       [memberId]
@@ -46,8 +50,8 @@ class PaymentsRepository extends BaseRepository {
 
   async createPayment(data, conn = pool) {
     const [result] = await conn.query(
-      `INSERT INTO payments (uuid, club_id, member_id, paid_to_member_id, amount, paid_at, note, registered_by)
-       VALUES (UUID(), :clubId, :memberId, :paidToMemberId, :amount, :paidAt, :note, :registeredBy)`,
+      `INSERT INTO payments (uuid, club_id, member_id, paid_to_member_id, treasury_account_id, amount, paid_at, note, registered_by)
+       VALUES (UUID(), :clubId, :memberId, :paidToMemberId, :treasuryAccountId, :amount, :paidAt, :note, :registeredBy)`,
       data
     );
     return result.insertId;
@@ -77,11 +81,13 @@ class PaymentsRepository extends BaseRepository {
   async findByInstance(instanceId, conn = pool) {
     const [rows] = await conn.query(
       `SELECT p.*, u.username AS registered_by_username,
-              NULLIF(CONCAT_WS(' ', ptm.first_name, ptm.middle_name, ptm.last_name, ptm.second_last_name), '') AS paid_to_member_name
+              NULLIF(CONCAT_WS(' ', ptmp.first_name, ptmp.middle_name, ptmp.last_name, ptmp.second_last_name), '') AS paid_to_member_name,
+              ta.name AS treasury_account_name, ta.deleted_at AS treasury_account_deleted_at
        FROM payments p
        INNER JOIN payment_allocations pa ON pa.payment_id = p.id
        LEFT JOIN users u ON u.id = p.registered_by
-       LEFT JOIN members ptm ON ptm.id = p.paid_to_member_id
+       LEFT JOIN members ptm ON ptm.id = p.paid_to_member_id LEFT JOIN member_profiles ptmp ON ptmp.member_id = ptm.id
+       LEFT JOIN treasury_accounts ta ON ta.id = p.treasury_account_id
        WHERE pa.charge_instance_id = ?
        ORDER BY p.paid_at DESC`,
       [instanceId]

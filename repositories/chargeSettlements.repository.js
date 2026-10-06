@@ -12,7 +12,12 @@ class ChargeSettlementsRepository extends BaseRepository {
   }
 
   async findActiveById(id, conn = pool) {
-    const [rows] = await conn.query('SELECT * FROM charge_settlements WHERE id = ? LIMIT 1', [id]);
+    const [rows] = await conn.query(
+      `SELECT cs.*, ta.name AS treasury_account_name, ta.deleted_at AS treasury_account_deleted_at
+       FROM charge_settlements cs LEFT JOIN treasury_accounts ta ON ta.id = cs.treasury_account_id
+       WHERE cs.id = ? LIMIT 1`,
+      [id]
+    );
     return rows[0] || null;
   }
 
@@ -21,8 +26,10 @@ class ChargeSettlementsRepository extends BaseRepository {
    * a un responsable puntual porque, con varios por cobro, cada uno tiene su propio saldo. */
   async findByChargeResponsibleAndPeriod(chargeId, responsibleMemberId, periodLabel, conn = pool) {
     const [rows] = await conn.query(
-      `SELECT cs.*, u.username AS registered_by_username FROM charge_settlements cs
+      `SELECT cs.*, u.username AS registered_by_username, ta.name AS treasury_account_name, ta.deleted_at AS treasury_account_deleted_at
+       FROM charge_settlements cs
        LEFT JOIN users u ON u.id = cs.registered_by
+       LEFT JOIN treasury_accounts ta ON ta.id = cs.treasury_account_id
        WHERE cs.charge_id = ? AND cs.responsible_member_id = ? AND cs.period_label = ? ORDER BY cs.transferred_at DESC`,
       [chargeId, responsibleMemberId, periodLabel]
     );
@@ -123,8 +130,8 @@ class ChargeSettlementsRepository extends BaseRepository {
 
   async createSettlement(data, conn = pool) {
     const [result] = await conn.query(
-      `INSERT INTO charge_settlements (uuid, charge_id, responsible_member_id, period_label, amount, transferred_at, note, registered_by)
-       VALUES (UUID(), :chargeId, :responsibleMemberId, :periodLabel, :amount, :transferredAt, :note, :registeredBy)`,
+      `INSERT INTO charge_settlements (uuid, charge_id, responsible_member_id, treasury_account_id, period_label, amount, transferred_at, note, registered_by)
+       VALUES (UUID(), :chargeId, :responsibleMemberId, :treasuryAccountId, :periodLabel, :amount, :transferredAt, :note, :registeredBy)`,
       data
     );
     return result.insertId;

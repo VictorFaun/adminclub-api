@@ -12,6 +12,11 @@ const create = asyncHandler(async (req, res) => {
   return ApiResponse.created(res, invitation, 'Invitación creada correctamente.');
 });
 
+const update = asyncHandler(async (req, res) => {
+  const invitation = await invitationsService.update(req.club.id, Number(req.params.id), req.body, req.user.id);
+  return ApiResponse.ok(res, invitation, 'Invitación actualizada correctamente.');
+});
+
 const revoke = asyncHandler(async (req, res) => {
   await invitationsService.revoke(req.club.id, Number(req.params.id), req.user.id);
   return ApiResponse.ok(res, null, 'Invitación revocada correctamente.');
@@ -27,4 +32,4 @@ const remove = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, null, 'Invitación eliminada correctamente.');
 });
 
-module.exports = { list, create, revoke, reactivate, remove };
+module.exports = { list, create, update, revoke, reactivate, remove };

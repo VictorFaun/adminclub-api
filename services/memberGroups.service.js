@@ -2,6 +2,7 @@ const memberGroupsRepository = require('../repositories/memberGroups.repository'
 const membersRepository = require('../repositories/members.repository');
 const auditRepository = require('../repositories/audit.repository');
 const AppError = require('../helpers/AppError');
+const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const { parsePagination, buildMeta } = require('../helpers/pagination');
 const { diffValue, buildDiff } = require('../helpers/auditDiff');
 
@@ -90,6 +91,7 @@ class MemberGroupsService {
       id: row.id,
       fullName: [row.first_name, row.middle_name, row.last_name, row.second_last_name].filter(Boolean).join(' '),
       email: row.email,
+      avatarUrl: row.avatar_url ? toAbsoluteMediaUrl(row.avatar_url) : null,
       status: row.status,
       groups: (groupsByMember[row.id] || []).map((g) => ({ id: g.id, name: g.name, color: g.color })),
     }));
@@ -103,6 +105,8 @@ class MemberGroupsService {
     if (found.length !== memberIds.length) throw AppError.badRequest('Uno o más miembros no pertenecen a este club.');
 
     await memberGroupsRepository.addMembers(groupId, memberIds);
+    // Los agregados reciben ya los períodos de los cobros/entrenamientos de ese grupo.
+    await require('../helpers/regeneratePeriods').regeneratePeriods(clubId); // eslint-disable-line global-require
     await auditRepository.logAction({
       userId: actorId,
       clubId,

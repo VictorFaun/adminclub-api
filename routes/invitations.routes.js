@@ -22,6 +22,15 @@ router.post(
 );
 
 router.put(
+  '/:id',
+  requireFunction(FUNCTIONS.EDIT_INVITATIONS),
+  sanitizeBody,
+  validation.updateInvitation,
+  handleValidation,
+  controller.update
+);
+
+router.put(
   '/:id/revoke',
   requireFunction(FUNCTIONS.REVOKE_INVITATIONS),
   validation.invitationId,

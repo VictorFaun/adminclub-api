@@ -1,3 +1,5 @@
+const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
+
 class Notification {
   static fromRow(row) {
     if (!row) return null;
@@ -9,6 +11,7 @@ class Notification {
       title: row.title,
       message: row.message,
       link: row.link,
+      imageUrl: row.image_url ? toAbsoluteMediaUrl(row.image_url) : null,
       isRead: !!row.is_read,
       readAt: row.read_at,
       createdAt: row.created_at,

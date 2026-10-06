@@ -10,10 +10,12 @@ const createInvitation = [
   body('requiresMemberProfile').optional().isBoolean().withMessage('requiresMemberProfile debe ser booleano.'),
 ];
 
+const updateInvitation = [...invitationId, ...createInvitation];
+
 const listInvitations = [
   query('page').optional().isInt({ min: 1 }),
   query('limit').optional().isInt({ min: 1, max: 100 }),
   query('status').optional().isIn(['active', 'revoked', 'expired', 'exhausted']),
 ];
 
-module.exports = { invitationId, createInvitation, listInvitations };
+module.exports = { invitationId, createInvitation, updateInvitation, listInvitations };

@@ -18,4 +18,23 @@ const markAttendance = [
   body('exemptReason').optional({ nullable: true }).trim().isLength({ max: 255 }),
 ];
 
-module.exports = { memberIdParam, trainingIdParam, trainingMatrix, markAttendance };
+const sessionDateParam = param('date').isISO8601({ strict: true }).withMessage('Fecha inválida.');
+const sessionFields = [
+  body('startTime').optional({ nullable: true, checkFalsy: true }).matches(/^\d{2}:\d{2}(:\d{2})?$/).withMessage('Hora de inicio inválida.'),
+  body('endTime').optional({ nullable: true, checkFalsy: true }).matches(/^\d{2}:\d{2}(:\d{2})?$/).withMessage('Hora de término inválida.'),
+  body('note').optional({ nullable: true }).trim().isLength({ max: 255 }),
+];
+const addSession = [...trainingIdParam, body('sessionDate').isISO8601().withMessage('Fecha inválida.'), ...sessionFields];
+const updateSession = [...trainingIdParam, sessionDateParam, ...sessionFields];
+const sessionDate = [...trainingIdParam, sessionDateParam, body('note').optional({ nullable: true }).trim().isLength({ max: 255 })];
+
+const markSession = [
+  ...trainingIdParam,
+  param('date').isISO8601({ strict: true }).withMessage('Fecha inválida.'),
+  body('marks').isArray({ min: 1, max: 300 }).withMessage('Indica al menos una marca.'),
+  body('marks.*.memberId').isInt({ min: 1 }),
+  body('marks.*.status').isIn(['pending', 'attended', 'absent', 'exempt']),
+  body('marks.*.exemptType').optional({ nullable: true }).isIn(['frozen', 'not_applicable']),
+];
+
+module.exports = { memberIdParam, trainingIdParam, trainingMatrix, markAttendance, markSession, addSession, updateSession, sessionDate };

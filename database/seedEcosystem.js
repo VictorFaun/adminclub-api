@@ -13,6 +13,7 @@
 require('dotenv').config();
 const crypto = require('crypto');
 const { pool } = require('../config/database');
+const memberFieldsService = require('../services/memberFields.service');
 const { hashPassword } = require('../helpers/passwordUtils');
 const { FUNCTIONS } = require('../config/constants');
 
@@ -75,9 +76,8 @@ function rutCheckDigit(num) {
   return String(res);
 }
 function formatRut(num) {
-  const s = String(num);
-  const withDots = s.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
-  return `${withDots}-${rutCheckDigit(num)}`;
+  // Formato canónico de la app: sin puntos, con guion (ver helpers/rut.js).
+  return `${num}-${rutCheckDigit(num)}`;
 }
 let rutSeq = 11000000;
 function nextRut() {
@@ -148,13 +148,35 @@ async function assignRole(conn, { userId, roleId, clubId, assignedBy }) {
   );
 }
 
+/** Campos de la ficha con uso especial del club (`{ role: fieldId }`); si no tiene, le agrega los sugeridos. */
+const roleFieldsCache = new Map();
+async function roleFields(conn, clubId) {
+  if (roleFieldsCache.has(clubId)) return roleFieldsCache.get(clubId);
+  let [rows] = await conn.query('SELECT id, role FROM member_fields WHERE club_id = ? AND role IS NOT NULL', [clubId]);
+  if (!rows.length) {
+    await memberFieldsService.addSuggested(clubId, null, conn);
+    [rows] = await conn.query('SELECT id, role FROM member_fields WHERE club_id = ? AND role IS NOT NULL', [clubId]);
+  }
+  const map = Object.fromEntries(rows.map((r) => [r.role, r.id]));
+  roleFieldsCache.set(clubId, map);
+  return map;
+}
+
+// La ficha es 100% configurable: `members` solo identifica a la persona; los datos van en
+// member_field_values, en los campos con el uso especial correspondiente.
 async function createMember(conn, { clubId, firstName, lastName, secondLastName, email, phone, birthDate, userId = null, status = 'active', createdBy }) {
   const [result] = await conn.query(
-    `INSERT INTO members (uuid, club_id, first_name, last_name, second_last_name, email, phone, rut, birth_date, user_id, status, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [uuid(), clubId, firstName, lastName, secondLastName, email, phone, nextRut(), birthDate, userId, status, createdBy]
+    `INSERT INTO members (uuid, club_id, user_id, status, created_by) VALUES (?, ?, ?, ?, ?)`,
+    [uuid(), clubId, userId, status, createdBy]
   );
-  return result.insertId;
+  const memberId = result.insertId;
+  const fields = await roleFields(conn, clubId);
+  const values = { first_name: firstName, last_name: lastName, second_last_name: secondLastName, email, phone, identifier: nextRut(), birth_date: birthDate };
+  for (const [role, value] of Object.entries(values)) {
+    if (!fields[role] || value === null || value === undefined || value === '') continue;
+    await conn.query('INSERT INTO member_field_values (member_id, field_id, value) VALUES (?, ?, ?)', [memberId, fields[role], String(value)]);
+  }
+  return memberId;
 }
 
 async function main() {
@@ -166,15 +188,10 @@ async function main() {
     const [[superAdmin]] = await conn.query("SELECT id FROM users WHERE email = 'admin@adminclub.dev' LIMIT 1");
     const superAdminId = superAdmin ? superAdmin.id : null;
 
-    // ---- Club 1: Trawen (YA EXISTE — solo se agrega contenido alrededor) ----
-    const [[trawen]] = await conn.query("SELECT id, created_by FROM clubs WHERE name = 'Trawen' LIMIT 1");
-    const trawenId = trawen.id;
-    const trawenCreatedBy = trawen.created_by;
-
-    // ---- Clubes nuevos ----
+    // ---- Clubes nuevos (y Trawen, si la BD se reseteó y no existe todavía) ----
     async function ensureClub({ name, description, primaryColor, secondaryColor, isPublic = 1, createdBy }) {
-      const [existing] = await conn.query('SELECT id FROM clubs WHERE name = ?', [name]);
-      if (existing.length) return existing[0].id;
+      const [existing] = await conn.query('SELECT id, created_by FROM clubs WHERE name = ?', [name]);
+      if (existing.length) return existing[0];
       const code = name
         .normalize('NFD')
         .replace(/[̀-ͯ]/g, '')
@@ -186,27 +203,39 @@ async function main() {
          VALUES (?, ?, ?, ?, ?, ?, 'auto', 'America/Santiago', 'active', ?, ?)`,
         [uuid(), name, code, description, primaryColor, secondaryColor, isPublic, createdBy]
       );
-      return result.insertId;
+      return { id: result.insertId, created_by: createdBy };
     }
 
     // El admin de Andes/Halcones se crea primero para poder usarlo como created_by del club.
     const andesAdminId = await createUser(conn, { username: 'Constanza Rivas', email: 'admin.andes@ecosistema.test' });
     const halconesAdminId = await createUser(conn, { username: 'Ignacio Bello', email: 'admin.halcones@ecosistema.test' });
 
-    const andesId = await ensureClub({
+    // ---- Club 1: Trawen (si la BD se reseteó y no existe, se crea igual que los demás; el
+    // admin real de Trawen se asigna más abajo a un miembro generado, como en el seed original) ----
+    const trawen = await ensureClub({
+      name: 'Trawen',
+      description: 'Club deportivo Trawen.',
+      primaryColor: '#16A34A',
+      secondaryColor: '#0F172A',
+      createdBy: superAdminId,
+    });
+    const trawenId = trawen.id;
+    const trawenCreatedBy = trawen.created_by || superAdminId;
+
+    const andesId = (await ensureClub({
       name: 'Club Deportivo Los Andes',
       description: 'Club deportivo multi-disciplina fundado por la comunidad de Los Andes — fútbol, atletismo y actividades familiares.',
       primaryColor: '#0EA5E9',
       secondaryColor: '#F59E0B',
       createdBy: andesAdminId,
-    });
-    const halconesId = await ensureClub({
+    })).id;
+    const halconesId = (await ensureClub({
       name: 'Academia Halcones',
       description: 'Academia deportiva juvenil, recién formada.',
       primaryColor: '#DC2626',
       secondaryColor: '#111827',
       createdBy: halconesAdminId,
-    });
+    })).id;
 
     console.log(`[seed] Clubes: Trawen=${trawenId} Andes=${andesId} Halcones=${halconesId}`);
 
@@ -509,9 +538,12 @@ async function main() {
       }
     }
 
-    // -- Trawen: Mensualidad (id=1 ya existe, la reutilizamos y le agregamos targets/responsables/historial) --
-    const [[mensualidad]] = await conn.query("SELECT id, amount FROM charges WHERE club_id = ? AND name = 'Mensualidad' LIMIT 1", [trawenId]);
-    const mensualidadId = mensualidad.id;
+    // -- Trawen: Mensualidad (si la BD se reseteó y no existe, se crea; si no, se reutiliza) --
+    const mensualidadId = await ensureCharge(trawenId, {
+      name: 'Mensualidad', description: 'Cuota mensual del club', color: '#16A34A',
+      amount: 10000, recurrence: 'monthly', startDate: formatDateOnly(addDays(TODAY, -450)), dueDay: 5, createdBy: trawenAdminUserId,
+    });
+    const [[mensualidad]] = await conn.query('SELECT id, amount FROM charges WHERE id = ? LIMIT 1', [mensualidadId]);
     await setChargeTargetGroup(mensualidadId, trawenGroupAdultos, mensualidad.amount);
     await setChargeTargetGroup(mensualidadId, trawenGroupJuvenil, mensualidad.amount);
     await setChargeTargetGroup(mensualidadId, trawenGroupInfantil, mensualidad.amount);

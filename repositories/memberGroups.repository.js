@@ -59,10 +59,12 @@ class MemberGroupsRepository extends BaseRepository {
 
   async paginateMembers(groupId, { limit, offset }) {
     const [rows] = await pool.query(
-      `SELECT m.* FROM members m
+      `SELECT m.*, mp.first_name, mp.middle_name, mp.last_name, mp.second_last_name, mp.rut, mp.email, mp.phone, mp.birth_date, mp.avatar_url
+       FROM members m
        INNER JOIN member_group_members mgm ON mgm.member_id = m.id
+       LEFT JOIN member_profiles mp ON mp.member_id = m.id
        WHERE mgm.group_id = ? AND m.deleted_at IS NULL
-       ORDER BY m.first_name ASC, m.last_name ASC LIMIT ? OFFSET ?`,
+       ORDER BY mp.first_name ASC, mp.last_name ASC LIMIT ? OFFSET ?`,
       [groupId, limit, offset]
     );
     const [countRows] = await pool.query(

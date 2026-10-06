@@ -32,6 +32,8 @@ router.get('/', requireFunction(FUNCTIONS.VIEW_ALL_CLUBS), controller.listAll);
 router.use('/:clubId', clubContextMiddleware);
 
 router.get('/:clubId', requireFunction(FUNCTIONS.VIEW_CLUB), validation.clubId, handleValidation, controller.getById);
+// ¿Está libre un código público? (Configuración del club, mientras se escribe).
+router.get('/:clubId/public-code-availability', requireFunction(FUNCTIONS.EDIT_CLUB), validation.checkPublicCode, handleValidation, controller.checkPublicCode);
 // CLUB_UPDATED se registra en clubs.service.js#update (con diff de qué cambió), no acá.
 router.put(
   '/:clubId',

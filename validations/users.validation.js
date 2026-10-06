@@ -13,10 +13,18 @@ const listUsers = [
   // matchear ninguna fila, devolviendo siempre 0 resultados en silencio (falsa impresión de
   // "no hay usuarios bloqueados en este club" en vez de un 422 explicando que ese filtro no
   // aplica acá).
-  query('status').optional().isIn(['active', 'suspended', 'pending']),
+  query('status').optional().isIn(['active', 'suspended', 'pending', 'withdrawn']),
 ];
 
 const userId = [param('id').isInt({ min: 1 }).withMessage('Identificador de usuario inválido.')];
+
+const removeUser = [
+  ...userId,
+  body('memberAction')
+    .optional()
+    .isIn(['keep', 'deactivate', 'delete'])
+    .withMessage("memberAction debe ser 'keep', 'deactivate' o 'delete'."),
+];
 
 const updateUser = [
   ...userId,
@@ -90,6 +98,7 @@ const addExisting = [
 ];
 
 module.exports = {
+  removeUser,
   listUsers,
   userId,
   updateUser,

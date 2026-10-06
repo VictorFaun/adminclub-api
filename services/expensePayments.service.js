@@ -4,6 +4,7 @@ const expenseInstancesRepository = require('../repositories/expenseInstances.rep
 const expenseInstancesService = require('./expenseInstances.service');
 const expensePaymentsRepository = require('../repositories/expensePayments.repository');
 const auditRepository = require('../repositories/audit.repository');
+const treasuryAccountsService = require('./treasuryAccounts.service');
 const AppError = require('../helpers/AppError');
 const { withTransaction } = require('../config/database');
 
@@ -33,6 +34,10 @@ class ExpensePaymentsService {
       uuid: payment.uuid,
       clubId: payment.club_id,
       expenseInstanceId: payment.expense_instance_id,
+      // Cuenta de Tesorería de la que salió el pago (sigue nombrada aunque se haya eliminado).
+      treasuryAccountId: payment.treasury_account_id ?? null,
+      treasuryAccountName: payment.treasury_account_name ?? null,
+      treasuryAccountDeleted: !!payment.treasury_account_deleted_at,
       amount: Number(payment.amount),
       paidAt: payment.paid_at,
       note: payment.note,
@@ -244,11 +249,15 @@ class ExpensePaymentsService {
       throw AppError.badRequest(`El monto excede el saldo pendiente de "${instance.period_label}" ($${remaining.toFixed(2)}).`);
     }
 
+    // De qué cuenta sale el dinero: la elegida, o la única del club (con 2+ es obligatoria).
+    const treasuryAccountId = await treasuryAccountsService.resolveForExpensePayment(clubId, data.treasuryAccountId ?? null);
+
     const paymentId = await withTransaction(async (conn) => {
       const id = await expensePaymentsRepository.createPayment(
         {
           clubId,
           expenseInstanceId: instance.id,
+          treasuryAccountId,
           amount: data.amount,
           paidAt: data.paidAt || new Date(),
           note: data.note || null,
@@ -289,10 +298,14 @@ class ExpensePaymentsService {
       }
     }
 
+    const treasuryAccountId =
+      data.treasuryAccountId !== undefined ? await treasuryAccountsService.resolveForExpensePayment(clubId, data.treasuryAccountId) : undefined;
+
     await withTransaction(async (conn) => {
       const updates = {};
       if (data.amount !== undefined) updates.amount = newAmount;
       if (data.paidAt !== undefined) updates.paid_at = data.paidAt;
+      if (treasuryAccountId !== undefined) updates.treasury_account_id = treasuryAccountId;
       if (data.note !== undefined) updates.note = data.note || null;
       if (Object.keys(updates).length) await expensePaymentsRepository.updateById(paymentId, updates, conn);
       if (data.amount !== undefined) await expenseInstancesRepository.recomputeStatus(instance.id, conn);

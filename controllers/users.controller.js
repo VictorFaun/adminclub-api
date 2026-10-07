@@ -1,6 +1,7 @@
 const asyncHandler = require('../helpers/asyncHandler');
 const ApiResponse = require('../helpers/ApiResponse');
 const usersService = require('../services/users.service');
+const clubUserInvitationsService = require('../services/clubUserInvitations.service');
 const usersRepository = require('../repositories/users.repository');
 const userSettingsService = require('../services/userSettings.service');
 const AppError = require('../helpers/AppError');
@@ -12,29 +13,45 @@ const list = asyncHandler(async (req, res) => {
   return ApiResponse.paginated(res, items, meta, 'Usuarios obtenidos correctamente.');
 });
 
-const create = asyncHandler(async (req, res) => {
-  const user = await usersService.createInClub(req.club.id, req.body, req.user.id);
-  return ApiResponse.created(res, user, 'Usuario creado correctamente.');
-});
-
 const lookupByEmail = asyncHandler(async (req, res) => {
   const result = await usersService.lookupByEmail(req.club.id, req.query.email, req.user.id);
   return ApiResponse.ok(res, result, 'Búsqueda completada.');
 });
 
-const addExisting = asyncHandler(async (req, res) => {
-  const user = await usersService.addExistingUserToClub(req.club.id, Number(req.params.id), req.body.roleIds, req.user.id);
-  return ApiResponse.created(res, user, 'Usuario agregado al club correctamente.');
+const invite = asyncHandler(async (req, res) => {
+  const data = await clubUserInvitationsService.invite(req.club.id, { userId: Number(req.params.id), message: req.body.message, roleIds: req.body.roleIds }, req.user.id);
+  return ApiResponse.created(res, data, 'Invitación enviada.');
+});
+
+const cancelInvitation = asyncHandler(async (req, res) => {
+  await clubUserInvitationsService.cancel(req.club.id, Number(req.params.invitationId), req.user.id);
+  return ApiResponse.ok(res, null, 'Invitación cancelada.');
+});
+
+// --- Invitaciones recibidas (perfil propio) ---
+const myInvitations = asyncHandler(async (req, res) => {
+  const data = await clubUserInvitationsService.listMine(req.user.id);
+  return ApiResponse.ok(res, data, 'Invitaciones obtenidas correctamente.');
+});
+
+const myInvitationsCount = asyncHandler(async (req, res) => {
+  const data = await clubUserInvitationsService.countMine(req.user.id);
+  return ApiResponse.ok(res, data, 'Invitaciones obtenidas correctamente.');
+});
+
+const acceptInvitation = asyncHandler(async (req, res) => {
+  const data = await clubUserInvitationsService.accept(req.user.id, Number(req.params.invitationId));
+  return ApiResponse.ok(res, data, 'Invitación aceptada. Ya eres parte del club.');
+});
+
+const rejectInvitation = asyncHandler(async (req, res) => {
+  await clubUserInvitationsService.reject(req.user.id, Number(req.params.invitationId));
+  return ApiResponse.ok(res, null, 'Invitación rechazada.');
 });
 
 const getById = asyncHandler(async (req, res) => {
   const user = await usersService.getDetail(Number(req.params.id), req.club.id);
   return ApiResponse.ok(res, user, 'Usuario obtenido correctamente.');
-});
-
-const update = asyncHandler(async (req, res) => {
-  const user = await usersService.update(Number(req.params.id), req.club.id, req.body, req.user.id);
-  return ApiResponse.ok(res, user, 'Usuario actualizado correctamente.');
 });
 
 const updateStatus = asyncHandler(async (req, res) => {
@@ -128,11 +145,14 @@ const updateMyAvatar = asyncHandler(async (req, res) => {
 
 module.exports = {
   list,
-  create,
   lookupByEmail,
-  addExisting,
+  invite,
+  cancelInvitation,
+  myInvitations,
+  myInvitationsCount,
+  acceptInvitation,
+  rejectInvitation,
   getById,
-  update,
   updateStatus,
   remove,
   updateRoles,

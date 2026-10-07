@@ -14,7 +14,7 @@ router.post(
   publicPaymentsUploadRateLimit,
   uploadPrivate('payment-proofs', {
     mimeToExt: PROOF_MIME_TO_EXT,
-    maxMb: 8,
+    maxMb: 15,
     errorMessage: 'Formato no permitido. Sube una imagen (PNG/JPG/WEBP) o un PDF.',
   }).single('proof'),
   controller.publicSubmit

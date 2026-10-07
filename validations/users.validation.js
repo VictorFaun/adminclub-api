@@ -1,5 +1,4 @@
 const { body, param, query } = require('express-validator');
-const { PASSWORD_REGEX } = require('../helpers/passwordUtils');
 const { NORMALIZE_EMAIL_OPTIONS } = require('../helpers/emailUtils');
 
 const listUsers = [
@@ -26,12 +25,6 @@ const removeUser = [
     .withMessage("memberAction debe ser 'keep', 'deactivate' o 'delete'."),
 ];
 
-const updateUser = [
-  ...userId,
-  body('username').optional().trim().isLength({ min: 1, max: 160 }),
-  body('phone').optional({ nullable: true }).trim().isLength({ max: 30 }),
-];
-
 const updateStatus = [
   ...userId,
   body('status').isIn(['active', 'suspended']).withMessage('Estado inválido.'),
@@ -46,18 +39,6 @@ const updateRoles = [
 const updateMe = [
   body('username').optional().trim().isLength({ min: 1, max: 160 }),
   body('phone').optional({ nullable: true }).trim().isLength({ max: 30 }),
-];
-
-const createUser = [
-  body('username').trim().notEmpty().withMessage('El nombre de usuario es obligatorio.').isLength({ max: 160 }),
-  body('email').trim().isEmail().withMessage('Correo electrónico inválido.').normalizeEmail(NORMALIZE_EMAIL_OPTIONS).isLength({ max: 160 }),
-  body('password')
-    .matches(PASSWORD_REGEX)
-    .withMessage('La contraseña debe tener mínimo 8 caracteres, una mayúscula, una minúscula y un número.'),
-  // El teléfono ya no se pide al crear la cuenta (ver users.service.js#createInClub) —
-  // sigue siendo editable después, así que no hay regla acá.
-  body('roleIds').optional().isArray().withMessage('roleIds debe ser un arreglo.'),
-  body('roleIds.*').isInt({ min: 1 }),
 ];
 
 const lookupByEmail = [
@@ -91,23 +72,27 @@ const updateGlobalStatus = [
   body('status').isIn(['active', 'suspended']).withMessage('Estado inválido.'),
 ];
 
-const addExisting = [
+// Invitación a una persona con cuenta (ver clubUserInvitations.service.js): mensaje opcional y
+// los roles que tendrá al aceptar.
+const inviteUser = [
   ...userId,
+  body('message').optional({ nullable: true }).isString().trim().isLength({ max: 500 }).withMessage('El mensaje admite hasta 500 caracteres.'),
   body('roleIds').optional().isArray().withMessage('roleIds debe ser un arreglo.'),
   body('roleIds.*').isInt({ min: 1 }),
 ];
+
+const invitationId = [param('invitationId').isInt({ min: 1 }).withMessage('Identificador de invitación inválido.')];
 
 module.exports = {
   removeUser,
   listUsers,
   userId,
-  updateUser,
   updateStatus,
   updateRoles,
   updateMe,
-  createUser,
   lookupByEmail,
-  addExisting,
+  inviteUser,
+  invitationId,
   listAllUsers,
   updateGlobalUser,
   updateGlobalStatus,

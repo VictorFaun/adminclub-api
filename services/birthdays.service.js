@@ -17,7 +17,20 @@ const { FUNCTIONS, USER_CLUB_STATUS, NOTIFICATION_TYPE } = require('../config/co
  * el mismo contenido (ver notifications.service.js#notifyUser) — a pedido explícito de dejar de
  * tener un envío de correo separado solo para cumpleaños. */
 const SETTING_KEY = 'birthday_notification';
-const DEFAULT_SETTINGS = { enabled: false, daysBefore: 0 };
+/** Día (local) del último envío automático a ese usuario/club — evita repetirlo en el mismo día. */
+const LAST_SENT_KEY = 'birthday_notification_last';
+const DEFAULT_SETTINGS = { enabled: false, daysBefore: 0, sendTime: '08:00' };
+const SEND_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** Fecha "YYYY-MM-DD" y hora "HH:mm" actuales en una zona horaria. */
+function nowIn(timezone) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+      .formatToParts(new Date())
+      .map((p) => [p.type, p.value])
+  );
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, time: `${parts.hour}:${parts.minute}` };
+}
 const VIEW_FUNCTIONS = [FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED];
 
 /** Plantilla de diseño (club_settings), una por club y por formato — ver
@@ -31,6 +44,12 @@ const TEXT_ALIGNS = ['left', 'center', 'right'];
 const TEXT_WEIGHTS = [400, 600, 700, 800];
 const SHAPE_FILL_TYPES = ['solid', 'gradient'];
 const HEX_COLOR_RE = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i;
+
+function minutesBetween(from, to) {
+  const [fh, fm] = from.split(':').map(Number);
+  const [th, tm] = to.split(':').map(Number);
+  return th * 60 + tm - (fh * 60 + fm);
+}
 
 function templateSettingKey(format) {
   return `birthday_template_${format}`;
@@ -56,6 +75,7 @@ class BirthdaysService {
       return {
         enabled: !!parsed.enabled,
         daysBefore: Math.min(Math.max(Number(parsed.daysBefore) || 0, 0), 30),
+        sendTime: SEND_TIME_RE.test(parsed.sendTime) ? parsed.sendTime : DEFAULT_SETTINGS.sendTime,
       };
     } catch {
       return { ...DEFAULT_SETTINGS };
@@ -67,8 +87,12 @@ class BirthdaysService {
     return this._parseSettings(all[SETTING_KEY]);
   }
 
-  async updateMySettings(userId, clubId, { enabled, daysBefore }) {
-    const settings = { enabled: !!enabled, daysBefore: Math.min(Math.max(Number(daysBefore) || 0, 0), 30) };
+  async updateMySettings(userId, clubId, { enabled, daysBefore, sendTime }) {
+    const settings = {
+      enabled: !!enabled,
+      daysBefore: Math.min(Math.max(Number(daysBefore) || 0, 0), 30),
+      sendTime: SEND_TIME_RE.test(sendTime) ? sendTime : DEFAULT_SETTINGS.sendTime,
+    };
     await userSettingsRepository.upsertMany(userId, clubId, { [SETTING_KEY]: JSON.stringify(settings) });
     return settings;
   }
@@ -111,9 +135,18 @@ class BirthdaysService {
       return {
         ...base,
         type: 'shape',
+        ...(el.shapeKind === 'circle' ? { shapeKind: 'circle' } : {}),
         fillType: SHAPE_FILL_TYPES.includes(el.fillType) ? el.fillType : 'solid',
         color: sanitizeColor(el.color, '#4F46E5'),
         gradientColor: sanitizeColor(el.gradientColor, '#7C3AED'),
+        // Degradado: lineal (ángulo CSS) o radial; inicio/fin en %; segundo color transparente
+        // (difuminado); opacidad de toda la forma.
+        gradientType: el.gradientType === 'radial' ? 'radial' : 'linear',
+        gradientAngle: clampNumber(el.gradientAngle, 0, 359, 135),
+        gradientStart: clampNumber(el.gradientStart, 0, 100, 0),
+        gradientEnd: clampNumber(el.gradientEnd, 0, 100, 100),
+        gradientToTransparent: !!el.gradientToTransparent,
+        opacity: clampNumber(el.opacity, 0, 100, 100),
       };
     }
     // 'photo': rectangular siempre, relación de aspecto bloqueada y sin recorte — no lleva
@@ -255,10 +288,23 @@ class BirthdaysService {
     return { sent: count };
   }
 
-  /** Cron diario: a cada usuario suscrito le llega una notificación por el/los cumpleaños que
-   * caen exactamente en `daysBefore` días (0 = hoy). */
+  /** Cron (cada pocos minutos): a cada usuario suscrito le llega, UNA vez al día y a partir de la
+   * hora que eligió (`sendTime`, en su zona horaria o si no la del club), la notificación por
+   * el/los cumpleaños que caen exactamente en `daysBefore` días (0 = hoy). Si el servidor estuvo
+   * caído a esa hora, se envía en la primera pasada después (en vez de saltarse el día). */
   async sendDailyDigests() {
     const subscriptions = await userSettingsRepository.findAllByKey(SETTING_KEY);
+    const lastSentRows = await userSettingsRepository.findAllByKey(LAST_SENT_KEY);
+    const lastSent = new Map(lastSentRows.map((r) => [`${r.user_id}:${r.club_id}`, r.setting_value]));
+    const tzCache = new Map();
+    const timezoneFor = async (userId, clubId) => {
+      const key = `${userId}:${clubId}`;
+      if (!tzCache.has(key)) {
+        const [user, club] = await Promise.all([usersRepository.findById(userId), clubsRepository.findActiveById(clubId)]);
+        tzCache.set(key, user?.timezone || club?.timezone || 'UTC');
+      }
+      return tzCache.get(key);
+    };
     let sent = 0;
     // Compartido entre todos los suscriptores de este run: varios usuarios del mismo club ven
     // (parte de) los mismos cumpleaños, no tiene sentido componer la misma imagen una vez por
@@ -267,6 +313,18 @@ class BirthdaysService {
     for (const sub of subscriptions) {
       const settings = this._parseSettings(sub.setting_value);
       if (!settings.enabled) continue;
+      // eslint-disable-next-line no-await-in-loop
+      const local = nowIn(await timezoneFor(sub.user_id, sub.club_id));
+      const subKey = `${sub.user_id}:${sub.club_id}`;
+      if (local.time < settings.sendTime || lastSent.get(subKey) === local.date) continue;
+      // Primera pasada tras activar la hora elegible: si ya pasó hace rato la hora de hoy y no hay
+      // registro previo (antes el envío era fijo a las 08:00 y no se registraba), se marca el día
+      // como enviado en vez de mandar ahora un aviso que probablemente ya le llegó.
+      if (!lastSent.has(subKey) && minutesBetween(settings.sendTime, local.time) > 60) {
+        // eslint-disable-next-line no-await-in-loop
+        await userSettingsRepository.upsertMany(sub.user_id, sub.club_id, { [LAST_SENT_KEY]: local.date });
+        continue;
+      }
       // Solo miembros activos del club: un usuario retirado/suspendido deja de recibir la notificación.
       // eslint-disable-next-line no-await-in-loop
       const membership = await usersRepository.findMembership(sub.user_id, sub.club_id);
@@ -281,6 +339,8 @@ class BirthdaysService {
           imageCache,
         });
         sent += count;
+        // eslint-disable-next-line no-await-in-loop
+        await userSettingsRepository.upsertMany(sub.user_id, sub.club_id, { [LAST_SENT_KEY]: local.date });
       } catch (error) {
         logger.error('[cron] Error enviando notificaciones de cumpleaños', { userId: sub.user_id, clubId: sub.club_id, error: error.message });
       }

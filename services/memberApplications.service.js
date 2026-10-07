@@ -93,21 +93,41 @@ class MemberApplicationsService {
     return (await memberFieldsService.listForClub(clubId)).filter((f) => f.inPublicForm);
   }
 
+  async _clubBranding(club) {
+    return {
+      name: club.name,
+      description: club.description,
+      logoUrl: toAbsoluteMediaUrl(club.logo_url),
+      bannerUrl: toAbsoluteMediaUrl(club.banner_url),
+      showLogoOnBanner: await showLogoOnBanner(club.id),
+      primaryColor: club.primary_color,
+      secondaryColor: club.secondary_color,
+    };
+  }
+
   async getPublicForm(code) {
     const club = await this._publicClub(code);
     return {
-      club: {
-        name: club.name,
-        description: club.description,
-        logoUrl: toAbsoluteMediaUrl(club.logo_url),
-        bannerUrl: toAbsoluteMediaUrl(club.banner_url),
-        showLogoOnBanner: await showLogoOnBanner(club.id),
-        primaryColor: club.primary_color,
-        secondaryColor: club.secondary_color,
-      },
+      club: await this._clubBranding(club),
       fields: await this._publicFields(club.id),
       // Categoría a la que postula (si el club la pide): opcional u obligatoria.
       groupChoice: await this._offeredGroups(club.id),
+    };
+  }
+
+  /**
+   * Ficha exigida por una invitación (`GET /members/me/form`; en el frontend es la misma página
+   * `/inscripcion/<código>`). Independiente de si el formulario público está activo: solo exige
+   * sesión y que la membresía siga marcada `requires_profile_completion`. Es la ficha completa
+   * del club (lo que valida members.service.js#createSelf) y sin categoría: los grupos los asigna
+   * el club.
+   */
+  async getInvitationForm(club, membership) {
+    if (!membership?.requires_profile_completion) throw AppError.notFound('No tienes una ficha pendiente por completar.');
+    return {
+      club: await this._clubBranding(club),
+      fields: await memberFieldsService.listForClub(club.id),
+      groupChoice: { mode: 'off', groups: [] },
     };
   }
 

@@ -15,6 +15,12 @@ const publicSubmit = asyncHandler(async (req, res) => {
   return ApiResponse.created(res, data, 'Solicitud enviada. El club la revisará a la brevedad.');
 });
 
+// --- Ficha exigida por una invitación (con sesión, ver members.routes.js GET /me/form) ---
+const invitationForm = asyncHandler(async (req, res) => {
+  const data = await service.getInvitationForm(req.club, req.membership);
+  return ApiResponse.ok(res, data, 'Formulario obtenido correctamente.');
+});
+
 // --- Administración ---
 const list = asyncHandler(async (req, res) => {
   const data = await stripSensitive(req.club.id, req.authContext, await service.list(req.club.id, req.query.status));
@@ -54,4 +60,4 @@ const downloadFile = asyncHandler(async (req, res) => {
   return res.download(file.absolutePath, file.name);
 });
 
-module.exports = { publicForm, publicSubmit, list, pendingCount, approve, reject, getSetting, updateSetting, downloadFile };
+module.exports = { publicForm, publicSubmit, invitationForm, list, pendingCount, approve, reject, getSetting, updateSetting, downloadFile };

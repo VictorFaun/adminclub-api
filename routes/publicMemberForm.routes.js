@@ -13,7 +13,7 @@ router.get('/:code', publicPaymentsReadRateLimit, controller.publicForm);
 router.post(
   '/:code',
   publicMemberFormSubmitRateLimit,
-  // Multipart: `fields` (JSON) + imágenes/archivos de la ficha como `file_<id del campo>` (10MB c/u).
+  // Multipart: `fields` (JSON) + imágenes/archivos de la ficha como `file_<id del campo>` (20MB c/u).
   uploadPrivate(TEMP_SUBDIR, { maxFiles: 20, errorMessage: 'Formato no permitido. Usa PDF, imagen (PNG/JPG/WEBP) o Word.' }).any(),
   parseMultipartFields,
   sanitizeBody,

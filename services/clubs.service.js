@@ -11,7 +11,7 @@ const membersService = require('./members.service');
 const AppError = require('../helpers/AppError');
 const { withTransaction } = require('../config/database');
 const { parsePagination, buildMeta } = require('../helpers/pagination');
-const slugify = require('../utils/slugify');
+const crypto = require('crypto');
 const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const { CLUB_STATUS, USER_CLUB_STATUS, JOIN_REQUEST_STATUS } = require('../config/constants');
 const { diffValue, buildDiff } = require('../helpers/auditDiff');
@@ -51,6 +51,8 @@ class ClubsService {
       id: club.id,
       uuid: club.uuid,
       name: club.name,
+      // Nombre corto opcional (menú lateral y otros lugares con poco espacio).
+      shortName: club.short_name || null,
       publicCode: club.public_code,
       description: club.description,
       logoUrl: toAbsoluteMediaUrl(club.logo_url),
@@ -65,18 +67,15 @@ class ClubsService {
     };
   }
 
-  /** `excludeClubId`: al regenerar por un cambio de nombre, el propio código viejo del club
-   * no debe contar como "ocupado" (si no, un club nunca podría volver a un slug que ya tenía
-   * antes de un cambio de nombre previo, ni renombrarse a algo que solo difiere en mayúsculas). */
-  async _generateUniquePublicCode(name, excludeClubId = null) {
-    const base = slugify(name) || 'club';
-    let candidate = base;
-    let suffix = 1;
-    // eslint-disable-next-line no-await-in-loop
-    while (await clubsRepository.publicCodeExists(candidate, excludeClubId)) {
-      suffix += 1;
-      candidate = `${base}-${suffix}`;
-    }
+  /** Código público por defecto al crear el club: 6 dígitos al azar (no una abreviación del
+   * nombre, que delataba el club y chocaba fácil entre clubes parecidos). Después se puede
+   * personalizar desde Configuración (ver `_assertPublicCodeFormat`). */
+  async _generateUniquePublicCode() {
+    let candidate;
+    do {
+      candidate = String(crypto.randomInt(100000, 1000000));
+      // eslint-disable-next-line no-await-in-loop
+    } while (await clubsRepository.publicCodeExists(candidate, null));
     return candidate;
   }
 
@@ -99,7 +98,7 @@ class ClubsService {
   }
 
   async create({ name, description, primaryColor, secondaryColor, theme, isPublic, timezone }, creatorId) {
-    const publicCode = await this._generateUniquePublicCode(name);
+    const publicCode = await this._generateUniquePublicCode();
     // El frontend manda la zona horaria detectada del DISPOSITIVO de quien crea el club
     // (Intl.DateTimeFormat().resolvedOptions().timeZone) — si por lo que sea no llega (llamada
     // directa a la API, frontend viejo, o el navegador no pudo detectarla), se cae a la zona
@@ -157,6 +156,10 @@ class ClubsService {
     if (data.name !== undefined && data.name !== club.name) {
       updates.name = data.name;
     }
+    if (data.shortName !== undefined) {
+      const shortName = String(data.shortName ?? '').trim() || null;
+      if (shortName !== (club.short_name || null)) updates.short_name = shortName;
+    }
     if (data.publicCode !== undefined) {
       const code = String(data.publicCode).trim();
       if (code !== club.public_code) {
@@ -190,6 +193,7 @@ class ClubsService {
 
     const changes = buildDiff({
       name: updates.name !== undefined ? diffValue(club.name, updates.name) : undefined,
+      shortName: updates.short_name !== undefined ? diffValue(club.short_name, updates.short_name) : undefined,
       publicCode: updates.public_code !== undefined ? diffValue(club.public_code, updates.public_code) : undefined,
       description: updates.description !== undefined ? diffValue(club.description, updates.description) : undefined,
       primaryColor: updates.primary_color !== undefined ? diffValue(club.primary_color, updates.primary_color) : undefined,
@@ -330,9 +334,9 @@ class ClubsService {
         const member = await membersRepository.findByUserId(userId, club.id, conn);
         if (member) await membersService.applyStatus(member, 'active', userId, conn);
       }
-      if (invitation.requires_member_profile) {
-        await usersRepository.setRequiresProfileCompletion(userId, club.id, true, conn);
-      }
+      // Siempre según ESTA invitación (también en false): quien vuelve tras ser retirado no debe
+      // arrastrar la ficha pendiente de una invitación anterior.
+      await usersRepository.setRequiresProfileCompletion(userId, club.id, !!invitation.requires_member_profile, conn);
       if (roleIdToAssign) {
         await rolesRepository.assignToUser({ userId, roleId: roleIdToAssign, clubId: club.id, assignedBy: userId }, conn);
       }

@@ -61,7 +61,7 @@ const env = {
   },
 
   upload: {
-    maxMb: Number(process.env.UPLOAD_MAX_MB) || 5,
+    maxMb: Number(process.env.UPLOAD_MAX_MB) || 15,
     dir: process.env.UPLOAD_DIR || 'uploads',
   },
 

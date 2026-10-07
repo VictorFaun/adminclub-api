@@ -47,7 +47,7 @@ function ensureSubdir(subdir) {
   return dir;
 }
 
-function uploadPrivate(subdir, { mimeToExt = DOCUMENT_MIME_TO_EXT, maxMb = 10, maxFiles = undefined, errorMessage = 'Formato de archivo no permitido.' } = {}) {
+function uploadPrivate(subdir, { mimeToExt = DOCUMENT_MIME_TO_EXT, maxMb = 20, maxFiles = undefined, errorMessage = 'Formato de archivo no permitido.' } = {}) {
   return multer({
     storage: multer.diskStorage({
       destination: (req, file, cb) => cb(null, ensureSubdir(subdir)),

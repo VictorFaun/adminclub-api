@@ -32,6 +32,63 @@ const TEMPLATE_SIZES = { story: { width: 1080, height: 1920 } };
  * directo del filesystem en vez de por HTTP porque el cron corre en el mismo proceso que sirve
  * esos archivos: es más rápido y no depende de que el propio servidor pueda alcanzarse a sí
  * mismo por red. Una URL absoluta (http/https) se deja tal cual para que `loadImage` la baje. */
+/** Color hex a rgba con la opacidad dada (0–1) — el "transparente" de un difuminado es el MISMO
+ * color con alfa 0 (no `transparent`, que es negro transparente y deja un borde grisáceo). */
+function hexToRgba(hex, alpha) {
+  let h = String(hex || '#000000').replace('#', '');
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  const n = parseInt(h, 16) || 0;
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
+
+/** Forma (rectángulo o círculo) con relleno sólido o degradado — lineal con ángulo (misma
+ * convención que CSS: 0° hacia arriba, 90° hacia la derecha) o radial desde el centro, con inicio
+ * y fin configurables y el segundo color opcionalmente transparente (difuminado). Debe dar el
+ * mismo resultado que la vista previa del editor (template-editor.page.ts#shapeBackground). */
+function drawShape(ctx, el) {
+  const w = el.width;
+  const h = el.height;
+  ctx.save();
+  ctx.globalAlpha = Math.min(Math.max(el.opacity ?? 100, 0), 100) / 100;
+  ctx.beginPath();
+  if (el.shapeKind === 'circle') ctx.ellipse(w / 2, h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+  else ctx.rect(0, 0, w, h);
+
+  if (el.fillType !== 'gradient') {
+    ctx.fillStyle = el.color;
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+  const start = Math.min(Math.max(el.gradientStart ?? 0, 0), 100) / 100;
+  const end = Math.max(Math.min(Math.max(el.gradientEnd ?? 100, 0), 100) / 100, start);
+  const from = el.color;
+  const to = el.gradientToTransparent ? hexToRgba(el.color, 0) : el.gradientColor;
+  if (el.gradientType === 'radial') {
+    // Elipse "farthest-corner" centrada (lo que hace CSS): el trazado ya quedó fijado arriba, así
+    // que escalar ahora solo deforma el degradado (círculo unitario → elipse del tamaño de la forma).
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+    g.addColorStop(start, from);
+    g.addColorStop(end, to);
+    ctx.translate(w / 2, h / 2);
+    ctx.scale((w / 2) * Math.SQRT2, (h / 2) * Math.SQRT2);
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+  const angle = (((el.gradientAngle ?? 135) % 360) * Math.PI) / 180;
+  const dx = Math.sin(angle);
+  const dy = -Math.cos(angle);
+  const half = (Math.abs(w * dx) + Math.abs(h * dy)) / 2;
+  const g = ctx.createLinearGradient(w / 2 - dx * half, h / 2 - dy * half, w / 2 + dx * half, h / 2 + dy * half);
+  g.addColorStop(start, from);
+  g.addColorStop(end, to);
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.restore();
+}
+
 function resolveImageSource(url) {
   if (!url) return null;
   if (/^https?:\/\//i.test(url)) return url;
@@ -118,21 +175,7 @@ function drawElement(ctx, el, images, data) {
     else drawPhotoPlaceholder(ctx, el.width, el.height);
     ctx.restore();
   } else if (el.type === 'shape') {
-    if (el.fillType === 'gradient') {
-      const g = ctx.createLinearGradient(0, 0, el.width, el.height);
-      g.addColorStop(0, el.color);
-      g.addColorStop(1, el.gradientColor);
-      ctx.fillStyle = g;
-    } else {
-      ctx.fillStyle = el.color;
-    }
-    if (el.shapeKind === 'circle') {
-      ctx.beginPath();
-      ctx.ellipse(el.width / 2, el.height / 2, el.width / 2, el.height / 2, 0, 0, Math.PI * 2);
-      ctx.fill();
-    } else {
-      ctx.fillRect(0, 0, el.width, el.height);
-    }
+    drawShape(ctx, el);
   } else if (el.type === 'text') {
     ctx.font = `${el.fontWeight} ${el.fontSize}px ${el.fontFamily}`;
     ctx.fillStyle = el.color;

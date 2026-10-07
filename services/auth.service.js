@@ -8,6 +8,7 @@ const membersRepository = require('../repositories/members.repository');
 const chargesRepository = require('../repositories/charges.repository');
 const trainingsRepository = require('../repositories/trainings.repository');
 const platformSettingsRepository = require('../repositories/platformSettings.repository');
+const settingsRepository = require('../repositories/settings.repository');
 const { withTransaction } = require('../config/database');
 const AppError = require('../helpers/AppError');
 const {
@@ -24,6 +25,8 @@ const clubsService = require('./clubs.service');
 const env = require('../config/env');
 const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const { USER_STATUS, TOKEN_TYPE, GLOBAL_ROLES } = require('../config/constants');
+/** Misma clave que memberApplications.service.js#PUBLIC_FORM_KEY (club_settings). */
+const PUBLIC_MEMBER_FORM_KEY = 'public_member_form_enabled';
 const { OAuth2Client } = require('google-auth-library');
 
 /**
@@ -234,6 +237,16 @@ class AuthService {
     return email.split('@')[0].toLowerCase().replace(/[^a-z0-9._-]/g, '') || 'usuario';
   }
 
+  /** Club activo + datos del club que la UI necesita sin pedir otro permiso: si el formulario
+   * público de inscripción está activo (sin él no llegan solicitudes, así que la vista
+   * Miembros → Solicitudes se oculta — ver side-menu.component.ts). */
+  async _selectedClubDto(row) {
+    const dto = toClubContextDto(row);
+    if (!dto) return null;
+    const settings = await settingsRepository.findAllByClub(row.id);
+    return { ...dto, publicMemberFormEnabled: settings[PUBLIC_MEMBER_FORM_KEY] === '1' };
+  }
+
   /** Determina el club activo tras login según las reglas de negocio del flujo inicial. */
   async resolveLoginClubContext(userId) {
     const clubs = await usersRepository.findClubsForUser(userId);
@@ -254,7 +267,7 @@ class AuthService {
 
     return {
       clubs: activeClubs.map(toClubContextDto),
-      selectedClub: toClubContextDto(selectedClubRow),
+      selectedClub: await this._selectedClubDto(selectedClubRow),
       authorization,
       platformTimezone: await this.getPlatformTimezone(),
       userTimezone: user ? user.timezone : null,
@@ -416,7 +429,7 @@ class AuthService {
     return {
       user: this.sanitizeUser(user),
       clubs: clubs.filter((c) => c.membership_status === 'active').map(toClubContextDto),
-      selectedClub: toClubContextDto(selectedClubRow),
+      selectedClub: await this._selectedClubDto(selectedClubRow),
       authorization,
       platformTimezone: await this.getPlatformTimezone(),
       userTimezone: user.timezone,

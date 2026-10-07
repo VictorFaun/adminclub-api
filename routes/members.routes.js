@@ -3,6 +3,7 @@ const multer = require('multer');
 const AppError = require('../helpers/AppError');
 const { body } = require('express-validator');
 const controller = require('../controllers/members.controller');
+const applicationsController = require('../controllers/memberApplications.controller');
 const validation = require('../validations/members.validation');
 const { handleValidation, sanitizeBody } = require('../middlewares/validation.middleware');
 const { authMiddleware } = require('../middlewares/auth.middleware');
@@ -58,6 +59,11 @@ const xlsxUpload = multer({
 router.get('/export', requireFunction(FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED), controller.exportMembers);
 router.get('/import/template', requireFunction(FUNCTIONS.CREATE_MEMBERS), controller.importTemplate);
 router.post('/import', requireFunction(FUNCTIONS.CREATE_MEMBERS), xlsxUpload.single('file'), controller.importMembers);
+
+// Formulario de la ficha exigida por la invitación — mismo criterio que POST /me: sin
+// requireFunction, el service valida que la membresía tenga la ficha pendiente. No depende de
+// que el formulario público de inscripción esté activo.
+router.get('/me/form', applicationsController.invitationForm);
 
 // Autoservicio de ficha (ver members.service.js#createSelf) — deliberadamente SIN
 // requireFunction: es la única acción permitida mientras la membresía tenga

@@ -109,4 +109,21 @@ function requireGlobalRole(...roleNames) {
   });
 }
 
-module.exports = { requireFunction, requireFunctionOrResponsibleCharge, requireFunctionOrResponsibleTraining, requireGlobalRole };
+/**
+ * Para módulos personales que no dependen de ninguna funcionalidad (ej. el calendario: cada
+ * miembro gestiona sus propios eventos): exige ser MIEMBRO ACTIVO del club activo (no el modo
+ * solo-lectura de VIEW_ALL_CLUBS/Super Admin, que no tiene `req.membership`) y, como todo
+ * endpoint protegido, que no tenga la ficha pendiente. Igual que `requireFunction`, deja armado
+ * `req.authContext` (lo usa el módulo para decidir qué más mostrar).
+ */
+function requireClubMember() {
+  return asyncHandler(async (req, res, next) => {
+    if (!req.user) throw AppError.unauthorized('No autenticado.');
+    if (!req.membership) throw AppError.forbidden('Debes ser miembro del club para usar esta sección.');
+    assertProfileNotPending(req);
+    req.authContext = await permissionService.buildAuthorizationContext(req.user.id, req.club.id);
+    next();
+  });
+}
+
+module.exports = { requireFunction, requireFunctionOrResponsibleCharge, requireFunctionOrResponsibleTraining, requireGlobalRole, requireClubMember };

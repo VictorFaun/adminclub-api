@@ -40,6 +40,18 @@ class MembersRepository extends BaseRepository {
     return result.insertId;
   }
 
+  /** Miembros ACTIVOS con fecha de nacimiento (para el calendario, que arma los cumpleaños de
+   * cualquier rango). `memberIds` = whitelist (scope) o null para todo el club. */
+  async findBirthDatesForCalendar(clubId, memberIds, conn = pool) {
+    if (memberIds && !memberIds.length) return [];
+    const [rows] = await conn.query(
+      `SELECT m.id, ${PROFILE_COLS} FROM members m ${profileJoin()}
+       WHERE m.club_id = ? AND m.deleted_at IS NULL AND m.status = 'active' AND mp.birth_date IS NOT NULL ${memberIds ? 'AND m.id IN (?)' : ''}`,
+      memberIds ? [clubId, memberIds] : [clubId]
+    );
+    return rows;
+  }
+
   /** Miembros ACTIVOS con cumpleaños en los próximos `days` días (0 = hoy), ordenados por cercanía.
    * `days_until` se calcula sobre la próxima fecha de cumpleaños (este año, o el siguiente si ya
    * pasó). `memberIds` = whitelist (scope) o null para todo el club. `search` filtra por nombre y

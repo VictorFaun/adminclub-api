@@ -20,6 +20,7 @@ const createClub = [
 const updateClub = [
   ...clubId,
   body('name').optional().trim().isLength({ min: 1, max: 150 }),
+  body('shortName').optional({ nullable: true }).isString().trim().isLength({ max: 40 }).withMessage('El nombre corto admite hasta 40 caracteres.'),
   // Formato fino (caracteres permitidos) y unicidad: clubs.service.js#update.
   body('publicCode').optional().isString().trim().isLength({ min: 3, max: 40 }).withMessage('El código debe tener entre 3 y 40 caracteres.'),
   body('description').optional({ nullable: true }).trim().isLength({ max: 500 }),

@@ -95,13 +95,19 @@ Prefijo base: `/api/v1`. Salvo que se indique "público", todos los endpoints re
 | `GET /users/me` | Obtiene el perfil propio | Autenticado |
 | `PUT /users/me` | Actualiza el perfil propio (nombre de usuario, teléfono) | Autenticado |
 | `POST /users/me/avatar` | Sube/actualiza la foto de perfil propia | Autenticado |
+| `GET /users/me/invitations` | Invitaciones de clubes recibidas y pendientes (perfil → Invitaciones) | Autenticado |
+| `GET /users/me/invitations/count` | Cantidad de invitaciones pendientes | Autenticado |
+| `POST /users/me/invitations/:invitationId/accept` | Acepta: entra al club con los roles de la invitación; avisa a quien invitó | Autenticado |
+| `POST /users/me/invitations/:invitationId/reject` | Rechaza: borra la invitación; avisa a quien invitó | Autenticado |
 | `GET /users` | Lista los miembros del club activo (búsqueda, filtros, paginación) | `VIEW_USERS` |
-| `GET /users/:id` | Obtiene el detalle de un usuario del club activo | `VIEW_USERS` |
+| `GET /users/lookup?email=` | Busca una cuenta por correo para invitarla (datos solo con `CREATE_USERS`; indica si ya está en el club o tiene invitación pendiente) | `VIEW_USERS` |
+| `POST /users/:id/invite` | Invita al club a una persona con cuenta. Body: `message?` (500), `roleIds?` (solo con `ASSIGN_USER_ROLES`). Le llega una notificación; ya no se agrega directo ni se crean cuentas desde el club | `CREATE_USERS` |
+| `DELETE /users/invitations/:invitationId` | Retira una invitación aún sin responder | `CREATE_USERS` |
+| `GET /users/:id` | Obtiene el detalle de un usuario del club activo (incluye su ficha vinculada, `member`) | `VIEW_USERS` |
 | `GET /users/:id/activity` | Obtiene el historial de actividad/auditoría de un usuario | `VIEW_USERS` |
-| `PUT /users/:id` | Edita los datos de un usuario del club | `EDIT_USERS` |
 | `PUT /users/:id/status` | Suspende o reactiva a un usuario en el club | `SUSPEND_USERS` |
 | `PUT /users/:id/roles` | Reemplaza los roles asignados a un usuario en el club | `ASSIGN_USER_ROLES` |
-| `DELETE /users/:id` | RETIRA a un usuario del club activo (membresía `withdrawn`, no borra datos; reversible con `PUT /users/:id/status`). Body opcional `memberAction`: `keep` \| `deactivate` \| `delete` — qué hacer con su ficha de miembro | `DELETE_USERS` |
+| `DELETE /users/:id` | RETIRA a un usuario del club activo (membresía `withdrawn`, no borra datos; para que vuelva hay que invitarlo con `POST /users/:id/invite`). Body opcional `memberAction`: `keep` \| `deactivate` \| `delete` — qué hacer con su ficha de miembro | `DELETE_USERS` |
 | `GET /users/platform` | Lista TODOS los usuarios de la plataforma, sin importar club (búsqueda, filtros, paginación) | `VIEW_ALL_USERS` |
 | `PUT /users/platform/:id` | Edita los datos básicos de cualquier usuario de la plataforma | `EDIT_ALL_USERS` |
 | `PUT /users/platform/:id/status` | Suspende o reactiva la cuenta global de cualquier usuario de la plataforma | `SUSPEND_ALL_USERS` |
@@ -187,6 +193,22 @@ Prefijo base: `/api/v1`. Salvo que se indique "público", todos los endpoints re
 
 ### Entrenamientos — días especiales (`/attendance/trainings/:id/sessions`)
 `POST` agrega un día (recuperación / día manual), `PUT /:date` cambia hora/nota, `POST /:date/cancel` y `/:date/restore`, `GET /cancelled`. Requieren `EDIT_TRAININGS` / `MARK_ATTENDANCE` o ser el entrenador responsable.
+
+### Calendario (`/calendar`)
+
+Personal de cada miembro activo del club (sin funcionalidad propia; `requireClubMember`). Cumpleaños y entrenamientos solo aparecen según los permisos de cada uno.
+
+| Método y ruta | Descripción | Requiere |
+|---|---|---|
+| `GET /calendar/feed?from=&to=` | Eventos propios y compartidos, cumpleaños (con `VIEW_MEMBERS`/`_SCOPED`, en su scope) y sesiones de entrenamiento (todas con `VIEW_TRAININGS`/`VIEW_ATTENDANCE`; si no, las que entrena o en las que participa) del rango (máx. 400 días). `sources` dice qué fuentes aplican | Miembro activo |
+| `GET /calendar/users` | Usuarios activos del club con quienes compartir un evento | Miembro activo |
+| `GET /calendar/events/:id` | Detalle de un evento propio o compartido | Miembro activo |
+| `POST /calendar/events` | Crea un evento: `title`, `description?`, `color?`, `allDay`, `startDate`, `endDate?`, `startTime?`/`endTime?`, `reminderMinutes?` + `remindAt?` (ISO, calculado por el cliente), `participantIds?` (se les avisa) | Miembro activo |
+| `PUT /calendar/events/:id` | Edita (solo quien lo creó) | Miembro activo |
+| `DELETE /calendar/events/:id` | Elimina (solo quien lo creó) | Miembro activo |
+| `DELETE /calendar/events/:id/participation` | Un participante deja de ver el evento | Miembro activo |
+
+El recordatorio lo envía `cron/calendarReminders.cron.js` (cada minuto) a quien creó el evento y a sus participantes.
 
 ### Configuración (`/settings`)
 

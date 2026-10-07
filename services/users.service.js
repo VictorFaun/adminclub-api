@@ -5,11 +5,11 @@ const auditRepository = require('../repositories/audit.repository');
 const AppError = require('../helpers/AppError');
 const { parsePagination, buildMeta } = require('../helpers/pagination');
 const { withTransaction, pool } = require('../config/database');
-const { hashPassword, isStrongPassword } = require('../helpers/passwordUtils');
 const { USER_STATUS, USER_CLUB_STATUS, FUNCTIONS } = require('../config/constants');
 const authService = require('./auth.service');
 const permissionService = require('./permission.service');
 const membersService = require('./members.service');
+const clubUserInvitationsService = require('./clubUserInvitations.service');
 const { diffValue, diffArray, buildDiff } = require('../helpers/auditDiff');
 
 const SORTABLE = ['created_at', 'username', 'email', 'status'];
@@ -45,71 +45,11 @@ class UsersService {
     };
   }
 
-  async createInClub(clubId, data, actorId) {
-    const exists = await usersRepository.emailExists(data.email);
-    if (exists) throw AppError.conflict('Ya existe una cuenta registrada con este correo electrónico.');
-    if (!isStrongPassword(data.password)) {
-      throw AppError.badRequest('La contraseña no cumple con los requisitos de seguridad.');
-    }
-
-    // Crear usuarios (CREATE_USERS) y asignarles roles (ASSIGN_USER_ROLES) son
-    // permisos distintos: si el actor no tiene el segundo, se ignora cualquier
-    // roleIds que haya mandado el cliente en vez de confiar en lo que oculta el frontend.
-    const authContext = await permissionService.buildAuthorizationContext(actorId, clubId);
-    const canAssignRoles = permissionService.hasFunction(authContext, FUNCTIONS.ASSIGN_USER_ROLES);
-    const roleIds = canAssignRoles ? data.roleIds || [] : [];
-    if (roleIds.length) {
-      const clubRoles = await rolesRepository.findClubRoles(clubId);
-      const validIds = new Set(clubRoles.map((r) => r.id));
-      const invalid = roleIds.filter((id) => !validIds.has(id));
-      if (invalid.length) throw AppError.badRequest('Uno o más roles no pertenecen a este club.');
-    }
-
-    const passwordHash = await hashPassword(data.password);
-    const userId = await withTransaction(async (conn) => {
-      const id = await usersRepository.createUser(
-        {
-          username: data.username,
-          email: data.email,
-          passwordHash,
-          status: USER_STATUS.ACTIVE,
-          // El teléfono ya no se pide al crear la cuenta (queda para la futura ficha de
-          // miembro) — sigue siendo editable después desde el perfil del usuario.
-          phone: null,
-        },
-        conn
-      );
-      // El admin da de alta la cuenta a mano y vale por la identidad de la persona,
-      // así que el correo queda verificado de entrada (no tiene sentido bloquearla
-      // esperando que confirme un correo al que quizás ni siquiera tenga acceso aún).
-      await usersRepository.setEmailVerified(id, conn);
-      await usersRepository.addToClub({ userId: id, clubId, status: USER_CLUB_STATUS.ACTIVE, isDefault: true }, conn);
-      for (const roleId of roleIds) {
-        await rolesRepository.assignToUser({ userId: id, roleId, clubId, assignedBy: actorId }, conn);
-      }
-      return id;
-    });
-
-    await auditRepository.logAction({
-      userId: actorId,
-      clubId,
-      action: 'USER_CREATED',
-      entityType: 'user',
-      entityId: userId,
-      changes: { username: data.username, email: data.email },
-    });
-
-    return this.getDetail(userId, clubId);
-  }
-
   /**
-   * Usado tanto por la búsqueda manual por correo (vista Usuarios) como por la
-   * validación en vivo del modal de alta: reutilizan el mismo endpoint para no
-   * duplicar la lógica de qué tan revelador puede ser el resultado.
-   * Solo revela los datos del usuario (nombre, correo, foto) si el actor tiene
-   * CREATE_USERS — es la misma capacidad de "agregar directamente" que ya exige
-   * el endpoint para invitarlo, así que sin ella solo se confirma que el correo
-   * está ocupado.
+   * Búsqueda por correo de la vista Usuarios, para invitar a esa persona al club (ver
+   * clubUserInvitations.service.js). Solo revela los datos del usuario (nombre, correo, foto)
+   * si el actor tiene CREATE_USERS ("Invitar usuarios") — sin ella solo se confirma que el
+   * correo está ocupado. Un retirado del club se puede volver a invitar.
    */
   async lookupByEmail(clubId, email, actorId) {
     const user = await usersRepository.findByEmail(email);
@@ -124,48 +64,10 @@ class UsersService {
     return {
       found: true,
       canInvite: true,
-      alreadyInClub: !!membership,
+      alreadyInClub: !!membership && membership.status !== USER_CLUB_STATUS.WITHDRAWN,
+      pendingInvitation: await clubUserInvitationsService.findPending(clubId, user.id),
       user: { id: sanitized.id, username: sanitized.username, email: sanitized.email, avatarUrl: sanitized.avatarUrl },
     };
-  }
-
-  /** Agrega al club a un usuario que ya tiene cuenta en la plataforma (p.ej. de otro club), sin crear una cuenta nueva. */
-  async addExistingUserToClub(clubId, userId, roleIds, actorId) {
-    const user = await usersRepository.findById(userId);
-    if (!user) throw AppError.notFound('Usuario no encontrado.');
-
-    const existingMembership = await usersRepository.findMembership(userId, clubId);
-    if (existingMembership) throw AppError.conflict('El usuario ya pertenece a este club.');
-
-    const authContext = await permissionService.buildAuthorizationContext(actorId, clubId);
-    const canAssignRoles = permissionService.hasFunction(authContext, FUNCTIONS.ASSIGN_USER_ROLES);
-    const finalRoleIds = canAssignRoles ? roleIds || [] : [];
-    if (finalRoleIds.length) {
-      const clubRoles = await rolesRepository.findClubRoles(clubId);
-      const validIds = new Set(clubRoles.map((r) => r.id));
-      const invalid = finalRoleIds.filter((id) => !validIds.has(id));
-      if (invalid.length) throw AppError.badRequest('Uno o más roles no pertenecen a este club.');
-    }
-
-    await withTransaction(async (conn) => {
-      // isDefault: false — a diferencia de createInClub, este usuario ya tiene una cuenta
-      // (y probablemente un club default propio); no tiene sentido reasignárselo aquí.
-      await usersRepository.addToClub({ userId, clubId, status: USER_CLUB_STATUS.ACTIVE, isDefault: false }, conn);
-      for (const roleId of finalRoleIds) {
-        await rolesRepository.assignToUser({ userId, roleId, clubId, assignedBy: actorId }, conn);
-      }
-    });
-
-    await auditRepository.logAction({
-      userId: actorId,
-      clubId,
-      action: 'USER_ADDED_TO_CLUB',
-      entityType: 'user',
-      entityId: userId,
-      changes: { username: user.username, email: user.email },
-    });
-
-    return this.getDetail(userId, clubId);
   }
 
   async getDetail(userId, clubId) {
@@ -175,64 +77,34 @@ class UsersService {
     const membership = clubId ? await usersRepository.findMembership(userId, clubId) : null;
     if (clubId && !membership) throw AppError.notFound('El usuario no pertenece a este club.');
 
-    const [roles, clubs] = await Promise.all([
+    const [roles, clubs, member] = await Promise.all([
       clubId ? rolesRepository.findRolesForUser(userId, clubId) : [],
       usersRepository.findClubsForUser(userId),
+      clubId ? membersRepository.findByUserId(userId, clubId) : null,
     ]);
 
     return {
       ...this.sanitize(user),
       membership: membership ? { status: membership.status, isDefault: !!membership.is_default, joinedAt: membership.joined_at } : null,
       roles: roles.map((r) => ({ id: r.id, name: r.name, color: r.color })),
+      // Ficha de miembro vinculada a la cuenta en este club (lo único del club "sobre" la persona,
+      // junto con sus roles: sus datos personales solo los edita ella desde su perfil).
+      member: member ? { id: member.id, fullName: membersService._fullName(member), status: member.status } : null,
       clubs: clubs.map((c) => ({ id: c.id, name: c.name, status: c.membership_status, isDefault: !!c.is_default })),
     };
-  }
-
-  async update(userId, clubId, data, actorId) {
-    const user = await usersRepository.findById(userId);
-    if (!user) throw AppError.notFound('Usuario no encontrado.');
-    // Sin esto, cualquier admin con EDIT_USERS en SU club podía editar a un usuario que
-    // solo pertenece a otro club, adivinando el id (IDOR) — igual que updateStatusInClub /
-    // removeFromClub, hay que confirmar que el usuario es miembro de este club antes de tocarlo.
-    const membership = await usersRepository.findMembership(userId, clubId);
-    if (!membership) throw AppError.notFound('El usuario no pertenece a este club.');
-
-    const updates = {};
-    if (data.username !== undefined) updates.username = data.username;
-    if (data.phone !== undefined) updates.phone = data.phone;
-
-    if (Object.keys(updates).length) {
-      await usersRepository.updateById(userId, updates);
-    }
-
-    const changes = buildDiff({
-      username: diffValue(user.username, data.username !== undefined ? data.username : user.username),
-      phone: diffValue(user.phone, data.phone !== undefined ? data.phone : user.phone),
-    });
-    if (changes) {
-      await auditRepository.logActivity({
-        userId: actorId,
-        clubId,
-        description: `Actualizó el perfil de ${user.username}`,
-      });
-    }
-
-    return this.getDetail(userId, clubId);
   }
 
   async updateStatusInClub(userId, clubId, status, actorId) {
     if (userId === actorId) throw AppError.badRequest('No puedes cambiar tu propio estado.');
     const membership = await usersRepository.findMembership(userId, clubId);
     if (!membership) throw AppError.notFound('El usuario no pertenece a este club.');
+    // Un retirado ya no está en el club: volver es decisión suya, aceptando una invitación (ver
+    // clubUserInvitations.service.js#accept, que también reactiva su ficha).
+    if (membership.status === USER_CLUB_STATUS.WITHDRAWN) {
+      throw AppError.conflict('Este usuario fue retirado del club. Para que vuelva, envíale una invitación.');
+    }
 
-    // Reactivar a alguien retirado también reactiva su ficha si el retiro la había archivado.
-    await withTransaction(async (conn) => {
-      await usersRepository.setMembershipStatus(userId, clubId, status, conn);
-      if (membership.status === USER_CLUB_STATUS.WITHDRAWN && status === USER_CLUB_STATUS.ACTIVE) {
-        const member = await membersRepository.findByUserId(userId, clubId, conn);
-        if (member) await membersService.applyStatus(member, 'active', actorId, conn);
-      }
-    });
+    await usersRepository.setMembershipStatus(userId, clubId, status);
     const changes = buildDiff({ status: diffValue(membership.status, status) });
     if (changes) {
       await auditRepository.logAction({
@@ -251,7 +123,7 @@ class UsersService {
   /**
    * "Eliminar" a un usuario de un club NO borra nada: su membresía pasa a 'withdrawn' (retirado) —
    * el club deja de aparecerle en su lista y no puede entrar, pero conserva su historial, sus
-   * roles y su ficha. Es reversible (ver updateStatusInClub). `memberAction` decide qué pasa con su
+   * roles y su ficha. Para que vuelva hay que invitarlo (clubUserInvitations.service.js). `memberAction` decide qué pasa con su
    * ficha de miembro: 'keep' (queda como está), 'deactivate' (pasa a inactivo/archivado: se le
    * saltan cobros y asistencias hasta reactivarlo) o 'delete' (se elimina la ficha).
    */
@@ -266,6 +138,8 @@ class UsersService {
 
     await withTransaction(async (conn) => {
       await usersRepository.setMembershipStatus(userId, clubId, USER_CLUB_STATUS.WITHDRAWN, conn);
+      // La ficha pendiente era de la invitación con la que entró: si vuelve, lo decide la nueva.
+      await usersRepository.setRequiresProfileCompletion(userId, clubId, false, conn);
       await conn.query('UPDATE user_clubs SET is_default = 0 WHERE user_id = ? AND club_id = ?', [userId, clubId]);
       await conn.query('UPDATE users SET default_club_id = NULL WHERE id = ? AND default_club_id = ?', [userId, clubId]);
 

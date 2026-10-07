@@ -126,6 +126,54 @@ function wrapText(ctx, text, maxWidth) {
 
 /** Dibuja `img` centrado en [0,0,w,h] cubriendo todo el rectángulo (equivalente a CSS
  * `object-fit: cover`), igual que birthday-template.util.ts#drawCover. */
+
+/** Imagen subida: recortada a su caja, con opacidad y, si se pide, difuminada a transparente
+ * (lineal con ángulo CSS o radial desde el centro, con inicio/fin en %) — la propia imagen se
+ * desvanece, no un color encima. Se dibuja en un lienzo aparte y se le aplica la máscara del
+ * degradado (`destination-in`). Debe coincidir con la vista previa del editor
+ * (template-editor.page.ts#imageStyle). */
+function drawImageElement(ctx, el, paint) {
+  const w = el.width;
+  const h = el.height;
+  ctx.save();
+  ctx.globalAlpha = Math.min(Math.max(el.opacity ?? 100, 0), 100) / 100;
+  if (!el.fadeEnabled) {
+    ctx.beginPath();
+    ctx.rect(0, 0, w, h);
+    ctx.clip();
+    paint(ctx);
+    ctx.restore();
+    return;
+  }
+  const off = createCanvas(Math.max(1, Math.ceil(w)), Math.max(1, Math.ceil(h)));
+  const o = off.getContext('2d');
+  paint(o);
+  o.globalCompositeOperation = 'destination-in';
+  const start = Math.min(Math.max(el.fadeStart ?? 50, 0), 100) / 100;
+  const end = Math.max(Math.min(Math.max(el.fadeEnd ?? 100, 0), 100) / 100, start);
+  if (el.fadeType === 'radial') {
+    const g = o.createRadialGradient(0, 0, 0, 0, 0, 1);
+    g.addColorStop(start, 'rgba(0,0,0,1)');
+    g.addColorStop(end, 'rgba(0,0,0,0)');
+    o.translate(w / 2, h / 2);
+    o.scale((w / 2) * Math.SQRT2, (h / 2) * Math.SQRT2);
+    o.fillStyle = g;
+    o.fillRect(-1, -1, 2, 2);
+  } else {
+    const angle = (((el.fadeAngle ?? 180) % 360) * Math.PI) / 180;
+    const dx = Math.sin(angle);
+    const dy = -Math.cos(angle);
+    const half = (Math.abs(w * dx) + Math.abs(h * dy)) / 2;
+    const g = o.createLinearGradient(w / 2 - dx * half, h / 2 - dy * half, w / 2 + dx * half, h / 2 + dy * half);
+    g.addColorStop(start, 'rgba(0,0,0,1)');
+    g.addColorStop(end, 'rgba(0,0,0,0)');
+    o.fillStyle = g;
+    o.fillRect(0, 0, w, h);
+  }
+  ctx.drawImage(off, 0, 0, w, h);
+  ctx.restore();
+}
+
 function drawCover(ctx, img, w, h) {
   const scale = Math.max(w / img.width, h / img.height);
   const iw = img.width * scale;
@@ -159,21 +207,11 @@ function drawElement(ctx, el, images, data) {
 
   if (el.type === 'image') {
     const img = images.get(el.url);
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, el.width, el.height);
-    ctx.clip();
-    if (img) drawCover(ctx, img, el.width, el.height);
-    ctx.restore();
+    if (img) drawImageElement(ctx, el, (c) => drawCover(c, img, el.width, el.height));
   } else if (el.type === 'photo') {
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, el.width, el.height);
-    ctx.clip();
+    // Rectangular siempre (sin forma circular/redondeada); misma opacidad/difuminado que una imagen.
     const img = data.photoUrl ? images.get(data.photoUrl) : null;
-    if (img) drawCover(ctx, img, el.width, el.height);
-    else drawPhotoPlaceholder(ctx, el.width, el.height);
-    ctx.restore();
+    drawImageElement(ctx, el, (c) => (img ? drawCover(c, img, el.width, el.height) : drawPhotoPlaceholder(c, el.width, el.height)));
   } else if (el.type === 'shape') {
     drawShape(ctx, el);
   } else if (el.type === 'text') {

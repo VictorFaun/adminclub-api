@@ -102,6 +102,18 @@ class BirthdaysService {
   /** Valida/normaliza un elemento del diseño — nunca confía en lo que llega del cliente, ya que
    * se guarda tal cual y se vuelve a servir a cualquiera con VIEW_MEMBERS/_SCOPED. Un elemento
    * que no calza con ningún tipo conocido se descarta en vez de guardarse a medias. */
+  /** Opacidad y difuminado a transparente de la propia imagen (imágenes subidas y foto del socio). */
+  _fadeOptions(el) {
+    return {
+      opacity: clampNumber(el.opacity, 0, 100, 100),
+      fadeEnabled: !!el.fadeEnabled,
+      fadeType: el.fadeType === 'radial' ? 'radial' : 'linear',
+      fadeAngle: clampNumber(el.fadeAngle, 0, 359, 180),
+      fadeStart: clampNumber(el.fadeStart, 0, 100, 50),
+      fadeEnd: clampNumber(el.fadeEnd, 0, 100, 100),
+    };
+  }
+
   _sanitizeElement(el, index) {
     if (!el || !TEMPLATE_ELEMENT_TYPES.includes(el.type)) return null;
     const base = {
@@ -117,7 +129,13 @@ class BirthdaysService {
     };
     if (el.type === 'image') {
       if (typeof el.url !== 'string' || !el.url.trim()) return null;
-      return { ...base, type: 'image', url: el.url.trim().slice(0, 500), lockAspectRatio: !!el.lockAspectRatio };
+      return {
+        ...base,
+        type: 'image',
+        url: el.url.trim().slice(0, 500),
+        lockAspectRatio: !!el.lockAspectRatio,
+        ...this._fadeOptions(el),
+      };
     }
     if (el.type === 'text') {
       return {
@@ -152,7 +170,7 @@ class BirthdaysService {
     }
     // 'photo': rectangular siempre, relación de aspecto bloqueada y sin recorte — no lleva
     // campos propios más allá de la posición/tamaño/rotación base.
-    return { ...base, type: 'photo' };
+    return { ...base, type: 'photo', ...this._fadeOptions(el) };
   }
 
   _sanitizeTemplate(format, design) {

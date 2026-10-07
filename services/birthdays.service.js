@@ -113,6 +113,7 @@ class BirthdaysService {
       height: clampNumber(el.height, 1, 5000, 100),
       rotation: clampNumber(el.rotation, -360, 360, 0),
       ...(typeof el.name === 'string' && el.name.trim() ? { name: el.name.trim().slice(0, 80) } : {}),
+      ...(el.locked ? { locked: true } : {}),
     };
     if (el.type === 'image') {
       if (typeof el.url !== 'string' || !el.url.trim()) return null;

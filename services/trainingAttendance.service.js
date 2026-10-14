@@ -42,6 +42,14 @@ function todayIn(timezone) {
     return formatDateOnly(new Date());
   }
 }
+/** "HH:MM" de ahora en la zona horaria del club (mismo criterio que `todayIn`). */
+function timeIn(timezone) {
+  try {
+    return new Intl.DateTimeFormat('en-GB', { timeZone: timezone || 'UTC', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date());
+  } catch {
+    return new Date().toISOString().slice(11, 16);
+  }
+}
 /** JS `getUTCDay()` es 0=domingo..6=sábado; ISO (usado en `training_schedules.day_of_week`) es
  * 1=lunes..7=domingo. */
 function isoDayOfWeek(date) {
@@ -93,6 +101,12 @@ class TrainingAttendanceService {
   async _clubToday(clubId) {
     const club = await clubsRepository.findActiveById(clubId);
     return todayIn(club?.timezone);
+  }
+
+  /** Fecha y hora ("YYYY-MM-DD", "HH:MM") de ahora en la zona horaria del club. */
+  async _clubNow(clubId) {
+    const club = await clubsRepository.findActiveById(clubId);
+    return { today: todayIn(club?.timezone), time: timeIn(club?.timezone) };
   }
 
   /** Pasado el día de la sesión, quien quedó sin marcar pasa a "No asistió" (`marked_by` NULL =
@@ -780,7 +794,7 @@ class TrainingAttendanceService {
   async getTrainingSummary(clubId, trainingId, month, actorId, authContext) {
     const training = await trainingsRepository.findActiveById(trainingId);
     if (!training || training.club_id !== clubId) throw AppError.notFound('Entrenamiento no encontrado.');
-    const today = await this._clubToday(clubId);
+    const { today, time: nowTime } = await this._clubNow(clubId);
     await this.closePastSessions(trainingId, today);
     const { memberIds } = await this._resolveTrainingParticipants(training, actorId, authContext);
 
@@ -828,6 +842,13 @@ class TrainingAttendanceService {
       .filter((d) => inMonth(d) && !cancelled.has(d))
       .sort();
     const meta = await this._buildSessionMeta(trainingId, dates, clubId);
+    // La sesión de hoy cuenta como realizada recién al llegar su hora de término (o de inicio si no
+    // tiene término); sin horario, desde que empieza el día.
+    const isHeld = (d) => {
+      if (d !== today) return d < today;
+      const t = meta[d]?.endTime ?? meta[d]?.startTime;
+      return !t || String(t).slice(0, 5) <= nowTime;
+    };
 
     const [attRows] = memberIds.length
       ? await pool.query(
@@ -853,7 +874,7 @@ class TrainingAttendanceService {
       const d = formatDateOnly(r.session_date);
       if (!bySession.has(d)) continue;
       bump(bySession.get(d), r);
-      if (d <= today) {
+      if (isHeld(d)) {
         if (!byMember.has(r.member_id)) byMember.set(r.member_id, emptyCounts());
         bump(byMember.get(r.member_id), r);
       }
@@ -873,7 +894,7 @@ class TrainingAttendanceService {
         note: m.note,
         recovers: m.recovers,
         coaches: m.coaches,
-        held: d <= today,
+        held: isHeld(d),
         counts,
         pct: pctOf(counts),
       };

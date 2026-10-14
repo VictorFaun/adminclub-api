@@ -37,6 +37,17 @@ router.get('/members/:memberId/profile', validation.memberId, handleValidation, 
 router.put('/members/:memberId/profile', sanitizeBody, validation.updateProfile, handleValidation, controller.updateProfile);
 router.post('/members/:memberId/fields/:fieldId/image', validation.memberId, validation.fieldId, handleValidation, uploadFor('member-photos').single('image'), controller.setImage);
 router.delete('/members/:memberId/fields/:fieldId/image', validation.memberId, validation.fieldId, handleValidation, controller.removeImage);
+// Archivos de la ficha (campos de tipo "archivos" marcados como editables por el socio).
+router.post(
+  '/members/:memberId/fields/:fieldId/documents',
+  validation.memberId,
+  validation.fieldId,
+  handleValidation,
+  uploadPrivate('member-documents', { errorMessage: 'Formato no permitido. Usa PDF, imagen (PNG/JPG/WEBP) o Word.' }).single('document'),
+  controller.addDocument
+);
+router.get('/members/:memberId/documents/:documentId/download', validation.memberId, handleValidation, controller.downloadDocument);
+router.delete('/members/:memberId/documents/:documentId', validation.memberId, handleValidation, controller.removeDocument);
 router.get('/members/:memberId/guardians', validation.memberId, handleValidation, controller.guardians);
 router.post('/members/:memberId/guardians', sanitizeBody, validation.inviteGuardian, handleValidation, controller.inviteGuardian);
 

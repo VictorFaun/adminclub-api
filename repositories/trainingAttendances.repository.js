@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { pool } = require('../config/database');
 const BaseRepository = require('./BaseRepository');
+const { COVERAGE_REASONS } = require('../helpers/membership');
 
 /** Mirror de chargeInstances.repository.js + el `findAccessibleMemberIds` de
  * payments.repository.js, colapsados en una sola tabla (`training_attendances` = "sesión" +
@@ -56,18 +57,25 @@ class TrainingAttendancesRepository extends BaseRepository {
     return result.affectedRows;
   }
 
-  /** ¿Hay alguna asistencia YA marcada (no pendiente) en esa fecha? — impide cancelar un día con datos. */
+  /** ¿Hay alguna asistencia marcada A MANO en esa fecha? — impide cancelar un día con datos. No
+   * cuentan las faltas automáticas (día pasado sin marcar: absent con `marked_by` NULL) ni los
+   * "no aplica" por pertenencia (retirado / antes de su ingreso). */
   async countMarkedForDate(trainingId, sessionDate, conn = pool) {
     const [rows] = await conn.query(
-      "SELECT COUNT(*) AS total FROM training_attendances WHERE training_id = ? AND session_date = ? AND status <> 'pending'",
-      [trainingId, sessionDate]
+      `SELECT COUNT(*) AS total FROM training_attendances WHERE training_id = ? AND session_date = ? AND status <> 'pending'
+         AND NOT (status = 'absent' AND marked_by IS NULL) AND NOT (status = 'exempt' AND exempt_reason IN (?))`,
+      [trainingId, sessionDate, COVERAGE_REASONS]
     );
     return rows[0].total;
   }
 
-  /** Borra las filas (pendientes) de una fecha — al cancelar un día o quitar uno extra. */
+  /** Borra las filas sin marca manual de una fecha — al cancelar un día o quitar uno extra. */
   async deletePendingForDate(trainingId, sessionDate, conn = pool) {
-    const [result] = await conn.query("DELETE FROM training_attendances WHERE training_id = ? AND session_date = ? AND status = 'pending'", [trainingId, sessionDate]);
+    const [result] = await conn.query(
+      `DELETE FROM training_attendances WHERE training_id = ? AND session_date = ?
+         AND (status = 'pending' OR (status = 'absent' AND marked_by IS NULL) OR (status = 'exempt' AND exempt_reason IN (?)))`,
+      [trainingId, sessionDate, COVERAGE_REASONS]
+    );
     return result.affectedRows;
   }
 

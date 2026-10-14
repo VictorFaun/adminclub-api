@@ -26,6 +26,10 @@ const MAX_PENDING_PER_INSTANCE = 3;
 /** Tope de períodos en un mismo comprobante (pago múltiple). */
 const MAX_INSTANCES_PER_PROOF = 24;
 const PUBLIC_PAYMENTS_KEY = 'public_payments_enabled';
+/** Mostrar también la asistencia a entrenamientos en la página pública (solo si está activa). */
+const PUBLIC_ATTENDANCE_KEY = 'public_payments_show_attendance';
+/** Últimas marcas de asistencia que se muestran en la página pública. */
+const PUBLIC_RECENT_SESSIONS = 10;
 /** Un período pendiente que vence en más de estos días (y no está atrasado) todavía no se ofrece
  * como "por pagar" en la lista principal. */
 const DUE_SOON_DAYS = 45;
@@ -159,7 +163,28 @@ class PaymentProofsService {
     const club = await this._publicClub(code);
     const member = await this._findByIdentifier(club.id, rut);
     if (!member) return { found: false };
-    return { found: true, memberFirstName: member.first_name || '', ...(await this.payableForMember(member)) };
+    const attendance = (await this._publicSettings(club.id)).showAttendance ? await this._publicAttendance(club.id, member.id) : null;
+    return { found: true, memberFirstName: member.first_name || '', ...(await this.payableForMember(member)), attendance };
+  }
+
+  /** Asistencia que ve la persona en la página pública: % total, por entrenamiento y sus últimas marcas. */
+  async _publicAttendance(clubId, memberId) {
+    // eslint-disable-next-line global-require
+    const trainingAttendanceService = require('./trainingAttendance.service');
+    const today = await trainingAttendanceService._clubToday(clubId);
+    const { summary, trainings, items } = await trainingAttendanceService.summaryForMember(memberId, today);
+    if (!items.length) return null;
+    const recent = [...items]
+      .filter((i) => i.displayStatus !== 'pending')
+      .sort((a, b) => b.sessionDate.localeCompare(a.sessionDate))
+      .slice(0, PUBLIC_RECENT_SESSIONS)
+      .map((i) => ({ trainingName: i.trainingName, trainingColor: i.trainingColor, sessionDate: i.sessionDate, displayStatus: i.displayStatus }));
+    return { summary, trainings, recent };
+  }
+
+  async _publicSettings(clubId) {
+    const settings = await settingsRepository.findAllByClub(clubId);
+    return { enabled: settings[PUBLIC_PAYMENTS_KEY] === '1', showAttendance: settings[PUBLIC_ATTENDANCE_KEY] === '1' };
   }
 
   /** Lo que un miembro puede pagar ahora (atrasados, próximos, adelantos) con sus destinos. Sin
@@ -498,13 +523,18 @@ class PaymentProofsService {
   // ------------------------------------------------------------------ configuración
 
   async getPublicPaymentsSetting(clubId) {
-    return { enabled: await this.isPublicPaymentsEnabled(clubId) };
+    return this._publicSettings(clubId);
   }
 
-  async setPublicPaymentsSetting(clubId, enabled, actorId) {
-    await settingsRepository.upsertMany(clubId, { [PUBLIC_PAYMENTS_KEY]: enabled ? '1' : '0' });
-    await auditRepository.logAction({ userId: actorId, clubId, action: 'TREASURY_PUBLIC_PAYMENTS_UPDATED', entityType: 'club_settings', entityId: clubId, changes: { enabled: !!enabled } });
-    return { enabled: !!enabled };
+  /** `enabled` / `showAttendance`: cada uno opcional (solo se cambia lo que llega). */
+  async setPublicPaymentsSetting(clubId, { enabled, showAttendance }, actorId) {
+    const updates = {};
+    if (enabled !== undefined) updates[PUBLIC_PAYMENTS_KEY] = enabled ? '1' : '0';
+    if (showAttendance !== undefined) updates[PUBLIC_ATTENDANCE_KEY] = showAttendance ? '1' : '0';
+    if (Object.keys(updates).length) await settingsRepository.upsertMany(clubId, updates);
+    const result = await this._publicSettings(clubId);
+    await auditRepository.logAction({ userId: actorId, clubId, action: 'TREASURY_PUBLIC_PAYMENTS_UPDATED', entityType: 'club_settings', entityId: clubId, changes: { enabled, showAttendance } });
+    return result;
   }
 }
 

@@ -7,7 +7,7 @@ const notificationsService = require('./notifications.service');
 const memberGuardiansRepository = require('../repositories/memberGuardians.repository');
 const emailService = require('./email.service');
 const logger = require('../helpers/logger');
-const { renderClubEmail } = require('../helpers/emailTemplate');
+const { renderClubEmail, renderHighlight, renderTable, renderNote } = require('../helpers/emailTemplate');
 const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const { PROFILE_COLS, profileJoin } = require('../helpers/memberProfileSql');
 const { CLUB_STATUS } = require('../config/constants');
@@ -17,6 +17,11 @@ const LAST_SENT_KEY = 'debt_reminders_last_sent';
 const PUBLIC_PAYMENTS_KEY = 'public_payments_enabled';
 const MONTHS = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
 
+/** "15 mar 2026" */
+const shortDate = (d) => {
+  const date = new Date(d);
+  return `${date.getUTCDate()} ${MONTHS[date.getUTCMonth()].slice(0, 3)} ${date.getUTCFullYear()}`;
+};
 const clp = (n) => `$${Math.round(Number(n) || 0).toLocaleString('es-CL')}`;
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const periodText = (label) => {
@@ -56,7 +61,7 @@ class DebtRemindersService {
    * `chargeId`, solo los de ese cobro (botón "Recordar a los atrasados" de la matriz). */
   async debtors(clubId, chargeId = null) {
     const [rows] = await pool.query(
-      `SELECT ci.member_id, ci.period_label, ci.amount, c.name AS charge_name,
+      `SELECT ci.member_id, ci.period_label, ci.amount, ci.due_date, c.name AS charge_name,
               COALESCE((SELECT SUM(pa.amount) FROM payment_allocations pa WHERE pa.charge_instance_id = ci.id), 0) AS paid,
               m.user_id, ${PROFILE_COLS}
        FROM charge_instances ci
@@ -85,7 +90,7 @@ class DebtRemindersService {
       }
       const d = byMember.get(r.member_id);
       d.total += remaining;
-      d.items.push({ chargeName: r.charge_name, period: periodText(r.period_label), remaining });
+      d.items.push({ chargeName: r.charge_name, period: periodText(r.period_label), dueDate: r.due_date, remaining });
     }
     // Cuentas que reciben el aviso en la app: la titular y los apoderados de la ficha.
     for (const d of byMember.values()) d.userIds = await memberGuardiansRepository.findUserIdsForMember(d.memberId);
@@ -113,36 +118,39 @@ class DebtRemindersService {
     const list = Array.isArray(memberIds) ? all.filter((d) => memberIds.includes(d.memberId)) : all;
     const extra = note ? String(note).trim().slice(0, 500) : '';
     let sent = 0;
+    const clientUrl = env.clientUrl.replace(/\/$/, '');
     for (const d of list) {
       if (!d.channel) continue;
-      const link = payBase ? `${payBase}${d.identifier ? `/${encodeURIComponent(d.identifier)}` : ''}` : null;
+      const publicLink = payBase ? `${payBase}${d.identifier ? `/${encodeURIComponent(d.identifier)}` : ''}` : null;
       const lines = d.items.map((i) => `${i.chargeName} (${i.period}): ${clp(i.remaining)}`);
       try {
         if (d.channel === 'app') {
+          // Con cuenta: "Mis pagos" en la app (si el club tiene Mi club con pagos); si no, la página
+          // pública; y si no hay ninguna, sin enlace.
+          const appPath = myClub ? `/my/payments?member=${d.memberId}` : null;
+          const link = appPath ? `${clientUrl}${appPath}` : publicLink;
           for (const userId of d.userIds) {
             const own = userId === d.linkedUserId;
+            const title = own ? `Tienes ${clp(d.total)} pendientes en ${club.name}` : `${d.name.split(' ')[0]} tiene ${clp(d.total)} pendientes en ${club.name}`;
             await notificationsService.notifyUser({
               userId,
               clubId,
               type: 'warning',
-              title: own ? `Tienes ${clp(d.total)} pendientes en ${club.name}` : `${d.name.split(' ')[0]} tiene ${clp(d.total)} pendientes en ${club.name}`,
-              message: `${extra ? `${extra} — ` : ''}${lines.slice(0, 6).join(' · ')}${lines.length > 6 ? ' …' : ''}${myClub ? ' — Revisa y paga en "Mi club".' : link ? ' — Puedes pagar en la página del club.' : ''}`,
-              link: myClub ? `/my/payments?member=${d.memberId}` : link || '/dashboard',
+              title,
+              message: `${extra ? `${extra} — ` : ''}${lines.slice(0, 6).join(' · ')}${lines.length > 6 ? ' …' : ''}${appPath ? ' — Revisa y paga en "Mi club".' : publicLink ? ' — Puedes pagar en la página del club.' : ''}`,
+              link: appPath || publicLink || null,
+              email: {
+                subject: `Recordatorio de pago — ${club.name}`,
+                html: this._reminderEmail(club, d, { own, extra, link, ctaText: appPath ? 'Ver mis pagos' : 'Ver y pagar' }),
+              },
             });
           }
         } else {
+          // Sin cuenta: solo la página pública (si está activa); si no, el correo va sin enlace.
           await emailService.send({
             to: d.email,
             subject: `Recordatorio de pago — ${club.name}`,
-            html: renderClubEmail({
-              club: { name: club.name, primaryColor: club.primary_color, logoUrl: toAbsoluteMediaUrl(club.logo_url) },
-              title: `Tienes ${clp(d.total)} pendientes`,
-              bodyHtml: `<p>Hola ${esc(d.name.split(' ')[0])},</p><p>Te recordamos que tienes estos pagos vencidos en <strong>${esc(club.name)}</strong>:</p><ul>${d.items
-                .map((i) => `<li>${esc(i.chargeName)} — ${esc(i.period)}: <strong>${clp(i.remaining)}</strong></li>`)
-                .join('')}</ul>${extra ? `<p style="padding:10px 12px;border-left:3px solid ${esc(club.primary_color || '#999')};background:#f6f6f7">${esc(extra).replace(/\n/g, '<br>')}</p>` : ''}<p>Si ya pagaste, no te preocupes: puede que aún no lo hayamos registrado.</p>`,
-              ctaText: link ? 'Ver y pagar' : undefined,
-              ctaUrl: link || undefined,
-            }),
+            html: this._reminderEmail(club, d, { own: true, extra, link: publicLink, ctaText: 'Ver y pagar' }),
           });
         }
         sent += 1;
@@ -161,6 +169,40 @@ class DebtRemindersService {
       changes: { sent, debtors: list.length, ...(extra ? { note: extra } : {}) },
     });
     return { sent, debtors: list.length, withoutContact: list.filter((d) => !d.channel).length };
+  }
+
+  /** Correo del recordatorio: total destacado, tabla con cada período vencido (cobro, mes,
+   * vencimiento, monto) y la nota de la directiva. \`own\` = va a la persona misma (si no, a su
+   * apoderado). Sin \`link\` no lleva botón. */
+  _reminderEmail(club, d, { own, extra, link, ctaText }) {
+    const color = club.primary_color || '#4F46E5';
+    const firstName = esc(d.name.split(' ')[0]);
+    const count = d.items.length;
+    const intro = own
+      ? `<p>Hola ${firstName},</p><p>Te recordamos que tienes ${count === 1 ? 'un pago vencido' : `${count} pagos vencidos`} en <strong>${esc(club.name)}</strong>:</p>`
+      : `<p>Hola,</p><p>Te recordamos que <strong>${esc(d.name)}</strong> tiene ${count === 1 ? 'un pago vencido' : `${count} pagos vencidos`} en <strong>${esc(club.name)}</strong>:</p>`;
+    const table = renderTable({
+      columns: [{ label: 'Cobro' }, { label: 'Período' }, { label: 'Venció' }, { label: 'Monto', align: 'right' }],
+      rows: d.items.map((i) => [esc(i.chargeName), esc(i.period), esc(shortDate(i.dueDate)), `<strong>${clp(i.remaining)}</strong>`]),
+      footer: ['Total', '', '', clp(d.total)],
+    });
+    const oldest = d.items[0]?.dueDate ? shortDate(d.items[0].dueDate) : null;
+    return renderClubEmail({
+      club: { name: club.name, primaryColor: color, logoUrl: toAbsoluteMediaUrl(club.logo_url) },
+      eyebrow: 'Recordatorio de pago',
+      title: own ? `Tienes ${clp(d.total)} pendientes` : `${d.name.split(' ')[0]} tiene ${clp(d.total)} pendientes`,
+      preheader: `${count === 1 ? '1 pago vencido' : `${count} pagos vencidos`} en ${club.name} por ${clp(d.total)}.`,
+      bodyHtml: `${intro}${renderHighlight({
+        label: 'Total vencido',
+        value: clp(d.total),
+        hint: `${count === 1 ? '1 período' : `${count} períodos`}${oldest ? ` · el más antiguo venció el ${oldest}` : ''}`,
+        tone: 'danger',
+      })}${table}${extra ? renderNote(extra, color, 'Mensaje del club') : ''}<p style="font-size:13.5px; color:#6b6b78;">Si ya pagaste, no te preocupes: puede que aún no lo hayamos registrado.${
+        link ? '' : ' Para pagar, comunícate con el club.'
+      }</p>`,
+      ctaText: link ? ctaText : undefined,
+      ctaUrl: link || undefined,
+    });
   }
 
   /** Cron diario: clubes con recordatorio automático cuyo día es hoy y que no enviaron este mes. */

@@ -37,6 +37,22 @@ const setImage = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, data, 'Imagen actualizada correctamente.');
 });
 
+const addDocument = asyncHandler(async (req, res) => {
+  const data = await selfService.addDocument(...ctx(req), mid(req), Number(req.params.fieldId), req.file || null);
+  return ApiResponse.created(res, data, 'Archivo agregado correctamente.');
+});
+
+const removeDocument = asyncHandler(async (req, res) => {
+  await selfService.removeDocument(...ctx(req), mid(req), Number(req.params.documentId));
+  return ApiResponse.ok(res, null, 'Archivo eliminado correctamente.');
+});
+
+const downloadDocument = asyncHandler(async (req, res) => {
+  const file = await selfService.documentFile(...ctx(req), mid(req), Number(req.params.documentId));
+  res.type(file.mimeType);
+  return res.download(file.absolutePath, file.name);
+});
+
 const removeImage = asyncHandler(async (req, res) => {
   await selfService.removeImage(...ctx(req), mid(req), Number(req.params.fieldId), req.query.url || null);
   return ApiResponse.ok(res, null, 'Imagen eliminada correctamente.');
@@ -55,4 +71,4 @@ const updateSettings = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, data, 'Configuración actualizada correctamente.');
 });
 
-module.exports = { overview, summary, payments, payOptions, proofs, attendance, profile, guardians, submitProof, receipt, updateProfile, setImage, removeImage, inviteGuardian, getSettings, updateSettings };
+module.exports = { overview, summary, payments, payOptions, proofs, attendance, profile, guardians, submitProof, receipt, updateProfile, setImage, removeImage, addDocument, removeDocument, downloadDocument, inviteGuardian, getSettings, updateSettings };

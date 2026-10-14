@@ -53,7 +53,7 @@ router.put(
   '/settings',
   requireFunction(FUNCTIONS.EDIT_TREASURY_SETTINGS),
   sanitizeBody,
-  [body('enabled').isBoolean().toBoolean()],
+  [body('enabled').optional().isBoolean().toBoolean(), body('showAttendance').optional().isBoolean().toBoolean()],
   handleValidation,
   controller.updatePublicPaymentsSetting
 );

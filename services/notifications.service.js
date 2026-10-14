@@ -58,8 +58,10 @@ class NotificationsService {
   /** Envía una notificación a un usuario específico (persistida + push en tiempo real + correo
    * con el mismo contenido — ver `_emailForNotification`, a pedido explícito de que TODA
    * notificación llegue también por correo). `imageUrl` es opcional (p.ej. la plantilla de
-   * cumpleaños compuesta en el servidor, ver birthdays.service.js). */
-  async notifyUser({ userId, clubId, type, title, message, link, imageUrl = null }) {
+   * cumpleaños compuesta en el servidor, ver birthdays.service.js). `email` (opcional):
+   * `{ subject, html }` ya armado para usar en vez del correo genérico (ej. el recordatorio de
+   * pago, con la tabla de lo que se debe). */
+  async notifyUser({ userId, clubId, type, title, message, link, imageUrl = null, email = null }) {
     const id = await notificationsRepository.createNotification({ userId, clubId, type, title, message, link, imageUrl });
     try {
       emitToUser(userId, 'notification:new', { id, userId, clubId, type, title, message, link, imageUrl });
@@ -69,7 +71,7 @@ class NotificationsService {
     // Sin await: un correo lento/fallido no debe demorar ni tumbar la creación de la
     // notificación (que ya quedó persistida y empujada por socket) — mismo espíritu "mejor
     // esfuerzo" que el resto de email.service.js.
-    this._emailForNotification({ userId, clubId, type, title, message, link, imageUrl }).catch((error) => {
+    this._emailForNotification({ userId, clubId, type, title, message, link, imageUrl, email }).catch((error) => {
       logger.error('[notifications] Error enviando correo de notificación', { userId, notificationId: id, error: error.message });
     });
     return id;
@@ -77,9 +79,13 @@ class NotificationsService {
 
   /** Correo con el mismo contenido de la notificación — branding del club si tiene uno
    * asociado, genérico si no (p.ej. una notificación a nivel de plataforma). */
-  async _emailForNotification({ userId, clubId, type, title, message, link, imageUrl }) {
+  async _emailForNotification({ userId, clubId, type, title, message, link, imageUrl, email }) {
     const user = await usersRepository.findById(userId);
     if (!user?.email) return;
+    if (email?.html) {
+      await emailService.send({ to: user.email, subject: email.subject || title, html: email.html });
+      return;
+    }
 
     const imageHtml = imageUrl
       ? `<p style="margin:16px 0 0;"><img src="${escapeHtml(imageUrl)}" alt="" style="max-width:100%; border-radius:12px; display:block;" /></p>`

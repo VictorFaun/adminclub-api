@@ -51,6 +51,11 @@ const markSession = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, data, 'Asistencia guardada correctamente.');
 });
 
+const trainingSummary = asyncHandler(async (req, res) => {
+  const data = await trainingAttendanceService.getTrainingSummary(req.club.id, Number(req.params.trainingId), req.query.month, req.user.id, req.authContext);
+  return ApiResponse.ok(res, data, 'Resumen obtenido correctamente.');
+});
+
 const trainingStats = asyncHandler(async (req, res) => {
   const data = await trainingAttendanceService.getTrainingStats(req.club.id, Number(req.params.trainingId), req.user.id, req.authContext);
   return ApiResponse.ok(res, data, 'Estadísticas obtenidas correctamente.');
@@ -81,7 +86,7 @@ const updateSession = asyncHandler(async (req, res) => {
 
 const cancelSession = asyncHandler(async (req, res) => {
   await trainingAttendanceService.cancelSession(req.club.id, Number(req.params.trainingId), req.params.date, req.body, req.user.id, req.authContext);
-  return ApiResponse.ok(res, null, 'Día cancelado correctamente.');
+  return ApiResponse.ok(res, null, 'Día suspendido correctamente.');
 });
 
 const restoreSession = asyncHandler(async (req, res) => {
@@ -89,10 +94,15 @@ const restoreSession = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, null, 'Día restaurado correctamente.');
 });
 
+const coachOptions = asyncHandler(async (req, res) => {
+  const data = await trainingAttendanceService.listCoachOptions(req.club.id, Number(req.params.trainingId), req.user.id, req.authContext);
+  return ApiResponse.ok(res, data, 'Entrenadores obtenidos correctamente.');
+});
+
 const cancelledSessions = asyncHandler(async (req, res) => {
   const data = await trainingAttendanceService.listCancelledSessions(req.club.id, Number(req.params.trainingId), req.user.id, req.authContext);
-  return ApiResponse.ok(res, data, 'Días cancelados obtenidos correctamente.');
+  return ApiResponse.ok(res, data, 'Días suspendidos obtenidos correctamente.');
 });
 
 module.exports = {
-  trainingMatrixExport, listForMember, trainingMatrix, markAttendance, markSession, trainingStats, addSession, updateSession, cancelSession, restoreSession, cancelledSessions };
+  trainingMatrixExport, listForMember, trainingMatrix, trainingSummary, markAttendance, markSession, trainingStats, addSession, updateSession, cancelSession, restoreSession, cancelledSessions, coachOptions };

@@ -4,7 +4,6 @@ const memberFieldsRepository = require('../repositories/memberFields.repository'
 const settingsRepository = require('../repositories/settings.repository');
 const paymentsRepository = require('../repositories/payments.repository');
 const paymentProofsRepository = require('../repositories/paymentProofs.repository');
-const trainingAttendancesRepository = require('../repositories/trainingAttendances.repository');
 const usersRepository = require('../repositories/users.repository');
 const auditRepository = require('../repositories/audit.repository');
 const membersService = require('./members.service');
@@ -20,7 +19,7 @@ const { withTransaction } = require('../config/database');
 const { todayLocal } = require('../helpers/membership');
 const { toAbsoluteMediaUrl, deleteUploadedFile } = require('../helpers/mediaUrl');
 const { parseSettings, UPLOAD_TYPES, LAYOUT_TYPES } = require('../helpers/memberFieldTypes');
-const { deletePrivateFile } = require('../middlewares/privateUpload.middleware');
+const { deletePrivateFile, resolvePrivatePath } = require('../middlewares/privateUpload.middleware');
 const { USER_CLUB_STATUS } = require('../config/constants');
 
 /** Interruptores del club (club_settings) con su valor por defecto. */
@@ -222,29 +221,8 @@ class SelfServiceService {
 
   async attendance(clubId, userId, memberId) {
     const { member } = await this._own(clubId, userId, memberId, 'attendance');
-    const today = todayLocal();
-    const rows = (await trainingAttendancesRepository.findForMember(member.id)).filter((r) => toDateOnly(r.session_date) <= today);
-    const items = rows.map((r) => trainingAttendanceService._attendanceToDto(r));
-    const byTraining = new Map();
-    const total = { attended: 0, marked: 0 };
-    for (const i of items) {
-      const t = byTraining.get(i.trainingId) || { trainingId: i.trainingId, name: i.trainingName, color: i.trainingColor, attended: 0, marked: 0 };
-      if (i.status === 'attended' || i.status === 'absent') {
-        t.marked += 1;
-        total.marked += 1;
-        if (i.status === 'attended') {
-          t.attended += 1;
-          total.attended += 1;
-        }
-      }
-      byTraining.set(i.trainingId, t);
-    }
-    const pct = (x) => (x.marked ? Math.round((x.attended / x.marked) * 100) : null);
-    return {
-      summary: { ...total, pct: pct(total) },
-      trainings: [...byTraining.values()].map((t) => ({ ...t, pct: pct(t) })),
-      items: items.map(({ uuid, ...rest }) => rest),
-    };
+    const { summary, trainings, items } = await trainingAttendanceService.summaryForMember(member.id, todayLocal());
+    return { summary, trainings, items: items.map(({ uuid, ...rest }) => rest) };
   }
 
   // ------------------------------------------------------------------ inicio
@@ -281,7 +259,7 @@ class SelfServiceService {
   // ------------------------------------------------------------------ mi ficha
 
   async _fieldCatalog(clubId) {
-    return (await memberFieldsRepository.findByClub(clubId)).filter((f) => f.field_type !== 'file' && !parseSettings(f).sensitive);
+    return (await memberFieldsRepository.findByClub(clubId)).filter((f) => !parseSettings(f).sensitive);
   }
 
   _editable(field, settings) {
@@ -294,9 +272,15 @@ class SelfServiceService {
     const dto = await membersService._buildDto(member);
     const visible = new Set(catalog.map((f) => f.code));
     const fields = Object.fromEntries(Object.entries(dto.fields).filter(([code]) => visible.has(code)));
+    // Archivos de los campos de tipo "archivos" que la persona ve en su ficha.
+    const fileFieldIds = new Set(catalog.filter((f) => f.field_type === 'file').map((f) => f.id));
+    const documents = fileFieldIds.size
+      ? (await membersRepository.findDocuments(member.id)).filter((d) => fileFieldIds.has(d.field_id)).map((d) => membersService._documentDto(d))
+      : [];
     return {
       member: { ...this._memberDto(member, dto.groups), joinedOn: dto.joinedOn ?? null, fields },
       fields: catalog.map((f) => ({ ...memberFieldsService.toDto(f), editable: this._editable(f, settings) })),
+      documents,
       canEdit: catalog.some((f) => this._editable(f, settings)),
     };
   }
@@ -344,6 +328,48 @@ class SelfServiceService {
     const { member, settings } = await this._own(clubId, userId, memberId, 'profileEdit');
     const field = await this._editableImageField(clubId, settings, fieldId);
     await membersService.dropImage(member.id, field, url || null);
+  }
+
+  /** Campo de archivos de su ficha que la persona puede modificar (`editable`) o solo ver. */
+  async _fileField(clubId, settings, fieldId, { editable }) {
+    const field = (await this._fieldCatalog(clubId)).find((f) => f.id === Number(fieldId) && f.field_type === 'file');
+    if (!field || (editable && !this._editable(field, settings))) throw AppError.forbidden('Este campo no lo puedes modificar.');
+    return field;
+  }
+
+  async addDocument(clubId, userId, memberId, fieldId, file) {
+    try {
+      const { member, settings } = await this._own(clubId, userId, memberId, 'profileEdit');
+      await this._fileField(clubId, settings, fieldId, { editable: true });
+      return await membersService.storeDocument(clubId, member.id, Number(fieldId), file, null, userId, 'MEMBER_SELF_UPDATED');
+    } catch (error) {
+      if (file) deletePrivateFile(`member-documents/${file.filename}`);
+      throw error;
+    }
+  }
+
+  async _ownDocument(member, documentId) {
+    const doc = await membersRepository.findDocument(Number(documentId));
+    if (!doc || doc.member_id !== member.id) throw AppError.notFound('Documento no encontrado.');
+    return doc;
+  }
+
+  async removeDocument(clubId, userId, memberId, documentId) {
+    const { member, settings } = await this._own(clubId, userId, memberId, 'profileEdit');
+    const doc = await this._ownDocument(member, documentId);
+    await this._fileField(clubId, settings, doc.field_id, { editable: true });
+    await membersRepository.deleteDocument(doc.id);
+    deletePrivateFile(doc.file_path);
+    await auditRepository.logAction({ userId, clubId, action: 'MEMBER_SELF_UPDATED', entityType: 'member', entityId: member.id, changes: { document: { from: doc.name, to: null } } });
+  }
+
+  async documentFile(clubId, userId, memberId, documentId) {
+    const { member, settings } = await this._own(clubId, userId, memberId);
+    const doc = await this._ownDocument(member, documentId);
+    await this._fileField(clubId, settings, doc.field_id, { editable: false });
+    const absolutePath = resolvePrivatePath(doc.file_path);
+    if (!absolutePath) throw AppError.notFound('Documento no encontrado.');
+    return { absolutePath, name: doc.name, mimeType: doc.mime_type };
   }
 
   // ------------------------------------------------------------------ apoderados

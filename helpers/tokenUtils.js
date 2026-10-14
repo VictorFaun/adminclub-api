@@ -13,10 +13,14 @@ function signAccessToken(payload) {
   });
 }
 
+/** `jwtid` aleatorio: dos refresh del mismo usuario/sesión en el mismo segundo (dos pestañas, o
+ * recargar con uno en curso) generaban EXACTAMENTE el mismo token → hash duplicado en la tabla de
+ * sesiones → 409 y la sesión se cerraba. */
 function signRefreshToken(payload) {
   return jwt.sign(payload, env.jwt.refreshSecret, {
     expiresIn: env.jwt.refreshExpiresIn,
     issuer: env.jwt.issuer,
+    jwtid: crypto.randomUUID(),
   });
 }
 

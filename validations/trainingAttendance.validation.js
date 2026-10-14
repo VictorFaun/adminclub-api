@@ -9,6 +9,11 @@ const trainingMatrix = [
   query('columns').optional().isInt({ min: 1, max: 5 }).withMessage('Cantidad de columnas inválida.'),
 ];
 
+const trainingSummary = [
+  ...trainingIdParam,
+  query('month').optional().matches(/^\d{4}-(0[1-9]|1[0-2])$/).withMessage('Mes inválido.'),
+];
+
 const markAttendance = [
   ...trainingIdParam,
   param('memberId').isInt({ min: 1 }).withMessage('Identificador de miembro inválido.'),
@@ -23,8 +28,16 @@ const sessionFields = [
   body('startTime').optional({ nullable: true, checkFalsy: true }).matches(/^\d{2}:\d{2}(:\d{2})?$/).withMessage('Hora de inicio inválida.'),
   body('endTime').optional({ nullable: true, checkFalsy: true }).matches(/^\d{2}:\d{2}(:\d{2})?$/).withMessage('Hora de término inválida.'),
   body('note').optional({ nullable: true }).trim().isLength({ max: 255 }),
+  // Entrenadores de ese día (opcional; [] = sin entrenador).
+  body('coachMemberIds').optional().isArray({ max: 20 }).withMessage('Entrenadores inválidos.'),
+  body('coachMemberIds.*').isInt({ min: 1 }).withMessage('Entrenador inválido.'),
 ];
-const addSession = [...trainingIdParam, body('sessionDate').isISO8601().withMessage('Fecha inválida.'), ...sessionFields];
+const addSession = [
+  ...trainingIdParam,
+  body('sessionDate').isISO8601().withMessage('Fecha inválida.'),
+  body('recoversDate').optional({ nullable: true, checkFalsy: true }).isISO8601({ strict: true }).withMessage('Día a recuperar inválido.'),
+  ...sessionFields,
+];
 const updateSession = [...trainingIdParam, sessionDateParam, ...sessionFields];
 const sessionDate = [...trainingIdParam, sessionDateParam, body('note').optional({ nullable: true }).trim().isLength({ max: 255 })];
 
@@ -37,4 +50,4 @@ const markSession = [
   body('marks.*.exemptType').optional({ nullable: true }).isIn(['frozen', 'not_applicable']),
 ];
 
-module.exports = { memberIdParam, trainingIdParam, trainingMatrix, markAttendance, markSession, addSession, updateSession, sessionDate };
+module.exports = { memberIdParam, trainingIdParam, trainingMatrix, trainingSummary, markAttendance, markSession, addSession, updateSession, sessionDate };

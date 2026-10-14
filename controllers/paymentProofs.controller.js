@@ -58,7 +58,11 @@ const publicPaymentsSetting = asyncHandler(async (req, res) => {
 });
 
 const updatePublicPaymentsSetting = asyncHandler(async (req, res) => {
-  const data = await paymentProofsService.setPublicPaymentsSetting(req.club.id, req.body.enabled, req.user.id);
+  const data = await paymentProofsService.setPublicPaymentsSetting(
+    req.club.id,
+    { enabled: req.body.enabled, showAttendance: req.body.showAttendance },
+    req.user.id
+  );
   return ApiResponse.ok(res, data, 'Configuración actualizada correctamente.');
 });
 

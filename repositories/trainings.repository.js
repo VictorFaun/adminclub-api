@@ -110,7 +110,7 @@ class TrainingsRepository extends BaseRepository {
 
   async getSessionOverrides(trainingId, conn = pool) {
     const [rows] = await conn.query(
-      'SELECT id, session_date, kind, start_time, end_time, note FROM training_sessions WHERE training_id = ? ORDER BY session_date ASC',
+      'SELECT id, session_date, kind, start_time, end_time, note, recovers_date, was_extra FROM training_sessions WHERE training_id = ? ORDER BY session_date ASC',
       [trainingId]
     );
     return rows;
@@ -125,13 +125,58 @@ class TrainingsRepository extends BaseRepository {
     await conn.query(
       `INSERT INTO training_sessions (training_id, session_date, kind, start_time, end_time, note, created_by)
        VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE kind = VALUES(kind), start_time = VALUES(start_time), end_time = VALUES(end_time), note = VALUES(note)`,
+       ON DUPLICATE KEY UPDATE kind = VALUES(kind), start_time = VALUES(start_time), end_time = VALUES(end_time), note = VALUES(note),
+         was_extra = IF(VALUES(kind) = 'cancelled', was_extra, 0)`,
       [trainingId, sessionDate, kind, startTime || null, endTime || null, note || null, createdBy || null]
     );
   }
 
+  /** Qué día suspendido recupera un día extra (`null` = ninguno). */
+  async setSessionRecovery(trainingId, sessionDate, recoversDate, conn = pool) {
+    await conn.query('UPDATE training_sessions SET recovers_date = ? WHERE training_id = ? AND session_date = ?', [recoversDate || null, trainingId, sessionDate]);
+  }
+
+  /** Suspende un día extra sin borrarlo: conserva hora, nota y lo que recuperaba. */
+  async cancelExtraSession(trainingId, sessionDate, note, conn = pool) {
+    await conn.query(
+      "UPDATE training_sessions SET kind = 'cancelled', was_extra = 1, note = COALESCE(?, note) WHERE training_id = ? AND session_date = ?",
+      [note || null, trainingId, sessionDate]
+    );
+  }
+
+  /** Entrenadores elegidos a mano por día: Map "YYYY-MM-DD" → memberIds (solo días con
+   * `coaches_overridden`; un día cambiado sin nadie queda con []). Excluye miembros eliminados. */
+  async getSessionCoaches(trainingId, conn = pool) {
+    const [days] = await conn.query('SELECT session_date FROM training_sessions WHERE training_id = ? AND coaches_overridden = 1', [trainingId]);
+    const [rows] = await conn.query(
+      `SELECT tsc.session_date, tsc.member_id FROM training_session_coaches tsc
+       INNER JOIN members m ON m.id = tsc.member_id AND m.deleted_at IS NULL
+       WHERE tsc.training_id = ?`,
+      [trainingId]
+    );
+    const key = (d) => new Date(d).toISOString().slice(0, 10);
+    const map = new Map(days.map((d) => [key(d.session_date), []]));
+    for (const r of rows) map.get(key(r.session_date))?.push(r.member_id);
+    return map;
+  }
+
+  /** Cambia los entrenadores de UN día (`null` = vuelve a los responsables del entrenamiento). */
+  async setSessionCoaches(trainingId, sessionDate, memberIds, conn = pool) {
+    await conn.query('DELETE FROM training_session_coaches WHERE training_id = ? AND session_date = ?', [trainingId, sessionDate]);
+    await conn.query('UPDATE training_sessions SET coaches_overridden = ? WHERE training_id = ? AND session_date = ?', [memberIds ? 1 : 0, trainingId, sessionDate]);
+    if (memberIds?.length) {
+      await conn.query('INSERT INTO training_session_coaches (training_id, session_date, member_id) VALUES ?', [memberIds.map((id) => [trainingId, sessionDate, id])]);
+    }
+  }
+
+  /** Un día restaurado ya no está perdido: deja de figurar como "recuperado" por otro. */
+  async clearRecoveriesOf(trainingId, recoversDate, conn = pool) {
+    await conn.query('UPDATE training_sessions SET recovers_date = NULL WHERE training_id = ? AND recovers_date = ?', [trainingId, recoversDate]);
+  }
+
   async deleteSessionOverride(trainingId, sessionDate, conn = pool) {
     await conn.query('DELETE FROM training_sessions WHERE training_id = ? AND session_date = ?', [trainingId, sessionDate]);
+    await conn.query('DELETE FROM training_session_coaches WHERE training_id = ? AND session_date = ?', [trainingId, sessionDate]);
   }
 
   // --- Targets (miembros / grupos / exclusiones) — mirror de charges.repository.js, sin monto ---

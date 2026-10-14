@@ -10,6 +10,7 @@ const AppError = require('../helpers/AppError');
 const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const { pool } = require('../config/database');
 const { FUNCTIONS } = require('../config/constants');
+const clubsRepository = require('../repositories/clubs.repository');
 
 // Ventana rodante de generación: bastante más ancha que "actual+siguiente" de Cobros porque acá
 // la granularidad es semanal, no mensual — hace falta ventana para que la matriz tenga columnas
@@ -31,6 +32,15 @@ const pad = (n) => String(n).padStart(2, '0');
 function formatDateOnly(date) {
   const d = new Date(date);
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+}
+/** "YYYY-MM-DD" de hoy en la zona horaria del club (un día "ya pasó" según el reloj del club, no
+ * el UTC del servidor — en Chile pasadas las ~21:00 UTC ya es mañana). */
+function todayIn(timezone) {
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: timezone || 'UTC', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  } catch {
+    return formatDateOnly(new Date());
+  }
 }
 /** JS `getUTCDay()` es 0=domingo..6=sábado; ISO (usado en `training_schedules.day_of_week`) es
  * 1=lunes..7=domingo. */
@@ -71,11 +81,29 @@ class TrainingAttendanceService {
   }
 
   /** `notApplicableReason`: el miembro no estaba en el club ese día ("Antes de su ingreso" / "Retirado"). */
-  _virtualCellToDto(sessionDate, notApplicableReason = null) {
+  _virtualCellToDto(sessionDate, notApplicableReason = null, today = null) {
     if (notApplicableReason) {
       return { id: null, sessionDate, status: 'exempt', displayStatus: 'not_applicable', exemptReason: notApplicableReason, exemptType: 'not_applicable' };
     }
+    // Un día que ya pasó sin marca cuenta como falta (igual que closePastSessions con las filas reales).
+    if (today && sessionDate < today) return { id: null, sessionDate, status: 'absent', displayStatus: 'absent', exemptReason: null, exemptType: null };
     return { id: null, sessionDate, status: 'pending', displayStatus: 'pending', exemptReason: null, exemptType: null };
+  }
+
+  async _clubToday(clubId) {
+    const club = await clubsRepository.findActiveById(clubId);
+    return todayIn(club?.timezone);
+  }
+
+  /** Pasado el día de la sesión, quien quedó sin marcar pasa a "No asistió" (`marked_by` NULL =
+   * marca automática); se puede cambiar después como cualquier otra marca. Idempotente — corre en
+   * el cron diario y antes de leer la matriz/estadísticas, para no depender de la hora del cron. */
+  async closePastSessions(trainingId, today) {
+    const [result] = await pool.query(
+      "UPDATE training_attendances SET status = 'absent', marked_by = NULL, marked_at = NOW() WHERE training_id = ? AND status = 'pending' AND session_date < ?",
+      [trainingId, today]
+    );
+    return result.affectedRows;
   }
 
   _attendanceToDto(row) {
@@ -108,7 +136,9 @@ class TrainingAttendanceService {
 
   _computeScheduledDates(schedules, startDate, endDate, referenceDate = new Date()) {
     const today = new Date(Date.UTC(referenceDate.getUTCFullYear(), referenceDate.getUTCMonth(), referenceDate.getUTCDate()));
-    const rangeStart = new Date(Math.max(today.getTime(), new Date(startDate).getTime()));
+    // Desde el inicio del entrenamiento aunque sea anterior a hoy (creado con fecha pasada, también
+    // tiene esas sesiones); hacia adelante, la ventana rodante.
+    const rangeStart = new Date(startDate);
     const windowEnd = new Date(today.getTime() + GENERATION_WINDOW_DAYS * 86400000);
     const rangeEnd = endDate ? new Date(Math.min(windowEnd.getTime(), new Date(endDate).getTime())) : windowEnd;
     if (rangeEnd < rangeStart) return [];
@@ -166,6 +196,8 @@ class TrainingAttendanceService {
     for (const training of trainings) {
       // eslint-disable-next-line no-await-in-loop
       total += await this.generateForTraining(training.id);
+      // eslint-disable-next-line no-await-in-loop
+      await this.closePastSessions(training.id, await this._clubToday(training.club_id));
     }
     return total;
   }
@@ -254,7 +286,7 @@ class TrainingAttendanceService {
    * `dates.length - size` (no solo `dates.length - 1`) por el mismo motivo: evita que una página
    * completa hacia adelante/atrás "aterrice" pegada al borde con menos columnas de las que
    * realmente hay disponibles para mostrar. */
-  async _matrixSessionDates(trainingId, offset, columns, all = false) {
+  async _matrixSessionDates(trainingId, offset, columns, all = false, todayStr = formatDateOnly(new Date())) {
     const [rows] = await pool.query('SELECT DISTINCT session_date FROM training_attendances WHERE training_id = ? ORDER BY session_date ASC', [
       trainingId,
     ]);
@@ -265,10 +297,9 @@ class TrainingAttendanceService {
     const dates = rows.map((r) => formatDateOnly(r.session_date)).filter((d) => !cancelled.has(d));
     if (!dates.length) return { dates: [], canGoBack: false, canGoForward: false };
     // Exportación: todas las sesiones hasta hoy.
-    if (all) return { dates: dates.filter((d) => d <= formatDateOnly(new Date())), canGoBack: false, canGoForward: false };
+    if (all) return { dates: dates.filter((d) => d <= todayStr), canGoBack: false, canGoForward: false };
 
     const size = Math.max(MIN_WINDOW_SIZE, Math.min(MAX_WINDOW_SIZE, columns || DEFAULT_WINDOW_SIZE));
-    const todayStr = formatDateOnly(new Date());
     let todayIdx = dates.findIndex((d) => d >= todayStr);
     if (todayIdx === -1) todayIdx = dates.length - 1;
 
@@ -297,10 +328,12 @@ class TrainingAttendanceService {
       })),
     };
 
-    const { dates, canGoBack, canGoForward } = await this._matrixSessionDates(trainingId, offset || 0, columns || null, all);
+    const today = await this._clubToday(clubId);
+    await this.closePastSessions(trainingId, today);
+    const { dates, canGoBack, canGoForward } = await this._matrixSessionDates(trainingId, offset || 0, columns || null, all, today);
     const { memberIds } = await this._resolveTrainingParticipants(training, actorId, authContext);
 
-    const sessionMeta = await this._buildSessionMeta(trainingId, dates);
+    const sessionMeta = await this._buildSessionMeta(trainingId, dates, clubId);
     if (!memberIds.length || !dates.length) return { training: trainingDto, sessionDates: dates, sessionMeta, canGoBack, canGoForward, rows: [] };
 
     const [allMembers, attendances, membershipsByMember] = await Promise.all([
@@ -335,7 +368,7 @@ class TrainingAttendanceService {
         inactive: m.status === 'inactive',
         cells: dates.reduce((acc, d) => {
           const att = cellLookup.get(m.id)?.get(d);
-          acc[d] = att ? this._matrixCellToDto(att) : this._virtualCellToDto(d, dateReason(membershipsByMember.get(m.id), d));
+          acc[d] = att ? this._matrixCellToDto(att) : this._virtualCellToDto(d, dateReason(membershipsByMember.get(m.id), d), today);
           return acc;
         }, {}),
       }))
@@ -347,8 +380,12 @@ class TrainingAttendanceService {
   /** Por fecha mostrada: hora (la del horario semanal, o la propia del día si es extra/modificado),
    * nota y de qué tipo es ('scheduled' | 'extra' | 'modified') — la UI lo usa para etiquetar y
    * decidir qué acciones ofrecer sobre esa columna. */
-  async _buildSessionMeta(trainingId, dates) {
-    const [schedules, overrides] = await Promise.all([trainingsRepository.getSchedules(trainingId), trainingsRepository.getSessionOverrides(trainingId)]);
+  async _buildSessionMeta(trainingId, dates, clubId) {
+    const [schedules, overrides, coaches] = await Promise.all([
+      trainingsRepository.getSchedules(trainingId),
+      trainingsRepository.getSessionOverrides(trainingId),
+      this._sessionCoaches(trainingId, clubId, dates),
+    ]);
     const overrideByDate = new Map(overrides.map((o) => [formatDateOnly(o.session_date), o]));
     const meta = {};
     for (const date of dates) {
@@ -360,9 +397,53 @@ class TrainingAttendanceService {
         startTime: o?.start_time ?? weekly?.startTime ?? null,
         endTime: o?.end_time ?? weekly?.endTime ?? null,
         note: o?.note ?? null,
+        // Día suspendido que recupera (solo días extra).
+        recovers: o?.kind === 'extra' && o.recovers_date ? formatDateOnly(o.recovers_date) : null,
+        // Entrenadores del día: los responsables del entrenamiento, salvo que se cambiaran para ese día.
+        coaches: coaches[date].coaches,
+        coachesOverridden: coaches[date].overridden,
       };
     }
     return meta;
+  }
+
+  /** Por fecha: quiénes entrenan ese día. Sin cambio puntual, los responsables del entrenamiento;
+   * con cambio, los elegidos para ese día ([] = sin entrenador). Un miembro eliminado no cuenta
+   * (si era el único, el día queda sin entrenador). */
+  async _sessionCoaches(trainingId, clubId, dates) {
+    const [responsibles, overrides] = await Promise.all([trainingsRepository.getResponsibleMembers(trainingId), trainingsRepository.getSessionCoaches(trainingId)]);
+    const ids = [...new Set([...responsibles.map((r) => r.memberId), ...[...overrides.values()].flat()])];
+    const named = new Map((await membersRepository.findNamesByIds(ids, clubId)).map((m) => [m.id, this._shortName(m)]));
+    const toList = (memberIds) => [...new Set(memberIds)].filter((id) => named.has(id)).map((id) => ({ memberId: id, memberName: named.get(id) }));
+    const defaults = toList(responsibles.map((r) => r.memberId));
+    const out = {};
+    for (const d of dates) out[d] = overrides.has(d) ? { overridden: true, coaches: toList(overrides.get(d)) } : { overridden: false, coaches: defaults };
+    return out;
+  }
+
+  /** Guarda los entrenadores de UN día (`undefined` = no se tocan). Si coinciden con los
+   * responsables del entrenamiento, se quita el cambio puntual (así sigue los cambios futuros). */
+  async _saveSessionCoaches(training, day, coachMemberIds) {
+    if (!Array.isArray(coachMemberIds)) return;
+    const ids = [...new Set(coachMemberIds.map(Number))];
+    const found = await membersRepository.findNamesByIds(ids, training.club_id);
+    if (found.length !== ids.length) throw AppError.badRequest('Algún entrenador elegido no es miembro del club.');
+    const responsibleIds = [...new Set((await trainingsRepository.getResponsibleMembers(training.id)).map((r) => r.memberId))];
+    const defaultIds = (await membersRepository.findNamesByIds(responsibleIds, training.club_id)).map((m) => m.id);
+    const sameAsDefault = ids.length === new Set(defaultIds).size && ids.every((id) => defaultIds.includes(id));
+    await trainingsRepository.setSessionCoaches(training.id, day, sameAsDefault ? null : ids);
+  }
+
+  /** Miembros que se pueden elegir como entrenador de un día (activos del club + responsables). */
+  async listCoachOptions(clubId, trainingId, actorId, authContext) {
+    await this._assertCanManageSessions(clubId, trainingId, actorId, authContext);
+    const [ids, responsibles] = await Promise.all([membersRepository.findIdsByClub(clubId), trainingsRepository.getResponsibleMembers(trainingId)]);
+    const responsibleIds = new Set(responsibles.map((r) => r.memberId));
+    const members = await membersRepository.findNamesByIds(ids, clubId);
+    return members
+      .filter((m) => m.status === 'active' || responsibleIds.has(m.id))
+      .map((m) => ({ memberId: m.id, memberName: this._shortName(m), isResponsible: responsibleIds.has(m.id) }))
+      .sort((a, b) => Number(b.isResponsible) - Number(a.isResponsible) || a.memberName.localeCompare(b.memberName));
   }
 
   // --- Días especiales (agregar / editar / cancelar / restaurar) ---
@@ -406,22 +487,43 @@ class TrainingAttendanceService {
     // Un día del horario semanal que NO está cancelado ya es una sesión: no se duplica.
     if (isScheduled && existing?.kind !== 'cancelled') throw AppError.conflict('Ese día ya es parte del horario semanal.');
 
+    // Opcional: el día suspendido que este día recupera (debe estar suspendido y sin recuperar).
+    const recovers = data.recoversDate ? formatDateOnly(data.recoversDate) : null;
+    if (recovers) {
+      const overrides = await trainingsRepository.getSessionOverrides(trainingId);
+      const target = overrides.find((o) => formatDateOnly(o.session_date) === recovers);
+      if (!target || target.kind !== 'cancelled') throw AppError.badRequest('El día a recuperar no está suspendido.');
+      if (recovers === day) throw AppError.badRequest('Un día no puede recuperarse a sí mismo.');
+      const taken = overrides.some((o) => o.recovers_date && formatDateOnly(o.recovers_date) === recovers && formatDateOnly(o.session_date) !== day);
+      if (taken) throw AppError.conflict('Ese día suspendido ya fue recuperado con otro día.');
+    }
+
     await trainingsRepository.upsertSessionOverride({ trainingId, sessionDate: day, kind: 'extra', ...input, createdBy: actorId });
+    await trainingsRepository.setSessionRecovery(trainingId, day, recovers);
+    await this._saveSessionCoaches(training, day, data.coachMemberIds);
     await this.generateForTraining(trainingId);
-    await auditRepository.logAction({ userId: actorId, clubId, action: 'TRAINING_SESSION_ADDED', entityType: 'training', entityId: trainingId, changes: { sessionDate: day, note: input.note } });
+    await auditRepository.logAction({ userId: actorId, clubId, action: 'TRAINING_SESSION_ADDED', entityType: 'training', entityId: trainingId, changes: { sessionDate: day, note: input.note, recovers } });
     return { sessionDate: day };
   }
 
   /** Cambia la hora/nota de UN día (los de horario semanal quedan como 'modified'; los extra siguen 'extra'). */
   async updateSession(clubId, trainingId, sessionDate, data, actorId, authContext) {
-    await this._assertCanManageSessions(clubId, trainingId, actorId, authContext);
+    const training = await this._assertCanManageSessions(clubId, trainingId, actorId, authContext);
     const day = formatDateOnly(sessionDate);
     const input = this._normalizeSessionInput(data);
     const existing = await trainingsRepository.findSessionOverride(trainingId, day);
     if (existing?.kind === 'cancelled') throw AppError.conflict('Este día está cancelado — restáuralo primero.');
     const kind = existing?.kind === 'extra' ? 'extra' : 'modified';
     await trainingsRepository.upsertSessionOverride({ trainingId, sessionDate: day, kind, ...input, createdBy: actorId });
-    await auditRepository.logAction({ userId: actorId, clubId, action: 'TRAINING_SESSION_UPDATED', entityType: 'training', entityId: trainingId, changes: { sessionDate: day, ...input } });
+    await this._saveSessionCoaches(training, day, data.coachMemberIds);
+    await auditRepository.logAction({
+      userId: actorId,
+      clubId,
+      action: 'TRAINING_SESSION_UPDATED',
+      entityType: 'training',
+      entityId: trainingId,
+      changes: { sessionDate: day, ...input, ...(Array.isArray(data.coachMemberIds) ? { coachMemberIds: data.coachMemberIds } : {}) },
+    });
     return { sessionDate: day };
   }
 
@@ -434,8 +536,9 @@ class TrainingAttendanceService {
     }
     const existing = await trainingsRepository.findSessionOverride(trainingId, day);
     if (existing?.kind === 'extra') {
-      // Un día extra cancelado simplemente deja de existir.
-      await trainingsRepository.deleteSessionOverride(trainingId, day);
+      // Un día extra suspendido no se borra: sale en la lista de suspendidos (se puede recuperar
+      // o restaurar). Si recuperaba otro día, ese vínculo se conserva.
+      await trainingsRepository.cancelExtraSession(trainingId, day, data?.note);
     } else {
       await trainingsRepository.upsertSessionOverride({ trainingId, sessionDate: day, kind: 'cancelled', note: data?.note, createdBy: actorId });
     }
@@ -449,16 +552,30 @@ class TrainingAttendanceService {
     const day = formatDateOnly(sessionDate);
     const existing = await trainingsRepository.findSessionOverride(trainingId, day);
     if (!existing || existing.kind === 'extra') throw AppError.conflict('Ese día no tiene cambios que deshacer.');
-    await trainingsRepository.deleteSessionOverride(trainingId, day);
+    if (existing.kind === 'cancelled' && existing.was_extra) {
+      // Un día extra suspendido vuelve a ser extra (con su hora, nota y lo que recuperaba).
+      await trainingsRepository.upsertSessionOverride({ trainingId, sessionDate: day, kind: 'extra', startTime: existing.start_time, endTime: existing.end_time, note: existing.note, createdBy: actorId });
+    } else {
+      await trainingsRepository.deleteSessionOverride(trainingId, day);
+    }
+    // Ya no es un día perdido: si otro día lo "recuperaba", ese vínculo se suelta.
+    if (existing.kind === 'cancelled') await trainingsRepository.clearRecoveriesOf(trainingId, day);
     await this.generateForTraining(trainingId);
     await auditRepository.logAction({ userId: actorId, clubId, action: 'TRAINING_SESSION_UPDATED', entityType: 'training', entityId: trainingId, changes: { sessionDate: day, restored: true } });
   }
 
-  /** Días cancelados (para poder restaurarlos desde la UI aunque no salgan como columna). */
+  /** Días suspendidos (incluidos los extra suspendidos), con el día que los recuperó si lo hay —
+   * para restaurarlos o vincularlos a un día nuevo, y saber cuántos se perdieron/recuperaron. */
   async listCancelledSessions(clubId, trainingId, actorId, authContext) {
     await this._assertCanManageSessions(clubId, trainingId, actorId, authContext);
     const overrides = await trainingsRepository.getSessionOverrides(trainingId);
-    return overrides.filter((o) => o.kind === 'cancelled').map((o) => ({ sessionDate: formatDateOnly(o.session_date), note: o.note }));
+    const recoveredBy = new Map(overrides.filter((o) => o.recovers_date).map((o) => [formatDateOnly(o.recovers_date), formatDateOnly(o.session_date)]));
+    return overrides
+      .filter((o) => o.kind === 'cancelled')
+      .map((o) => {
+        const sessionDate = formatDateOnly(o.session_date);
+        return { sessionDate, note: o.note, wasExtra: !!o.was_extra, recoveredBy: recoveredBy.get(sessionDate) ?? null };
+      });
   }
 
   /** Marca la asistencia de UN miembro en UNA fecha puntual — crea la fila si todavía no existe
@@ -596,6 +713,7 @@ class TrainingAttendanceService {
     if (!training || training.club_id !== clubId) throw AppError.notFound('Entrenamiento no encontrado.');
     const { memberIds } = await this._resolveTrainingParticipants(training, actorId, authContext);
     if (!memberIds.length) return { days: STATS_WINDOW_DAYS, members: {} };
+    await this.closePastSessions(trainingId, await this._clubToday(clubId));
     const [rows] = await pool.query(
       `SELECT member_id, session_date, status FROM training_attendances
        WHERE training_id = ? AND member_id IN (?) AND status IN ('attended', 'absent')
@@ -620,6 +738,228 @@ class TrainingAttendanceService {
       delete m.streakOpen;
     }
     return { days: STATS_WINDOW_DAYS, alertAt: ABSENCE_STREAK_ALERT, members };
+  }
+
+  // --- Asistencia de UN miembro ---
+
+  /** Asistencia de un miembro hasta `today`: total, por entrenamiento y cada marca (la usan "Mi
+   * club" y la página pública de pagos). El % cuenta solo asistió / no asistió. */
+  async summaryForMember(memberId, today) {
+    const rows = (await trainingAttendancesRepository.findForMember(memberId)).filter((r) => formatDateOnly(r.session_date) <= today);
+    const items = rows.map((r) => this._attendanceToDto(r));
+    const byTraining = new Map();
+    const total = { attended: 0, marked: 0 };
+    for (const i of items) {
+      const t = byTraining.get(i.trainingId) || { trainingId: i.trainingId, name: i.trainingName, color: i.trainingColor, attended: 0, marked: 0 };
+      if (i.status === 'attended' || i.status === 'absent') {
+        t.marked += 1;
+        total.marked += 1;
+        if (i.status === 'attended') {
+          t.attended += 1;
+          total.attended += 1;
+        }
+      }
+      byTraining.set(i.trainingId, t);
+    }
+    const pct = (x) => (x.marked ? Math.round((x.attended / x.marked) * 100) : null);
+    return {
+      summary: { ...total, pct: pct(total) },
+      trainings: [...byTraining.values()].map((t) => ({ ...t, pct: pct(t) })),
+      items,
+    };
+  }
+
+  // --- Resumen mensual ---
+
+  /**
+   * Resumen de UN mes del entrenamiento: sesiones (con asistencia y duración), días suspendidos y
+   * cuáles se recuperaron, días extra (recuperaciones o nuevos), horas de los entrenadores y
+   * asistencia por miembro. Mismo acceso que la matriz (un entrenador sin rol ve solo a los suyos).
+   * `month`: "YYYY-MM"; sin él, el mes en curso (o el último del entrenamiento si ya terminó).
+   */
+  async getTrainingSummary(clubId, trainingId, month, actorId, authContext) {
+    const training = await trainingsRepository.findActiveById(trainingId);
+    if (!training || training.club_id !== clubId) throw AppError.notFound('Entrenamiento no encontrado.');
+    const today = await this._clubToday(clubId);
+    await this.closePastSessions(trainingId, today);
+    const { memberIds } = await this._resolveTrainingParticipants(training, actorId, authContext);
+
+    // Meses disponibles: desde el inicio hasta hoy (o hasta el término, si ya terminó).
+    const firstMonth = formatDateOnly(training.start_date).slice(0, 7);
+    const endDate = training.end_date ? formatDateOnly(training.end_date) : null;
+    let lastMonth = (endDate && endDate < today ? endDate : today).slice(0, 7);
+    if (lastMonth < firstMonth) lastMonth = firstMonth;
+    const months = [];
+    let [y, m] = firstMonth.split('-').map(Number);
+    while (`${y}-${pad(m)}` <= lastMonth) {
+      months.push(`${y}-${pad(m)}`);
+      m += 1;
+      if (m > 12) {
+        m = 1;
+        y += 1;
+      }
+    }
+    const selected = months.includes(month) ? month : lastMonth;
+    const [year, mon] = selected.split('-').map(Number);
+    const monthStart = `${selected}-01`;
+    const monthEnd = `${selected}-${pad(new Date(Date.UTC(year, mon, 0)).getUTCDate())}`;
+    const inMonth = (d) => d >= monthStart && d <= monthEnd;
+
+    const [overrides, responsibles, schedules] = await Promise.all([
+      trainingsRepository.getSessionOverrides(trainingId),
+      trainingsRepository.getResponsibleMembers(trainingId),
+      trainingsRepository.getSchedules(trainingId),
+    ]);
+    const recoveredBy = new Map(overrides.filter((o) => o.recovers_date).map((o) => [formatDateOnly(o.recovers_date), formatDateOnly(o.session_date)]));
+    const cancelled = new Set(overrides.filter((o) => o.kind === 'cancelled').map((o) => formatDateOnly(o.session_date)));
+
+    // Sesiones del mes = las fechas generadas (sin las suspendidas) + días extra del mes.
+    const [dateRows] = await pool.query('SELECT DISTINCT session_date FROM training_attendances WHERE training_id = ? AND session_date BETWEEN ? AND ?', [
+      trainingId,
+      monthStart,
+      monthEnd,
+    ]);
+    const dates = [
+      ...new Set([
+        ...dateRows.map((r) => formatDateOnly(r.session_date)),
+        ...overrides.filter((o) => o.kind === 'extra').map((o) => formatDateOnly(o.session_date)),
+      ]),
+    ]
+      .filter((d) => inMonth(d) && !cancelled.has(d))
+      .sort();
+    const meta = await this._buildSessionMeta(trainingId, dates, clubId);
+
+    const [attRows] = memberIds.length
+      ? await pool.query(
+          `SELECT member_id, session_date, status, exempt_type, exempt_reason FROM training_attendances
+           WHERE training_id = ? AND member_id IN (?) AND session_date BETWEEN ? AND ?`,
+          [trainingId, memberIds, monthStart, monthEnd]
+        )
+      : [[]];
+
+    const toMinutes = (t) => (t ? Number(String(t).slice(0, 2)) * 60 + Number(String(t).slice(3, 5)) : null);
+    const emptyCounts = () => ({ attended: 0, absent: 0, frozen: 0, notApplicable: 0, pending: 0 });
+    const bump = (counts, r) => {
+      if (r.status === 'exempt') counts[r.exempt_type === 'not_applicable' ? 'notApplicable' : 'frozen'] += 1;
+      else counts[r.status] += 1;
+    };
+    const pctOf = (c) => (c.attended + c.absent ? Math.round((c.attended / (c.attended + c.absent)) * 100) : null);
+
+    const bySession = new Map(dates.map((d) => [d, emptyCounts()]));
+    const byMember = new Map();
+    for (const r of attRows) {
+      // Quien no estaba en el club ese día no cuenta para nada.
+      if (r.status === 'exempt' && COVERAGE_REASONS.includes(r.exempt_reason)) continue;
+      const d = formatDateOnly(r.session_date);
+      if (!bySession.has(d)) continue;
+      bump(bySession.get(d), r);
+      if (d <= today) {
+        if (!byMember.has(r.member_id)) byMember.set(r.member_id, emptyCounts());
+        bump(byMember.get(r.member_id), r);
+      }
+    }
+
+    const sessions = dates.map((d) => {
+      const m = meta[d];
+      const start = toMinutes(m.startTime);
+      const end = toMinutes(m.endTime);
+      const counts = bySession.get(d);
+      return {
+        date: d,
+        kind: m.kind,
+        startTime: m.startTime ? String(m.startTime).slice(0, 5) : null,
+        endTime: m.endTime ? String(m.endTime).slice(0, 5) : null,
+        minutes: start !== null && end !== null && end > start ? end - start : null,
+        note: m.note,
+        recovers: m.recovers,
+        coaches: m.coaches,
+        held: d <= today,
+        counts,
+        pct: pctOf(counts),
+      };
+    });
+    const held = sessions.filter((s) => s.held);
+
+    const totals = emptyCounts();
+    for (const s of held) for (const k of Object.keys(totals)) totals[k] += s.counts[k];
+
+    const heldMinutes = held.reduce((sum, s) => sum + (s.minutes ?? 0), 0);
+
+    // Horas por entrenador (según quién entrenó cada día) y las de días sin entrenador. Los
+    // responsables actuales salen aunque no sumen horas este mes.
+    const coachBuckets = new Map(responsibles.map((r) => [r.memberId, { memberId: r.memberId, memberName: r.memberName, groupName: r.groupName ?? null, isResponsible: true, sessions: 0, minutes: 0 }]));
+    const noCoach = { sessions: 0, minutes: 0 };
+    for (const s of held) {
+      if (!s.coaches.length) {
+        noCoach.sessions += 1;
+        noCoach.minutes += s.minutes ?? 0;
+        continue;
+      }
+      for (const c of s.coaches) {
+        if (!coachBuckets.has(c.memberId)) coachBuckets.set(c.memberId, { memberId: c.memberId, memberName: c.memberName, groupName: null, isResponsible: false, sessions: 0, minutes: 0 });
+        const bucket = coachBuckets.get(c.memberId);
+        bucket.sessions += 1;
+        bucket.minutes += s.minutes ?? 0;
+      }
+    }
+    const plannedMinutes = sessions.reduce((sum, s) => sum + (s.minutes ?? 0), 0);
+
+    const suspended = overrides
+      .filter((o) => o.kind === 'cancelled' && inMonth(formatDateOnly(o.session_date)))
+      .map((o) => {
+        const date = formatDateOnly(o.session_date);
+        return { date, note: o.note, wasExtra: !!o.was_extra, recoveredBy: recoveredBy.get(date) ?? null };
+      });
+    const extras = sessions.filter((s) => s.kind === 'extra');
+
+    const names = await membersRepository.findNamesByIds([...byMember.keys()], clubId, undefined, { includeDeleted: true });
+    const members = names
+      .map((n) => {
+        const counts = byMember.get(n.id);
+        return {
+          memberId: n.id,
+          memberName: this._shortName(n),
+          memberAvatarUrl: n.avatar_url ? toAbsoluteMediaUrl(n.avatar_url) : null,
+          inactive: n.status === 'inactive',
+          counts,
+          pct: pctOf(counts),
+        };
+      })
+      .sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1) || a.memberName.localeCompare(b.memberName));
+
+    return {
+      training: {
+        id: training.id,
+        name: training.name,
+        color: training.color,
+        status: training.status,
+        startDate: formatDateOnly(training.start_date),
+        endDate,
+        schedules: schedules.map((s) => ({ dayOfWeek: s.dayOfWeek, startTime: String(s.startTime).slice(0, 5), endTime: s.endTime ? String(s.endTime).slice(0, 5) : null })),
+      },
+      months,
+      month: selected,
+      today,
+      totals: {
+        sessionsPlanned: sessions.length,
+        sessionsHeld: held.length,
+        sessionsUpcoming: sessions.length - held.length,
+        heldMinutes,
+        plannedMinutes,
+        sessionsWithoutTime: held.filter((s) => s.minutes === null).length,
+        attendance: totals,
+        pct: pctOf(totals),
+        suspended: suspended.length,
+        suspendedRecovered: suspended.filter((s) => s.recoveredBy).length,
+        recoveryDays: extras.filter((s) => s.recovers).length,
+        newDays: extras.filter((s) => !s.recovers).length,
+      },
+      coaches: [...coachBuckets.values()].sort((a, b) => b.minutes - a.minutes || a.memberName.localeCompare(b.memberName)),
+      noCoach,
+      sessions,
+      suspended,
+      members,
+    };
   }
 
   // --- Ficha de un miembro (pestañas por entrenamiento) ---

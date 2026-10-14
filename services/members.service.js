@@ -736,7 +736,18 @@ class MembersService {
 
   /** Adjunta un archivo a un campo de tipo "archivos" de la ficha. */
   async addDocument(clubId, memberId, fieldId, file, name, actorId, authContext) {
-    await this._getAccessibleMember(clubId, memberId, actorId, authContext);
+    try {
+      await this._getAccessibleMember(clubId, memberId, actorId, authContext);
+    } catch (error) {
+      if (file) deletePrivateFile(`member-documents/${file.filename}`);
+      throw error;
+    }
+    return this.storeDocument(clubId, memberId, Number(fieldId), file, name, actorId);
+  }
+
+  /** Guarda el archivo en el campo (sin revisar acceso: lo revisa quien llama — la ficha interna o
+   * "Mi ficha"). `action`: acción de auditoría. */
+  async storeDocument(clubId, memberId, fieldId, file, name, actorId, action = 'MEMBER_UPDATED') {
     let field;
     try {
       field = await this._uploadField(clubId, Number(fieldId), 'file');
@@ -763,7 +774,7 @@ class MembersService {
       sizeBytes: file.size,
       uploadedBy: actorId,
     });
-    await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_UPDATED', entityType: 'member', entityId: memberId, changes: { document: { from: null, to: name || file.originalname } } });
+    await auditRepository.logAction({ userId: actorId, clubId, action, entityType: 'member', entityId: memberId, changes: { document: { from: null, to: name || file.originalname } } });
     return this._documentDto(await membersRepository.findDocument(id));
   }
 

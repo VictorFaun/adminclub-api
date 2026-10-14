@@ -54,6 +54,15 @@ router.put(
   handleValidation,
   controller.markSession
 );
+// Resumen de un mes: sesiones, suspendidos/recuperados, días extra, horas y asistencia por miembro.
+router.get(
+  '/trainings/:trainingId/summary',
+  requireFunctionOrResponsibleTraining(FUNCTIONS.VIEW_ATTENDANCE, FUNCTIONS.VIEW_ATTENDANCE_SCOPED),
+  validation.trainingSummary,
+  handleValidation,
+  controller.trainingSummary
+);
+
 // % de asistencia y faltas seguidas de los últimos 60 días, por miembro.
 router.get(
   '/trainings/:trainingId/stats',
@@ -74,6 +83,15 @@ router.get(
   validation.trainingIdParam,
   handleValidation,
   controller.cancelledSessions
+);
+
+// Miembros que se pueden elegir como entrenador de un día (mismos permisos que editar el día).
+router.get(
+  '/trainings/:trainingId/coach-options',
+  requireFunctionOrResponsibleTraining(...MANAGE_SESSIONS),
+  validation.trainingIdParam,
+  handleValidation,
+  controller.coachOptions
 );
 router.post(
   '/trainings/:trainingId/sessions',

@@ -120,8 +120,8 @@ function normalizeSettings(fieldType, raw, role = null) {
   if (FIELD_WIDTHS.includes(s.width) && fieldType !== 'section') out.width = s.width;
   // Sensible: solo lo ven/editan quienes tienen VIEW_SENSITIVE_MEMBER_FIELDS.
   if (s.sensitive && fieldType !== 'section') out.sensitive = true;
-  // Editable por el propio socio desde "Mi club" (nunca el identificador, los sensibles ni los archivos).
-  if (s.selfEditable && !LAYOUT_TYPES.includes(fieldType) && fieldType !== 'file' && role !== 'identifier' && !out.sensitive) out.selfEditable = true;
+  // Editable por el propio socio desde "Mi club" (nunca el identificador ni los sensibles; fotos y archivos sí).
+  if (s.selfEditable && !LAYOUT_TYPES.includes(fieldType) && role !== 'identifier' && !out.sensitive) out.selfEditable = true;
   // Condición para mostrarlo (en una sección, vale para todos sus campos).
   const condition = normalizeCondition(s.condition);
   if (condition) out.condition = condition;

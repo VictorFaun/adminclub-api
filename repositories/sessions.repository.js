@@ -45,6 +45,19 @@ class SessionsRepository {
     return rows[0] || null;
   }
 
+  /** Token rotado hace muy poco (tiene reemplazo, no fue un logout): se acepta igual dentro de un
+   * margen corto. Cubre la carrera de recargar la página (u otra pestaña) mientras un refresh
+   * anterior ya había rotado el token pero su respuesta (con la cookie nueva) no alcanzó a llegar. */
+  async findRecentlyRotatedByHash(tokenHash, graceSeconds, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT * FROM refresh_tokens
+       WHERE token_hash = ? AND revoked_at IS NOT NULL AND replaced_by_token_hash IS NOT NULL
+         AND revoked_at > (NOW() - INTERVAL ? SECOND) AND expires_at > NOW() LIMIT 1`,
+      [tokenHash, graceSeconds]
+    );
+    return rows[0] || null;
+  }
+
   async revokeByHash(tokenHash, replacedByHash = null, conn = pool) {
     await conn.query('UPDATE refresh_tokens SET revoked_at = NOW(), replaced_by_token_hash = ? WHERE token_hash = ?', [
       replacedByHash,

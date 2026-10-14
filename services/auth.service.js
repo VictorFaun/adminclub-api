@@ -27,6 +27,8 @@ const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const { USER_STATUS, TOKEN_TYPE, GLOBAL_ROLES } = require('../config/constants');
 /** Misma clave que memberApplications.service.js#PUBLIC_FORM_KEY (club_settings). */
 const PUBLIC_MEMBER_FORM_KEY = 'public_member_form_enabled';
+/** Margen para aceptar un refresh token recién rotado (ver sessions.repository.js#findRecentlyRotatedByHash). */
+const REFRESH_GRACE_SECONDS = 30;
 const { OAuth2Client } = require('google-auth-library');
 
 /**
@@ -345,21 +347,29 @@ class AuthService {
     }
 
     const tokenHash = hashToken(refreshToken);
-    const stored = await sessionsRepository.findValidByHash(tokenHash);
+    const stored = (await sessionsRepository.findValidByHash(tokenHash)) || (await sessionsRepository.findRecentlyRotatedByHash(tokenHash, REFRESH_GRACE_SECONDS));
     if (!stored) throw AppError.unauthorized('La sesión ha expirado o ya fue cerrada.');
 
     const user = await usersRepository.findById(payload.sub);
     if (!user || user.status !== USER_STATUS.ACTIVE) throw AppError.unauthorized('Usuario no válido.');
 
-    const { accessToken, refreshToken: newRefreshToken } = await withTransaction(async (conn) => {
-      const pair = await this._issueTokenPair(
-        { userId: user.id, sessionId: stored.session_id, ipAddress, userAgent },
-        conn
-      );
-      await sessionsRepository.revokeByHash(tokenHash, hashToken(pair.refreshToken), conn);
-      if (stored.session_id) await sessionsRepository.touch(stored.session_id, conn);
-      return pair;
-    });
+    const rotate = () =>
+      withTransaction(async (conn) => {
+        const pair = await this._issueTokenPair({ userId: user.id, sessionId: stored.session_id, ipAddress, userAgent }, conn);
+        await sessionsRepository.revokeByHash(tokenHash, hashToken(pair.refreshToken), conn);
+        if (stored.session_id) await sessionsRepository.touch(stored.session_id, conn);
+        return pair;
+      });
+    let pair;
+    try {
+      pair = await rotate();
+    } catch (error) {
+      // Dos refresh simultáneos con el mismo token (dos pestañas) pueden chocar en un deadlock de
+      // MySQL al revocar la misma fila: se reintenta una vez (la transacción perdedora ya se deshizo).
+      if (error.code !== 'ER_LOCK_DEADLOCK') throw error;
+      pair = await rotate();
+    }
+    const { accessToken, refreshToken: newRefreshToken } = pair;
 
     return { accessToken, refreshToken: newRefreshToken, user: this.sanitizeUser(user) };
   }

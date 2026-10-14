@@ -1,3 +1,4 @@
+const { pool } = require('../config/database');
 const invitationsRepository = require('../repositories/invitations.repository');
 const rolesRepository = require('../repositories/roles.repository');
 const auditRepository = require('../repositories/audit.repository');
@@ -74,6 +75,18 @@ class InvitationsService {
       note: note || null,
       status,
     });
+
+    // Si deja de exigir ficha, quienes ya entraron con este código y aún no la completaron dejan
+    // de tenerla pendiente (la marca se guarda en su membresía al unirse, ver clubEntry.service.js).
+    if (invitation.requires_member_profile && !requiresMemberProfile) {
+      await pool.query(
+        `UPDATE user_clubs uc
+         INNER JOIN invitation_uses iu ON iu.user_id = uc.user_id AND iu.invitation_id = ?
+         SET uc.requires_profile_completion = 0
+         WHERE uc.club_id = ? AND uc.requires_profile_completion = 1`,
+        [invitationId, clubId]
+      );
+    }
 
     await auditRepository.logAction({
       userId: actorId,

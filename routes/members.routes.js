@@ -135,4 +135,11 @@ router.put(
   controller.linkUser
 );
 
+// Apoderados de la ficha (cuentas del club que la ven en "Mi club"; ver selfService.service.js).
+const guardians = require('../controllers/guardians.controller');
+const meValidation = require('../validations/me.validation');
+router.get('/:id/guardians', requireFunction(FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED), meValidation.guardianParams, handleValidation, guardians.list);
+router.post('/:id/guardians', requireFunction(FUNCTIONS.LINK_MEMBER_USER), sanitizeBody, meValidation.addGuardian, handleValidation, guardians.add);
+router.delete('/:id/guardians/:userId', requireFunction(FUNCTIONS.LINK_MEMBER_USER), meValidation.removeGuardian, handleValidation, guardians.remove);
+
 module.exports = router;

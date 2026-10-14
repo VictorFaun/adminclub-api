@@ -39,6 +39,8 @@ class UsersService {
         // El listado es "por club": el estado que se muestra (y que el botón
         // suspender/reactivar controla) es la membresía, no la cuenta global.
         status: r.membership_status || r.status,
+        // Desde cuándo está en ESTE club (la tarjeta de la vista Usuarios lo muestra).
+        joinedAt: r.membership_joined_at || null,
         roles: rolesByUser[r.id] || [],
       })),
       meta: buildMeta({ page, limit, total }),
@@ -127,7 +129,7 @@ class UsersService {
    * ficha de miembro: 'keep' (queda como está), 'deactivate' (pasa a inactivo/archivado: se le
    * saltan cobros y asistencias hasta reactivarlo) o 'delete' (se elimina la ficha).
    */
-  async removeFromClub(userId, clubId, actorId, memberAction = 'keep') {
+  async removeFromClub(userId, clubId, actorId, memberAction = 'keep', statusDate = null) {
     if (userId === actorId) throw AppError.badRequest('No puedes retirarte a ti mismo del club.');
     const membership = await usersRepository.findMembership(userId, clubId);
     if (!membership) throw AppError.notFound('El usuario no pertenece a este club.');
@@ -144,7 +146,7 @@ class UsersService {
       await conn.query('UPDATE users SET default_club_id = NULL WHERE id = ? AND default_club_id = ?', [userId, clubId]);
 
       if (member && memberAction === 'deactivate') {
-        await membersService.applyStatus(member, 'inactive', actorId, conn);
+        await membersService.applyStatus(member, 'inactive', actorId, conn, statusDate);
       } else if (member && memberAction === 'delete') {
         await membersRepository.softDelete(member.id, conn);
         // Se desvincula para no bloquear uk_members_club_user si la persona vuelve a unirse.

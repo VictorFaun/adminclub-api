@@ -35,9 +35,9 @@ const F = FUNCTIONS;
 const BASE = [F.VIEW_DASHBOARD, F.VIEW_CLUB, F.VIEW_NOTIFICATIONS];
 
 /**
- * Roles sugeridos (no de sistema): se crean con cada club nuevo para que pueda invitar a su
- * directiva de inmediato, y se pueden agregar a un club existente desde Roles ("Agregar roles
- * sugeridos"). El club los edita o borra como cualquier otro rol.
+ * Roles sugeridos (no de sistema): NO se crean con el club (un club nuevo trae solo
+ * "Administrador"); se agregan cuando el club quiera desde Roles ("Agregar roles sugeridos").
+ * El club los edita o borra como cualquier otro rol.
  */
 const SUGGESTED_CLUB_ROLES = [
   {
@@ -91,6 +91,5 @@ module.exports = [
     isSystem: true,
     functionCodes: ALL_CLUB_FUNCTIONS,
   },
-  ...SUGGESTED_CLUB_ROLES,
 ];
 module.exports.SUGGESTED_CLUB_ROLES = SUGGESTED_CLUB_ROLES;

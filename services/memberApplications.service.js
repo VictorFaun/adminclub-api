@@ -22,6 +22,8 @@ const { CLUB_STATUS, FUNCTIONS } = require('../config/constants');
 const PUBLIC_FORM_KEY = 'public_member_form_enabled';
 /** Categorías (grupos) que se ofrecen en el formulario: { mode: 'off'|'optional'|'required', groupIds }. */
 const PUBLIC_GROUPS_KEY = 'public_member_form_groups';
+/** Pedir (o no) el "Mensaje para el club" en el formulario. Sin valor guardado = sí (como siempre). */
+const PUBLIC_MESSAGE_KEY = 'public_member_form_ask_message';
 const DUPLICATE_MESSAGE = 'Ya tenemos una ficha o una solicitud con estos datos. Si crees que es un error, contacta directamente al club.';
 
 /**
@@ -51,13 +53,19 @@ class MemberApplicationsService {
     return { mode, groupIds };
   }
 
-  async getSetting(clubId) {
-    return { enabled: await this.isEnabled(clubId), groups: await this._groupsSetting(clubId) };
+  async _askMessage(clubId) {
+    const settings = await settingsRepository.findAllByClub(clubId);
+    return settings[PUBLIC_MESSAGE_KEY] !== '0';
   }
 
-  async setSetting(clubId, { enabled, groups } = {}, actorId) {
+  async getSetting(clubId) {
+    return { enabled: await this.isEnabled(clubId), groups: await this._groupsSetting(clubId), askMessage: await this._askMessage(clubId) };
+  }
+
+  async setSetting(clubId, { enabled, groups, askMessage } = {}, actorId) {
     const updates = {};
     if (enabled !== undefined) updates[PUBLIC_FORM_KEY] = enabled ? '1' : '0';
+    if (askMessage !== undefined) updates[PUBLIC_MESSAGE_KEY] = askMessage ? '1' : '0';
     if (groups && typeof groups === 'object') {
       const mode = ['off', 'optional', 'required'].includes(groups.mode) ? groups.mode : 'off';
       const ids = Array.isArray(groups.groupIds) ? groups.groupIds.map(Number).filter(Boolean) : [];
@@ -66,7 +74,7 @@ class MemberApplicationsService {
       updates[PUBLIC_GROUPS_KEY] = JSON.stringify({ mode, groupIds: valid });
     }
     if (Object.keys(updates).length) await settingsRepository.upsertMany(clubId, updates);
-    await auditRepository.logAction({ userId: actorId, clubId, action: 'PUBLIC_MEMBER_FORM_UPDATED', entityType: 'club_settings', entityId: clubId, changes: { enabled, groups } });
+    await auditRepository.logAction({ userId: actorId, clubId, action: 'PUBLIC_MEMBER_FORM_UPDATED', entityType: 'club_settings', entityId: clubId, changes: { enabled, groups, askMessage } });
     return this.getSetting(clubId);
   }
 
@@ -112,6 +120,7 @@ class MemberApplicationsService {
       fields: await this._publicFields(club.id),
       // Categoría a la que postula (si el club la pide): opcional u obligatoria.
       groupChoice: await this._offeredGroups(club.id),
+      askMessage: await this._askMessage(club.id),
     };
   }
 
@@ -160,7 +169,8 @@ class MemberApplicationsService {
       const groupId = body.groupId ? Number(body.groupId) : null;
       if (choice.mode === 'required' && !groupId) throw AppError.badRequest('Elige la categoría a la que postulas.');
       if (groupId && !choice.groups.some((g) => g.id === groupId)) throw AppError.badRequest('La categoría elegida no está disponible.');
-      const message = body.message ? String(body.message).trim().slice(0, 500) || null : null;
+      // Si el club no pide mensaje, se ignora aunque venga.
+      const message = body.message && (await this._askMessage(club.id)) ? String(body.message).trim().slice(0, 500) || null : null;
       id = await memberApplicationsRepository.create({ clubId: club.id, fields, message, groupId: groupId || null });
       for (const { field, files: list } of uploads) await memberApplicationsRepository.addFiles(id, field.id, list);
     } catch (error) {

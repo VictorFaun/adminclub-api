@@ -29,7 +29,10 @@ const updateRemindersSettings = asyncHandler(async (req, res) => {
 });
 
 const sendReminders = asyncHandler(async (req, res) => {
-  const data = await debtRemindersService.send(req.club.id, req.user.id, req.body?.chargeId ? Number(req.body.chargeId) : null);
+  const data = await debtRemindersService.send(req.club.id, req.user.id, req.body?.chargeId ? Number(req.body.chargeId) : null, {
+    memberIds: Array.isArray(req.body?.memberIds) ? req.body.memberIds.map(Number) : null,
+    note: req.body?.note || null,
+  });
   return ApiResponse.ok(res, data, `Se enviaron ${data.sent} recordatorios.`);
 });
 
@@ -120,6 +123,11 @@ const unexemptInstance = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, null, 'Exención eliminada correctamente.');
 });
 
+const overrideInstanceAmount = asyncHandler(async (req, res) => {
+  const cell = await paymentsService.overrideInstanceAmount(req.club.id, Number(req.params.instanceId), req.body.amount, req.user.id, req.authContext);
+  return ApiResponse.ok(res, cell, 'Monto del período actualizado correctamente.');
+});
+
 const exemptMany = asyncHandler(async (req, res) => {
   const result = await paymentsService.exemptMany(
     req.club.id,
@@ -174,6 +182,7 @@ module.exports = {
   update,
   remove,
   exemptInstance,
+  overrideInstanceAmount,
   unexemptInstance,
   exemptMany,
   listSettlements,

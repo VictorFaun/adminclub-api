@@ -13,7 +13,7 @@ const applicationId = [param('id').isInt({ min: 1 }).withMessage('Identificador 
 
 // Formulario público de inscripción: activar/desactivar (Configuración → Ficha).
 router.get('/settings', requireFunction(FUNCTIONS.VIEW_MEMBER_FIELDS), controller.getSetting);
-router.put('/settings', requireFunction(FUNCTIONS.EDIT_MEMBER_FIELDS), sanitizeBody, [body('enabled').optional().isBoolean().toBoolean(), body('groups').optional().isObject(), body('groups.mode').optional().isIn(['off', 'optional', 'required']), body('groups.groupIds').optional().isArray()], handleValidation, controller.updateSetting);
+router.put('/settings', requireFunction(FUNCTIONS.EDIT_MEMBER_FIELDS), sanitizeBody, [body('enabled').optional().isBoolean().toBoolean(), body('askMessage').optional().isBoolean().toBoolean(), body('groups').optional().isObject(), body('groups.mode').optional().isIn(['off', 'optional', 'required']), body('groups.groupIds').optional().isArray()], handleValidation, controller.updateSetting);
 
 router.get('/', requireFunction(FUNCTIONS.VIEW_MEMBERS), [query('status').optional().isIn(['pending', 'approved', 'rejected'])], handleValidation, controller.list);
 router.get(

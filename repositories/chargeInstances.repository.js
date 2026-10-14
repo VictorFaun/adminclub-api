@@ -59,7 +59,7 @@ class ChargeInstancesRepository extends BaseRepository {
    * pendiente si ahora le corresponden). Ver members.service.js#syncCoverage. */
   async findCoverageCandidates(memberId, reasons, conn = pool) {
     const [rows] = await conn.query(
-      `SELECT ci.id, ci.charge_id, ci.period_label, ci.due_date, ci.status, ci.exempt_reason, ci.amount, c.recurrence, c.club_id, c.amount AS charge_amount
+      `SELECT ci.id, ci.charge_id, ci.period_label, ci.due_date, ci.status, ci.exempt_reason, ci.amount, ci.amount_overridden_at, c.recurrence, c.club_id, c.amount AS charge_amount
        FROM charge_instances ci
        INNER JOIN charges c ON c.id = ci.charge_id
        WHERE ci.member_id = ?
@@ -177,10 +177,16 @@ class ChargeInstancesRepository extends BaseRepository {
     await conn.query('UPDATE charge_instances SET amount = ? WHERE id = ?', [amount, id]);
   }
 
+  /** Monto puesto a mano para UN período (EDIT_PAYMENT_AMOUNT) — queda marcado para que
+   * updateAmountForMember y el prorrateo de members.service.js#syncCoverage no lo pisen. */
+  async overrideAmount(id, amount, actorId, conn = pool) {
+    await conn.query('UPDATE charge_instances SET amount = ?, amount_overridden_by = ?, amount_overridden_at = NOW() WHERE id = ?', [amount, actorId, id]);
+  }
+
   async updateAmountForMember(chargeId, memberId, amount, fromDate, conn = pool) {
     const [result] = await conn.query(
       `UPDATE charge_instances SET amount = ?
-       WHERE charge_id = ? AND member_id = ? AND due_date >= ? AND status = 'pending'`,
+       WHERE charge_id = ? AND member_id = ? AND due_date >= ? AND status = 'pending' AND amount_overridden_at IS NULL`,
       [amount, chargeId, memberId, fromDate]
     );
     return result.affectedRows;

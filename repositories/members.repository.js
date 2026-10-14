@@ -237,15 +237,16 @@ class MembersRepository extends BaseRepository {
     return rows.map((r) => r.id);
   }
 
-  async findNamesByIds(ids, clubId, conn = pool) {
+  /** `includeDeleted`: también los eliminados (la matriz de un cobro los muestra si tienen pagos). */
+  async findNamesByIds(ids, clubId, conn = pool, { includeDeleted = false } = {}) {
     if (!ids.length) return [];
     const [rows] = await conn.query(
-      `SELECT m.id, mp.first_name, mp.middle_name, mp.last_name, mp.second_last_name, mp.avatar_url, m.status, m.deactivated_at,
+      `SELECT m.id, mp.first_name, mp.middle_name, mp.last_name, mp.second_last_name, mp.avatar_url, m.status, m.deactivated_at, m.deleted_at,
               GROUP_CONCAT(DISTINCT mgm.group_id) AS group_ids
        FROM members m
        ${profileJoin()}
        LEFT JOIN member_group_members mgm ON mgm.member_id = m.id
-       WHERE m.id IN (?) AND m.club_id = ? AND m.deleted_at IS NULL
+       WHERE m.id IN (?) AND m.club_id = ? ${includeDeleted ? '' : 'AND m.deleted_at IS NULL'}
        GROUP BY m.id ORDER BY mp.first_name ASC, mp.last_name ASC`,
       [ids, clubId]
     );

@@ -12,13 +12,11 @@ class ClubUserInvitationsRepository extends BaseRepository {
     return rows[0] || null;
   }
 
-  async create({ clubId, userId, invitedBy, message, roleIds }, conn = pool) {
-    const [result] = await conn.query('INSERT INTO club_user_invitations (club_id, user_id, invited_by, message) VALUES (?, ?, ?, ?)', [
-      clubId,
-      userId,
-      invitedBy,
-      message,
-    ]);
+  async create({ clubId, userId, invitedBy, message, roleIds, memberId = null, guardianOf = [], guardianRelation = null }, conn = pool) {
+    const [result] = await conn.query(
+      'INSERT INTO club_user_invitations (club_id, user_id, member_id, guardian_member_ids, guardian_relation, invited_by, message) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [clubId, userId, memberId, guardianOf.length ? JSON.stringify(guardianOf) : null, guardianRelation, invitedBy, message]
+    );
     if (roleIds.length) {
       await conn.query('INSERT INTO club_user_invitation_roles (invitation_id, role_id) VALUES ?', [roleIds.map((roleId) => [result.insertId, roleId])]);
     }

@@ -18,6 +18,9 @@ const { normalizeIdentifier } = require('../helpers/memberFieldTypes');
 const { parseAccount, treasuryAccountToDto } = require('../helpers/paymentAccount');
 const { withTransaction } = require('../config/database');
 const { randomUUID } = require('crypto');
+const memberGuardiansRepository = require('../repositories/memberGuardians.repository');
+const notificationsService = require('./notifications.service');
+const logger = require('../helpers/logger');
 
 const MAX_PENDING_PER_INSTANCE = 3;
 /** Tope de períodos en un mismo comprobante (pago múltiple). */
@@ -26,6 +29,14 @@ const PUBLIC_PAYMENTS_KEY = 'public_payments_enabled';
 /** Un período pendiente que vence en más de estos días (y no está atrasado) todavía no se ofrece
  * como "por pagar" en la lista principal. */
 const DUE_SOON_DAYS = 45;
+
+const MONTHS = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+/** "2026-03" → "marzo 2026"; "unico" → "pago único" (mismo texto que debtReminders.service.js). */
+const periodText = (label) => {
+  if (label === 'unico') return 'pago único';
+  const m = /^(\d{4})-(\d{2})$/.exec(label || '');
+  return m ? `${MONTHS[Number(m[2]) - 1]} ${m[1]}` : label;
+};
 
 const toDateOnly = (value) => new Date(value).toISOString().slice(0, 10);
 
@@ -148,7 +159,12 @@ class PaymentProofsService {
     const club = await this._publicClub(code);
     const member = await this._findByIdentifier(club.id, rut);
     if (!member) return { found: false };
+    return { found: true, memberFirstName: member.first_name || '', ...(await this.payableForMember(member)) };
+  }
 
+  /** Lo que un miembro puede pagar ahora (atrasados, próximos, adelantos) con sus destinos. Sin
+   * revisar acceso: lo usan la página pública (por RUT) y "Mi club" (fichas propias). */
+  async payableForMember(member) {
     const today = toDateOnly(new Date());
     const limit = toDateOnly(new Date(Date.now() + DUE_SOON_DAYS * 86400000));
     // Períodos atrasados que nunca se generaron (cobro con inicio en el pasado): se crean para
@@ -182,7 +198,7 @@ class PaymentProofsService {
       item.destinations = await this._destinationsFor(item.chargeId, member.id, ctx);
     }
 
-    return { found: true, memberFirstName: member.first_name || '', items, recurring };
+    return { items, recurring };
   }
 
   /**
@@ -190,12 +206,24 @@ class PaymentProofsService {
    * (`amount` ≤ saldo); con varios NO: cada período se reporta por su saldo completo y `amount` se
    * ignora. Se crea una fila por período, todas con el mismo `batch_uuid` y el mismo archivo.
    */
-  async submitPublicProof(code, { rut, chargeInstanceId, chargeInstanceIds, amount, paidAt, note, destination }, file) {
-    const discard = () => file && deletePrivateFile(`payment-proofs/${file.filename}`);
+  async submitPublicProof(code, { rut, ...data }, file) {
+    let member;
     try {
       const club = await this._publicClub(code);
-      const member = await this._findByIdentifier(club.id, rut);
+      member = await this._findByIdentifier(club.id, rut);
       if (!member) throw AppError.notFound('No encontramos información para ese RUT.');
+    } catch (error) {
+      if (file) deletePrivateFile(`payment-proofs/${file.filename}`);
+      throw error;
+    }
+    return this.submitProofForMember(member, data, file);
+  }
+
+  /** Crea el comprobante de un miembro ya identificado (página pública por RUT o "Mi club").
+   * `submittedBy`: cuenta que lo subió desde la app (`null` = página pública, sin sesión). */
+  async submitProofForMember(member, { chargeInstanceId, chargeInstanceIds, amount, paidAt, note, destination }, file, submittedBy = null) {
+    const discard = () => file && deletePrivateFile(`payment-proofs/${file.filename}`);
+    try {
       if (!file) throw AppError.badRequest('Adjunta el comprobante de pago (imagen o PDF).');
 
       const ids = parseInstanceIds(chargeInstanceIds ?? chargeInstanceId);
@@ -268,7 +296,7 @@ class PaymentProofsService {
         return created;
       });
       await auditRepository.logAction({
-        userId: null,
+        userId: submittedBy,
         clubId: member.club_id,
         action: 'PAYMENT_PROOF_SUBMITTED',
         entityType: 'payment_proof',
@@ -423,6 +451,7 @@ class PaymentProofsService {
     }
     // El recibo le llega al miembro por correo (si tiene uno en su ficha).
     if (paymentIds.length) receiptsService.emailToMember(clubId, paymentIds);
+    this._notifyReviewed(clubId, proof.member_id, batch, 'approved');
     return { paymentId: paymentIds[0], paymentIds };
   }
 
@@ -434,6 +463,28 @@ class PaymentProofsService {
       await paymentProofsRepository.markReviewed(p.id, { status: 'rejected', reviewedBy: actorId, reviewNote });
       await auditRepository.logAction({ userId: actorId, clubId, action: 'PAYMENT_PROOF_REJECTED', entityType: 'payment_proof', entityId: p.id, changes: { batchUuid: p.batch_uuid, ...(reason ? { reason } : {}) } });
     }
+    this._notifyReviewed(clubId, proof.member_id, batch, 'rejected', reviewNote);
+  }
+
+  /** Aviso a la cuenta titular y a los apoderados de la ficha (mejor esfuerzo, sin await). */
+  _notifyReviewed(clubId, memberId, batch, status, reason = null) {
+    (async () => {
+      const userIds = await memberGuardiansRepository.findUserIdsForMember(memberId);
+      if (!userIds.length) return;
+      const total = batch.reduce((s, p) => s + Number(p.amount), 0);
+      const amount = `$${Math.round(total).toLocaleString('es-CL')}`;
+      const periods = batch.map((p) => periodText(p.period_label)).join(', ');
+      for (const userId of userIds) {
+        await notificationsService.notifyUser({
+          userId,
+          clubId,
+          type: status === 'approved' ? 'success' : 'warning',
+          title: status === 'approved' ? `Comprobante aprobado (${amount})` : 'Comprobante rechazado',
+          message: status === 'approved' ? `Se registró el pago de ${periods}.` : `El comprobante de ${periods} fue rechazado${reason ? `: ${reason}` : '.'}`,
+          link: `/my/payments?member=${memberId}`,
+        });
+      }
+    })().catch((error) => logger.error(`[proofs] aviso de revisión: ${error.message}`));
   }
 
   async getFile(clubId, proofId, actorId, authContext) {

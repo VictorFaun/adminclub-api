@@ -24,6 +24,14 @@ const toDateOnly = (value) => {
   const d = new Date(value);
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 };
+/** Fecha de HOY (local del servidor, igual que CURDATE() de MySQL) como "YYYY-MM-DD". */
+const todayLocal = () => {
+  const t = new Date();
+  return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`;
+};
+/** Vencido = su fecha de vencimiento ya pasó: "vence el 10" se puede pagar hasta el 10 inclusive y
+ * queda atrasado desde el 11. Mismo criterio que las consultas SQL (`due_date < CURDATE()`). */
+const isPastDue = (dueDate) => !!dueDate && toDateOnly(dueDate) < todayLocal();
 const lastDayOfMonth = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
 
 /** Rango [desde, hasta] (YYYY-MM-DD) que abarca un período de cobro. */
@@ -151,6 +159,8 @@ function proratedAmount(amount, intervals, recurrence, periodKey, policy) {
 }
 
 module.exports = {
+  isPastDue,
+  todayLocal,
   DEFAULT_MONTH_POLICY,
   MONTH_POLICY_OPTIONS,
   normalizeMonthPolicy,

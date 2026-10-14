@@ -52,6 +52,19 @@ const exemptInstance = [
   body('type').optional().isIn(['frozen', 'not_applicable']).withMessage('Tipo de exención inválido.'),
 ];
 
+// Envío manual de recordatorios de deuda: a quiénes (por defecto, todos) y un mensaje opcional.
+const sendReminders = [
+  body('chargeId').optional({ nullable: true }).isInt({ min: 1 }),
+  body('memberIds').optional({ nullable: true }).isArray({ max: 500 }),
+  body('memberIds.*').isInt({ min: 1 }).withMessage('Miembro inválido.'),
+  body('note').optional({ nullable: true }).isString().trim().isLength({ max: 500 }).withMessage('El mensaje admite hasta 500 caracteres.'),
+];
+
+const overrideInstanceAmount = [
+  ...instanceIdParam,
+  body('amount').isFloat({ min: 0.01 }).withMessage('El monto debe ser mayor a cero.'),
+];
+
 const exemptMany = [
   body('instanceIds').isArray({ min: 1, max: 60 }).withMessage('Debes seleccionar al menos un período.'),
   body('instanceIds.*').isInt({ min: 1 }).withMessage('Identificador de período inválido.'),
@@ -97,6 +110,8 @@ module.exports = {
   createPayment,
   updatePayment,
   exemptInstance,
+  overrideInstanceAmount,
+  sendReminders,
   exemptMany,
   listSettlements,
   createSettlement,

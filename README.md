@@ -216,6 +216,30 @@ El recordatorio lo envía `cron/calendarReminders.cron.js` (cada minuto) a quien
 |---|---|---|
 | `GET /settings` | Obtiene la configuración clave/valor del club activo | `MANAGE_SETTINGS` |
 | `PUT /settings` | Actualiza la configuración clave/valor del club activo | `MANAGE_SETTINGS` |
+| `GET /settings/self-service` | Interruptores de "Mi club": `enabled`, `payments`, `payProof`, `attendance`, `profileEdit`, `guardiansInvite` | `MANAGE_SETTINGS` |
+| `PUT /settings/self-service` | Cambia uno o más interruptores de "Mi club" | `MANAGE_SETTINGS` |
+
+### Mi club (`/me`)
+
+Lo que un socio ve de su propia ficha, y un apoderado de las fichas que tiene a cargo, sin necesitar roles (`requireClubMember`). Cada endpoint vuelve a calcular en el servidor las fichas de la cuenta (la propia según `members.user_id` y las que tiene a cargo según `member_guardians`). Si se pide un `:memberId` que no pertenece a la cuenta, responde 404. Si el club apagó la sección, responde 403. Ver `services/selfService.service.js`.
+
+| Método y ruta | Descripción | Requiere |
+|---|---|---|
+| `GET /me/club` | Interruptores del club y fichas de la cuenta (`relation`: `self` \| `guardian`). También llega en el contexto de sesión como `selectedClub.myClub` | Miembro activo |
+| `GET /me/members/:memberId/summary` | Inicio: deuda (atrasado / por vencer en 45 días), próximos vencimientos, asistencia del mes y total, entrenamientos de los próximos 14 días | Mi club |
+| `GET /me/members/:memberId/payments` | Períodos con saldo y pagos registrados. No incluye notas internas ni quién registró cada pago | `payments` |
+| `GET /me/payments/:paymentId/receipt` | Recibo en PDF de un pago de una de sus fichas | `payments` |
+| `GET /me/members/:memberId/proofs` | Comprobantes enviados y su estado, agrupados por lote; incluye el motivo si fue rechazado | `payments` |
+| `GET /me/members/:memberId/pay-options` | Períodos que puede pagar y a qué cuenta, igual que la página pública | `payProof` |
+| `POST /me/members/:memberId/proofs` | Sube un comprobante (multipart `proof` con `chargeInstanceIds`, `amount`, `paidAt`, `note` y `destination`), con las mismas reglas que `/public/pay/:code/proofs`. Límite de envíos por cuenta | `payProof` |
+| `GET /me/members/:memberId/attendance` | Porcentaje de asistencia general y por entrenamiento, más el historial hasta hoy | `attendance` |
+| `GET /me/members/:memberId/profile` | Ficha sin campos sensibles ni archivos; indica qué campos son `editable` | Mi club |
+| `PUT /me/members/:memberId/profile` | Guarda `fields`. Solo acepta los campos marcados `selfEditable` y descarta el resto | `profileEdit` |
+| `POST/DELETE /me/members/:memberId/fields/:fieldId/image` | Sube o quita la imagen de un campo editable, por ejemplo la foto de perfil | `profileEdit` |
+| `GET /me/members/:memberId/guardians` | Quiénes tienen acceso a la ficha (sin correos) | Mi club |
+| `POST /me/members/:memberId/guardians` | Suma otro apoderado por correo (`email`, `relation`). Si la cuenta ya es del club se vincula directo; si no, le llega una invitación | `guardiansInvite` |
+
+Para la directiva: `GET /members/:id/guardians` (requiere `VIEW_MEMBERS`/`_SCOPED`), y `POST /members/:id/guardians` `{ userId, relation }` y `DELETE /members/:id/guardians/:userId` (requieren `LINK_MEMBER_USER`). La invitación por correo (`POST /users/:id/invite`) acepta además `guardianOf: number[]` y `guardianRelation`: al aceptarla, la cuenta queda como apoderado de esas fichas.
 
 ### Notificaciones (`/notifications`)
 

@@ -240,11 +240,21 @@ class AuthService {
   /** Club activo + datos del club que la UI necesita sin pedir otro permiso: si el formulario
    * público de inscripción está activo (sin él no llegan solicitudes, así que la vista
    * Miembros → Solicitudes se oculta — ver side-menu.component.ts). */
-  async _selectedClubDto(row) {
+  async _selectedClubDto(row, userId = null) {
     const dto = toClubContextDto(row);
     if (!dto) return null;
     const settings = await settingsRepository.findAllByClub(row.id);
-    return { ...dto, publicMemberFormEnabled: settings[PUBLIC_MEMBER_FORM_KEY] === '1' };
+    return { ...dto, publicMemberFormEnabled: settings[PUBLIC_MEMBER_FORM_KEY] === '1', myClub: await this._myClubDto(row, userId) };
+  }
+
+  /** "Mi club" del club activo: interruptores + cuántas fichas tiene la cuenta (propia + a cargo).
+   * `null` si no es miembro activo (p. ej. Super Admin explorando) — ver selfService.service.js. */
+  async _myClubDto(row, userId) {
+    if (!userId || row.membership_status !== 'active') return null;
+    // Import diferido: selfService arrastra medio backend y auth.service se carga muy temprano.
+    const selfService = require('./selfService.service');
+    const { settings, members } = await selfService.overview(row.id, userId);
+    return { ...settings, members: members.map((m) => ({ id: m.id, shortName: m.shortName, avatarUrl: m.avatarUrl, relation: m.relation })) };
   }
 
   /** Determina el club activo tras login según las reglas de negocio del flujo inicial. */
@@ -267,7 +277,7 @@ class AuthService {
 
     return {
       clubs: activeClubs.map(toClubContextDto),
-      selectedClub: await this._selectedClubDto(selectedClubRow),
+      selectedClub: await this._selectedClubDto(selectedClubRow, userId),
       authorization,
       platformTimezone: await this.getPlatformTimezone(),
       userTimezone: user ? user.timezone : null,
@@ -429,7 +439,7 @@ class AuthService {
     return {
       user: this.sanitizeUser(user),
       clubs: clubs.filter((c) => c.membership_status === 'active').map(toClubContextDto),
-      selectedClub: await this._selectedClubDto(selectedClubRow),
+      selectedClub: await this._selectedClubDto(selectedClubRow, userId),
       authorization,
       platformTimezone: await this.getPlatformTimezone(),
       userTimezone: user.timezone,

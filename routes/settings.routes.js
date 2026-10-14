@@ -24,4 +24,10 @@ router.put(
   controller.updateSettings
 );
 
+// "Mi club": qué ven los socios de sí mismos (el socio lee los interruptores por GET /me/club).
+const meController = require('../controllers/me.controller');
+const meValidation = require('../validations/me.validation');
+router.get('/self-service', requireFunction(FUNCTIONS.MANAGE_SETTINGS), meController.getSettings);
+router.put('/self-service', requireFunction(FUNCTIONS.MANAGE_SETTINGS), sanitizeBody, meValidation.updateSettings, handleValidation, meController.updateSettings);
+
 module.exports = router;

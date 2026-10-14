@@ -174,6 +174,22 @@ class MembersService {
     await this.syncCoverage(member.id, actorId, conn);
   }
 
+  /** Reactiva la ficha de alguien que vuelve al club (ver clubEntry.service.js). Si vuelve el mismo
+   * día de su retiro (o antes de la fecha de retiro programada), no se abre un período nuevo: se
+   * deshace el retiro (el período vigente sigue abierto), así no queda un "hueco" de un día. */
+  async reactivateOnReturn(member, actorId, conn) {
+    const periods = await memberMembershipsRepository.findByMember(member.id, conn);
+    const last = periods[periods.length - 1];
+    const today = toDateOnly(new Date());
+    if (last?.endedOn && last.endedOn >= today) {
+      await memberMembershipsRepository.setEnd(last.id, null, conn);
+      await membersRepository.updateById(member.id, { status: 'active', deactivated_at: null }, conn);
+      await this.syncCoverage(member.id, actorId, conn);
+      return;
+    }
+    await this.applyStatus(member, 'active', actorId, conn);
+  }
+
   /** Fecha de ingreso = inicio de su PRIMER período en el club (`null` = desde siempre). */
   async setJoinedOn(memberId, joinedOn, actorId, conn) {
     const periods = await memberMembershipsRepository.findByMember(memberId, conn);
@@ -219,7 +235,7 @@ class MembersService {
       const reason = chargePeriodReason(intervals, i.recurrence, i.period_label, i.due_date, policy);
       // Política proporcional: un mes de ingreso/retiro sin pagos se ajusta al monto que corresponde.
       // (incluye los que vuelven a aplicar: estaban como 'no aplica' y se restauran).
-      if (!reason && i.recurrence === 'monthly') toReprice.push(i);
+      if (!reason && i.recurrence === 'monthly' && !i.amount_overridden_at) toReprice.push(i);
       if (i.status === 'pending' && reason) toMark.set(reason, [...(toMark.get(reason) || []), i.id]);
       else if (i.status === 'exempt' && !reason) toRestore.push(i.id);
       else if (i.status === 'exempt' && reason && reason !== i.exempt_reason) toMark.set(reason, [...(toMark.get(reason) || []), i.id]);
@@ -520,6 +536,9 @@ class MembersService {
         await this.create(clubId, safeData, userId);
       } catch (error) {
         discard(files);
+        if (error.statusCode === 409 && /Ya existe un miembro/.test(error.message)) {
+          throw AppError.conflict(`${error.message.replace(/\.$/, '')}: probablemente ya tienes una ficha. Pide a la directiva que la vincule a tu cuenta (desde tu ficha, en «Cuenta vinculada»).`);
+        }
         throw error;
       }
       member = await membersRepository.findByUserId(userId, clubId);
@@ -585,7 +604,10 @@ class MembersService {
     const access = await this._resolveAccess(authContext, actorId, clubId);
     this._assertAccessible(access, memberId);
 
-    await membersRepository.softDelete(memberId);
+    await withTransaction(async (conn) => {
+      if (member.status === 'active') await this.applyStatus(member, 'inactive', actorId, conn);
+      await membersRepository.softDelete(memberId, conn);
+    });
     await auditRepository.logAction({
       userId: actorId,
       clubId,
@@ -651,6 +673,11 @@ class MembersService {
   async setImage(clubId, memberId, fieldId, file, actorId, authContext) {
     await this._getAccessibleMember(clubId, memberId, actorId, authContext);
     const field = await this._uploadField(clubId, fieldId, 'image');
+    return this.storeImage(clubId, memberId, field, file, actorId);
+  }
+
+  /** Guarda la imagen SIN revisar acceso (quien llama ya lo hizo: `setImage` o "Mi club"). */
+  async storeImage(clubId, memberId, field, file, actorId, action = 'MEMBER_UPDATED') {
     if (!file) throw AppError.badRequest('Debes adjuntar una imagen.');
     const current = imageList((await membersRepository.getFieldValues(memberId)).find((v) => v.field_id === field.id)?.value);
     const url = `/uploads/member-photos/${file.filename}`;
@@ -666,7 +693,7 @@ class MembersService {
       await this._saveImages(memberId, field, [url]);
       for (const old of current) deleteUploadedFile(old);
     }
-    await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_UPDATED', entityType: 'member', entityId: memberId, changes: { [field.label]: { from: null, to: 'actualizada' } } });
+    await auditRepository.logAction({ userId: actorId, clubId, action, entityType: 'member', entityId: memberId, changes: { [field.label]: { from: null, to: 'actualizada' } } });
     return { url: toAbsoluteMediaUrl(url) };
   }
 
@@ -674,6 +701,11 @@ class MembersService {
   async removeImage(clubId, memberId, fieldId, actorId, authContext, url = null) {
     await this._getAccessibleMember(clubId, memberId, actorId, authContext);
     const field = await this._uploadField(clubId, fieldId, 'image');
+    return this.dropImage(memberId, field, url);
+  }
+
+  /** Quita la imagen SIN revisar acceso (ver `storeImage`). */
+  async dropImage(memberId, field, url = null) {
     const current = imageList((await membersRepository.getFieldValues(memberId)).find((v) => v.field_id === field.id)?.value);
     const relative = url ? String(url).replace(/^https?:\/\/[^/]+/, '') : null;
     const removed = relative ? current.filter((u) => u === relative) : current;
@@ -764,6 +796,8 @@ class MembersService {
     }
 
     await membersRepository.updateById(memberId, { user_id: targetUserId || null });
+    // Ya tiene ficha: no se le vuelve a pedir que la complete (ver createSelf).
+    if (targetUserId) await usersRepository.setRequiresProfileCompletion(targetUserId, clubId, false);
     await auditRepository.logAction({
       userId: actorId,
       clubId,

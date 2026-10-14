@@ -15,7 +15,7 @@ const AppError = require('../helpers/AppError');
 const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const { withTransaction } = require('../config/database');
 const memberMembershipsRepository = require('../repositories/memberMemberships.repository');
-const { COVERAGE_REASONS, coversChargePeriod, chargePeriodReason, proratedAmount } = require('../helpers/membership');
+const { COVERAGE_REASONS, coversChargePeriod, chargePeriodReason, proratedAmount, isPastDue } = require('../helpers/membership');
 const clubPolicyService = require('./clubPolicy.service');
 const { FUNCTIONS, CHARGE_EXEMPT_TYPE } = require('../config/constants');
 
@@ -86,7 +86,7 @@ class PaymentsService {
    *   "not_applicable" (no aplica) — mismo bloqueo de pago en ambos casos, ver create(). */
   _resolveDisplayStatus(row) {
     if (row.status === 'exempt') return row.exempt_type === CHARGE_EXEMPT_TYPE.NOT_APPLICABLE ? 'not_applicable' : 'exempt';
-    if (row.status === 'pending' && new Date(row.due_date) < new Date()) return 'overdue';
+    if (row.status === 'pending' && isPastDue(row.due_date)) return 'overdue';
     return row.status;
   }
 
@@ -361,6 +361,8 @@ class PaymentsService {
       displayStatus: this._resolveDisplayStatus(row),
       exemptReason: row.exempt_reason,
       exemptType: row.exempt_type,
+      // Monto cambiado a mano para este período (EDIT_PAYMENT_AMOUNT, ver overrideInstanceAmount).
+      amountOverridden: !!row.amount_overridden_at,
     };
   }
 
@@ -386,7 +388,7 @@ class PaymentsService {
    * o "Retirado", ver helpers/membership.js) — no se le cobra: "no aplica". */
   _virtualCellToDto(charge, periodKey, amount, notApplicableReason = null) {
     const dueDate = this._dueDateForPeriod(charge, periodKey);
-    const isOverdue = dueDate < new Date();
+    const isOverdue = isPastDue(dueDate);
     if (notApplicableReason) {
       return {
         id: null,
@@ -418,7 +420,7 @@ class PaymentsService {
    * matriz. `responsibleInfo`: ver `_instanceToDto`. */
   _virtualInstanceToDto(charge, periodKey, amount, responsibleInfo = null) {
     const dueDate = this._dueDateForPeriod(charge, periodKey);
-    const isOverdue = dueDate < new Date();
+    const isOverdue = isPastDue(dueDate);
     return {
       id: null,
       uuid: null,
@@ -766,7 +768,7 @@ class PaymentsService {
     if (!memberIds.length) return { charge: chargeDto, periods, canGoBack, canGoForward, rows: [], settlements, years, year: selectedYear };
 
     const [allMembers, instances, amounts, responsibleByMember, membershipsByMember] = await Promise.all([
-      membersRepository.findNamesByIds(memberIds, clubId),
+      membersRepository.findNamesByIds(memberIds, clubId, undefined, { includeDeleted: true }),
       chargeInstancesRepository.findForChargeAndMembers(chargeId, memberIds),
       chargesRepository.resolveAmounts(chargeId, memberIds, charge.amount),
       chargesRepository.resolveResponsibles(chargeId, memberIds),
@@ -803,6 +805,9 @@ class PaymentsService {
         groupIds: m.group_ids ? m.group_ids.split(',').map(Number) : [],
         // Retirado: se sigue mostrando por su historial, pero ya no se le cobran períodos nuevos.
         inactive: m.status === 'inactive',
+        // Ficha eliminada (ya no se puede eliminar, solo retirar; quedan las de antes): se muestra
+        // como un retirado, de solo lectura, y sus atrasos no cuentan en los totales del cobro.
+        deleted: !!m.deleted_at,
         cells: periods.reduce((acc, p) => {
           const inst = cellLookup.get(m.id)?.get(p.key);
           acc[p.key] = inst
@@ -850,6 +855,9 @@ class PaymentsService {
     if (permissionService.hasAnyFunction(authContext, [FUNCTIONS.VIEW_PAYMENTS, FUNCTIONS.VIEW_PAYMENTS_SCOPED])) {
       const visibleMemberIds = await this.getVisibleMemberIds(authContext, actorId, charge.club_id);
       const memberIds = visibleMemberIds === null ? participantIds : participantIds.filter((id) => visibleMemberIds.includes(id));
+      // Eliminados con pagos en este cobro: su plata sigue contando, así que siguen a la vista
+      // (solo quien ve TODOS los pagos — un scope acotado no puede resolverlos, ya no tienen grupo).
+      if (visibleMemberIds === null) memberIds.push(...(await chargesRepository.findDeletedPayerIds(charge.id)).filter((id) => !memberIds.includes(id)));
       return { memberIds, scopedToMemberId: null };
     }
     const member = await membersRepository.findByUserId(actorId, charge.club_id);
@@ -937,7 +945,12 @@ class PaymentsService {
 
   async listForMember(clubId, memberId, actorId, authContext) {
     await this.assertMemberPaymentsAccessible(clubId, memberId, actorId, authContext);
+    return this.ledgerForMember(clubId, memberId);
+  }
 
+  /** Períodos y pagos de un miembro SIN revisar permisos: quien llama ya validó el acceso
+   * (`listForMember` con el scope de Tesorería; `selfService.service.js` con "mis fichas"). */
+  async ledgerForMember(clubId, memberId) {
     const [allInstanceRows, paymentRows] = await Promise.all([
       chargeInstancesRepository.findForMember(memberId),
       paymentsRepository.findByMember(memberId),
@@ -1403,6 +1416,33 @@ class PaymentsService {
       result.push({ month: key, income: incomeByMonth[key] ?? 0, expenses: expensesByMonth[key] ?? 0 });
     }
     return result;
+  }
+
+  /** Cambia lo que el miembro debe en UN período puntual (EDIT_PAYMENT_AMOUNT) — ej. $10.000 →
+   * $8.000 solo ese mes. No puede quedar por debajo de lo ya abonado; el estado se recalcula
+   * (si lo abonado ya cubre el monto nuevo, el período queda pagado). */
+  async overrideInstanceAmount(clubId, instanceId, amount, actorId, authContext) {
+    const { instance, charge } = await this._findInstanceInClub(clubId, instanceId);
+    await this.assertChargeMemberPaymentAccessible(charge, instance.member_id, actorId, authContext);
+    if (instance.status === 'exempt') throw AppError.conflict('Este período está congelado o no aplica: no se le puede cambiar el monto.');
+    const next = Math.round(Number(amount) * 100) / 100;
+    const paid = await chargeInstancesRepository.sumAllocations(instanceId);
+    if (next + 0.005 < paid) throw AppError.badRequest(`El monto no puede ser menor a lo ya abonado (${paid}).`);
+
+    await withTransaction(async (conn) => {
+      await chargeInstancesRepository.overrideAmount(instanceId, next, actorId, conn);
+      await chargeInstancesRepository.recomputeStatus(instanceId, conn);
+    });
+    await auditRepository.logAction({
+      userId: actorId,
+      clubId,
+      action: 'PAYMENT_INSTANCE_AMOUNT_CHANGED',
+      entityType: 'charge_instance',
+      entityId: instanceId,
+      changes: { from: Number(instance.amount), to: next },
+    });
+    const updated = await chargeInstancesRepository.findActiveById(instanceId);
+    return this._matrixCellToDto(updated, paid);
   }
 
   async unexemptInstance(clubId, instanceId, actorId, authContext) {

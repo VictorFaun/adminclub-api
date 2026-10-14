@@ -1,5 +1,6 @@
 const calendarEventsRepository = require('../repositories/calendarEvents.repository');
 const membersRepository = require('../repositories/members.repository');
+const memberGuardiansRepository = require('../repositories/memberGuardians.repository');
 const trainingsRepository = require('../repositories/trainings.repository');
 const usersRepository = require('../repositories/users.repository');
 const auditRepository = require('../repositories/audit.repository');
@@ -60,13 +61,16 @@ class CalendarService {
   async getFeed(clubId, userId, authContext, { from, to }) {
     this._assertRange(from, to);
     const canBirthdays = permissionService.hasAnyFunction(authContext, [FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED]);
-    const [events, birthdays, trainings] = await Promise.all([
+    const [events, birthdays, trainings, groups] = await Promise.all([
       this._events(clubId, userId, from, to),
       canBirthdays ? this._birthdays(clubId, userId, authContext, from, to) : null,
       this._trainings(clubId, userId, authContext, from, to),
+      this.listGroups(clubId, userId),
     ]);
     return {
       events,
+      // Grupos propios de la persona (filtros de la vista y opción al crear un evento).
+      groups,
       birthdays: birthdays ?? [],
       trainings: trainings ?? [],
       // Qué fuentes aplican a esta persona (para mostrar/ocultar sus filtros en la vista).
@@ -82,6 +86,8 @@ class CalendarService {
       title: row.title,
       description: row.description,
       color: row.color,
+      // El grupo es de quien creó el evento: a un participante no se le muestra (no es suyo).
+      groupId: row.created_by === userId ? row.group_id ?? null : null,
       allDay: !!row.all_day,
       startDate: dateOnly(row.start_date),
       endDate: dateOnly(row.end_date),
@@ -151,8 +157,45 @@ class CalendarService {
     };
   }
 
+  // ------------------------------------------------------------------ grupos de eventos
+
+  async listGroups(clubId, userId) {
+    return calendarEventsRepository.findGroups(clubId, userId);
+  }
+
+  async _ownGroup(clubId, userId, groupId) {
+    const group = await calendarEventsRepository.findGroup(groupId);
+    if (!group || group.club_id !== clubId || group.user_id !== userId) throw AppError.notFound('Grupo no encontrado.');
+    return group;
+  }
+
+  async createGroup(clubId, userId, { name, color }) {
+    const id = await calendarEventsRepository.createGroup({ clubId, userId, name: String(name).trim(), color });
+    return { id, name: String(name).trim(), color };
+  }
+
+  async updateGroup(clubId, userId, groupId, { name, color }) {
+    await this._ownGroup(clubId, userId, groupId);
+    await calendarEventsRepository.updateGroup(groupId, { name: String(name).trim(), color });
+    return { id: groupId, name: String(name).trim(), color };
+  }
+
+  /** Los eventos del grupo no se borran: quedan sin grupo. */
+  async removeGroup(clubId, userId, groupId) {
+    await this._ownGroup(clubId, userId, groupId);
+    await calendarEventsRepository.deleteGroup(groupId);
+  }
+
+  /** `groupId` del body: debe ser un grupo propio (o null). */
+  async _validGroupId(clubId, userId, groupId) {
+    if (groupId === null || groupId === undefined || groupId === '') return null;
+    await this._ownGroup(clubId, userId, Number(groupId));
+    return Number(groupId);
+  }
+
   async create(clubId, userId, data) {
     const fields = this._normalize(data);
+    fields.groupId = await this._validGroupId(clubId, userId, data.groupId);
     const participantIds = await this._validParticipantIds(clubId, userId, data.participantIds);
     let added = [];
     const id = await withTransaction(async (conn) => {
@@ -175,6 +218,7 @@ class CalendarService {
   async update(clubId, userId, eventId, data) {
     const row = await this._ownEvent(clubId, userId, eventId);
     const fields = this._normalize(data);
+    fields.groupId = await this._validGroupId(clubId, userId, data.groupId);
     const participantIds = await this._validParticipantIds(clubId, userId, data.participantIds);
     const remindBefore = row.remind_at ? new Date(row.remind_at).getTime() : null;
     const remindChanged = remindBefore !== (fields.remindAt ? fields.remindAt.getTime() : null);
@@ -186,6 +230,7 @@ class CalendarService {
           title: fields.title,
           description: fields.description,
           color: fields.color,
+          group_id: fields.groupId,
           all_day: fields.allDay,
           start_date: fields.startDate,
           end_date: fields.endDate,
@@ -320,21 +365,44 @@ class CalendarService {
     if (permissionService.hasAnyFunction(authContext, [FUNCTIONS.VIEW_TRAININGS, FUNCTIONS.VIEW_ATTENDANCE])) {
       return trainingsRepository.findByClub(clubId);
     }
-    const member = await membersRepository.findByUserId(userId, clubId);
-    if (!member) return null;
+    // Su ficha y las que tiene a cargo como apoderado (ver memberGuardians.repository.js).
+    const memberIds = (await memberGuardiansRepository.findOwnMembers(clubId, userId)).map((m) => m.id);
+    if (!memberIds.length) return null;
+    const visible = await this.trainingsForMembers(clubId, memberIds, { includeResponsible: true });
+    return visible.length ? visible : null;
+  }
+
+  /** Entrenamientos en que participan (o de los que son responsables) esas fichas. */
+  async trainingsForMembers(clubId, memberIds, { includeResponsible = false } = {}) {
     const all = await trainingsRepository.findByClub(clubId);
-    const responsible = new Set((await trainingsRepository.findByClubResponsibleMember(clubId, member.id)).map((t) => t.id));
+    const responsible = new Set();
+    if (includeResponsible) {
+      for (const id of memberIds) {
+        // eslint-disable-next-line no-await-in-loop
+        for (const t of await trainingsRepository.findByClubResponsibleMember(clubId, id)) responsible.add(t.id);
+      }
+    }
     const visible = [];
     for (const t of all) {
+      if (responsible.has(t.id)) {
+        visible.push(t);
+        continue;
+      }
       // eslint-disable-next-line no-await-in-loop
-      if (responsible.has(t.id) || (await trainingsRepository.expandTargetMemberIds(t.id)).includes(member.id)) visible.push(t);
+      const targets = await trainingsRepository.expandTargetMemberIds(t.id);
+      if (memberIds.some((id) => targets.includes(id))) visible.push(t);
     }
-    return visible.length ? visible : null;
+    return visible;
   }
 
   async _trainings(clubId, userId, authContext, from, to) {
     const trainings = await this._visibleTrainings(clubId, userId, authContext);
     if (!trainings) return null;
+    return this.sessionsOf(trainings, from, to);
+  }
+
+  /** Sesiones (fecha + horario) de esos entrenamientos activos entre `from` y `to` ('YYYY-MM-DD'). */
+  async sessionsOf(trainings, from, to) {
     const items = [];
     for (const t of trainings.filter((x) => x.status === 'active')) {
       // eslint-disable-next-line no-await-in-loop

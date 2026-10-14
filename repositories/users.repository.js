@@ -87,7 +87,7 @@ class UsersRepository extends BaseRepository {
       params.push(clubId);
       // El estado que importa para un admin de club es la membresía (uc.status),
       // no el estado global de la cuenta: suspender/reactivar solo cambia uc.status.
-      selectExtra = ', uc.status AS membership_status';
+      selectExtra = ', uc.status AS membership_status, uc.joined_at AS membership_joined_at';
     }
     if (status) {
       where.push(clubId ? 'uc.status = ?' : 'u.status = ?');

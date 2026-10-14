@@ -19,7 +19,7 @@ const lookupByEmail = asyncHandler(async (req, res) => {
 });
 
 const invite = asyncHandler(async (req, res) => {
-  const data = await clubUserInvitationsService.invite(req.club.id, { userId: Number(req.params.id), message: req.body.message, roleIds: req.body.roleIds }, req.user.id);
+  const data = await clubUserInvitationsService.invite(req.club.id, { userId: Number(req.params.id), message: req.body.message, roleIds: req.body.roleIds, memberId: req.body.memberId ?? null, guardianOf: req.body.guardianOf ?? [], guardianRelation: req.body.guardianRelation ?? null }, req.user.id);
   return ApiResponse.created(res, data, 'Invitación enviada.');
 });
 
@@ -60,7 +60,7 @@ const updateStatus = asyncHandler(async (req, res) => {
 });
 
 const remove = asyncHandler(async (req, res) => {
-  await usersService.removeFromClub(Number(req.params.id), req.club.id, req.user.id, req.body?.memberAction);
+  await usersService.removeFromClub(Number(req.params.id), req.club.id, req.user.id, req.body?.memberAction, req.body?.statusDate || null);
   return ApiResponse.ok(res, null, 'Usuario retirado del club correctamente.');
 });
 

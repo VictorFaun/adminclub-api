@@ -70,4 +70,12 @@ const publicMemberFormSubmitRateLimit = rateLimit({
   max: 10,
 });
 
-module.exports = { publicMemberFormSubmitRateLimit, generalRateLimit, authRateLimit, strictAuthRateLimit, publicPaymentsReadRateLimit, publicPaymentsLookupRateLimit, publicPaymentsUploadRateLimit };
+/** Comprobantes subidos desde "Mi club": por cuenta (no por IP), cada uno genera trabajo de revisión. */
+const selfProofUploadRateLimit = rateLimit({
+  ...baseOptions,
+  windowMs: env.security.rateLimitWindowMin * 60 * 1000,
+  max: 15,
+  keyGenerator: (req) => `user:${req.user?.id ?? 'anon'}`,
+});
+
+module.exports = { selfProofUploadRateLimit, publicMemberFormSubmitRateLimit, generalRateLimit, authRateLimit, strictAuthRateLimit, publicPaymentsReadRateLimit, publicPaymentsLookupRateLimit, publicPaymentsUploadRateLimit };

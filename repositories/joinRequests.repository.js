@@ -35,8 +35,9 @@ class JoinRequestsRepository extends BaseRepository {
     }
     const whereSql = where.join(' AND ');
     const [rows] = await pool.query(
-      `SELECT jr.*, u.username, u.email, u.avatar_url
+      `SELECT jr.*, u.username, u.email, u.avatar_url, rv.username AS reviewed_by_username
        FROM join_requests jr INNER JOIN users u ON u.id = jr.user_id
+       LEFT JOIN users rv ON rv.id = jr.reviewed_by
        WHERE ${whereSql} ORDER BY jr.created_at DESC LIMIT ? OFFSET ?`,
       [...params, limit, offset]
     );

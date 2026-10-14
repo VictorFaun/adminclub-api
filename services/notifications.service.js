@@ -11,6 +11,17 @@ const { emitToUser } = require('../sockets');
 const logger = require('../helpers/logger');
 const env = require('../config/env');
 
+/** Etiqueta sobre el título del correo según el tipo de notificación — mismos textos que
+ * app/src/app/core/models/notification.model.ts#NOTIFICATION_TYPE_LABEL. */
+const EMAIL_EYEBROW = {
+  info: 'Aviso',
+  success: 'Confirmación',
+  warning: 'Importante',
+  error: 'Urgente',
+  birthday: 'Cumpleaños',
+  invitation: 'Invitación',
+};
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -58,7 +69,7 @@ class NotificationsService {
     // Sin await: un correo lento/fallido no debe demorar ni tumbar la creación de la
     // notificación (que ya quedó persistida y empujada por socket) — mismo espíritu "mejor
     // esfuerzo" que el resto de email.service.js.
-    this._emailForNotification({ userId, clubId, title, message, link, imageUrl }).catch((error) => {
+    this._emailForNotification({ userId, clubId, type, title, message, link, imageUrl }).catch((error) => {
       logger.error('[notifications] Error enviando correo de notificación', { userId, notificationId: id, error: error.message });
     });
     return id;
@@ -66,7 +77,7 @@ class NotificationsService {
 
   /** Correo con el mismo contenido de la notificación — branding del club si tiene uno
    * asociado, genérico si no (p.ej. una notificación a nivel de plataforma). */
-  async _emailForNotification({ userId, clubId, title, message, link, imageUrl }) {
+  async _emailForNotification({ userId, clubId, type, title, message, link, imageUrl }) {
     const user = await usersRepository.findById(userId);
     if (!user?.email) return;
 
@@ -75,6 +86,8 @@ class NotificationsService {
       : '';
     const bodyHtml = `<p style="white-space:pre-line;">${escapeHtml(message)}</p>${imageHtml}`;
     const ctaUrl = link ? (/^https?:\/\//i.test(link) ? link : `${env.clientUrl}${link}`) : undefined;
+    const eyebrow = EMAIL_EYEBROW[type] || EMAIL_EYEBROW.info;
+    const preheader = String(message ?? '').replace(/\s+/g, ' ').trim().slice(0, 140);
 
     const club = clubId ? await clubsRepository.findActiveById(clubId) : null;
     const html = club
@@ -84,8 +97,10 @@ class NotificationsService {
           bodyHtml,
           ctaText: ctaUrl ? 'Ver más' : undefined,
           ctaUrl,
+          eyebrow,
+          preheader,
         })
-      : renderPlatformEmail({ title, bodyHtml, ctaText: ctaUrl ? 'Ver más' : undefined, ctaUrl });
+      : renderPlatformEmail({ title, bodyHtml, ctaText: ctaUrl ? 'Ver más' : undefined, ctaUrl, eyebrow, preheader });
 
     await emailService.send({ to: user.email, subject: title, html });
   }

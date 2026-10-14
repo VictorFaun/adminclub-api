@@ -14,7 +14,14 @@ router.get('/dashboard', requireFunction(FUNCTIONS.VIEW_TREASURY_DASHBOARD), con
 // Recordatorios de deuda: ver deudores, configurar el envío automático y enviar ahora.
 router.get('/reminders', requireFunction(FUNCTIONS.VIEW_PAYMENTS, FUNCTIONS.VIEW_TREASURY_SETTINGS), controller.remindersPreview);
 router.put('/reminders/settings', requireFunction(FUNCTIONS.EDIT_TREASURY_SETTINGS), sanitizeBody, controller.updateRemindersSettings);
-router.post('/reminders/send', requireFunction(FUNCTIONS.EDIT_TREASURY_SETTINGS), controller.sendReminders);
+router.post(
+  '/reminders/send',
+  requireFunction(FUNCTIONS.EDIT_TREASURY_SETTINGS),
+  sanitizeBody,
+  validation.sendReminders,
+  handleValidation,
+  controller.sendReminders
+);
 
 // Recibo en PDF de un pago.
 router.get('/:id/receipt', requireFunction(FUNCTIONS.VIEW_PAYMENTS, FUNCTIONS.VIEW_PAYMENTS_SCOPED), validation.paymentId, handleValidation, controller.receipt);
@@ -97,6 +104,16 @@ router.put(
   validation.instanceIdParam,
   handleValidation,
   controller.unexemptInstance
+);
+
+// Monto de UN período puntual de un miembro (ej. $10.000 → $8.000 solo ese mes).
+router.put(
+  '/instances/:instanceId/amount',
+  requireFunction(FUNCTIONS.EDIT_PAYMENT_AMOUNT),
+  sanitizeBody,
+  validation.overrideInstanceAmount,
+  handleValidation,
+  controller.overrideInstanceAmount
 );
 
 router.put(

@@ -22,6 +22,31 @@ class CalendarEventsRepository extends BaseRepository {
     return rows;
   }
 
+  // ---------------------------------------------------------------- grupos (personales)
+
+  async findGroups(clubId, userId, conn = pool) {
+    const [rows] = await conn.query('SELECT id, name, color FROM calendar_event_groups WHERE club_id = ? AND user_id = ? ORDER BY name ASC', [clubId, userId]);
+    return rows;
+  }
+
+  async findGroup(id, conn = pool) {
+    const [rows] = await conn.query('SELECT * FROM calendar_event_groups WHERE id = ? LIMIT 1', [id]);
+    return rows[0] || null;
+  }
+
+  async createGroup({ clubId, userId, name, color }, conn = pool) {
+    const [result] = await conn.query('INSERT INTO calendar_event_groups (club_id, user_id, name, color) VALUES (?, ?, ?, ?)', [clubId, userId, name, color]);
+    return result.insertId;
+  }
+
+  async updateGroup(id, { name, color }, conn = pool) {
+    await conn.query('UPDATE calendar_event_groups SET name = ?, color = ? WHERE id = ?', [name, color, id]);
+  }
+
+  async deleteGroup(id, conn = pool) {
+    await conn.query('DELETE FROM calendar_event_groups WHERE id = ?', [id]);
+  }
+
   async findParticipants(eventIds, conn = pool) {
     if (!eventIds.length) return [];
     const [rows] = await conn.query(
@@ -40,8 +65,8 @@ class CalendarEventsRepository extends BaseRepository {
 
   async create(data, conn = pool) {
     const [result] = await conn.query(
-      `INSERT INTO calendar_events (club_id, created_by, title, description, color, all_day, start_date, end_date, start_time, end_time, reminder_minutes, remind_at)
-       VALUES (:clubId, :createdBy, :title, :description, :color, :allDay, :startDate, :endDate, :startTime, :endTime, :reminderMinutes, :remindAt)`,
+      `INSERT INTO calendar_events (club_id, created_by, title, description, color, group_id, all_day, start_date, end_date, start_time, end_time, reminder_minutes, remind_at)
+       VALUES (:clubId, :createdBy, :title, :description, :color, :groupId, :allDay, :startDate, :endDate, :startTime, :endTime, :reminderMinutes, :remindAt)`,
       data
     );
     return result.insertId;

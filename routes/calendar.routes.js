@@ -20,4 +20,10 @@ router.delete('/events/:id', validation.eventId, handleValidation, controller.re
 // Un participante deja de ver un evento que le compartieron.
 router.delete('/events/:id/participation', validation.eventId, handleValidation, controller.leaveEvent);
 
+// Grupos de eventos propios (personales, como los eventos).
+router.get('/groups', controller.listGroups);
+router.post('/groups', sanitizeBody, validation.saveGroup, handleValidation, controller.createGroup);
+router.put('/groups/:groupId', sanitizeBody, validation.groupId, validation.saveGroup, handleValidation, controller.updateGroup);
+router.delete('/groups/:groupId', validation.groupId, handleValidation, controller.removeGroup);
+
 module.exports = router;

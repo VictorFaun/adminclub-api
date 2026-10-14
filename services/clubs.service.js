@@ -1,3 +1,5 @@
+const clubEntryService = require('./clubEntry.service');
+const clubUserInvitationsRepository = require('../repositories/clubUserInvitations.repository');
 const clubsRepository = require('../repositories/clubs.repository');
 const usersRepository = require('../repositories/users.repository');
 const membersRepository = require('../repositories/members.repository');
@@ -7,7 +9,6 @@ const joinRequestsRepository = require('../repositories/joinRequests.repository'
 const invitationsRepository = require('../repositories/invitations.repository');
 const auditRepository = require('../repositories/audit.repository');
 const rolesService = require('./roles.service');
-const membersService = require('./members.service');
 const AppError = require('../helpers/AppError');
 const { withTransaction } = require('../config/database');
 const { parsePagination, buildMeta } = require('../helpers/pagination');
@@ -301,15 +302,8 @@ class ClubsService {
     if (!club) throw AppError.notFound('Código de invitación inválido.');
     if (club.status !== CLUB_STATUS.ACTIVE) throw AppError.forbidden('Este club no está activo.');
 
-    const existing = await usersRepository.findMembership(userId, club.id);
-    if (existing && existing.status === USER_CLUB_STATUS.ACTIVE) {
-      throw AppError.conflict('Ya perteneces a este club.');
-    }
-
-    // Sin fallback a "Socio": si la invitación no trae un rol explícito, quien se une entra sin
-    // roles hasta que un admin se los asigne.
-    const roleIdToAssign = invitation.default_role_id;
-    const clubsCountBefore = await usersRepository.countClubsForUser(userId);
+    // Antes de gastar un uso del código: ¿puede entrar? (ya está, o está suspendido)
+    clubEntryService.assertCanEnter(await usersRepository.findMembership(userId, club.id));
 
     await withTransaction(async (conn) => {
       // La validación de "¿tiene usos disponibles?" de más arriba se hizo con datos leídos
@@ -319,28 +313,19 @@ class ClubsService {
       // aborta toda la operación (incluida la membresía) en vez de sumar un miembro de más.
       const claimed = await invitationsRepository.claimUse(invitation.id, conn);
       if (!claimed) {
-        // `claimUse` puede fallar por dos motivos distintos (agotó sus usos, o alguien más la
-        // revocó/expiró en el instante entre la lectura de arriba y este punto) — se relee el
-        // estado real para no decirle siempre "sin usos disponibles" cuando la causa fue otra.
         const current = await invitationsRepository.findByCode(code, conn);
         const reason =
           current?.status === 'active' || !current?.status ? 'ya no tiene usos disponibles' : 'ya no está activa';
         throw AppError.badRequest(`Esta invitación ${reason}.`);
       }
-
-      await usersRepository.addToClub({ userId, clubId: club.id, status: USER_CLUB_STATUS.ACTIVE, isDefault: clubsCountBefore === 0 }, conn);
-      // Volver a unirse tras haber sido retirado también reactiva su ficha si el retiro la archivó.
-      if (existing?.status === USER_CLUB_STATUS.WITHDRAWN) {
-        const member = await membersRepository.findByUserId(userId, club.id, conn);
-        if (member) await membersService.applyStatus(member, 'active', userId, conn);
-      }
-      // Siempre según ESTA invitación (también en false): quien vuelve tras ser retirado no debe
-      // arrastrar la ficha pendiente de una invitación anterior.
-      await usersRepository.setRequiresProfileCompletion(userId, club.id, !!invitation.requires_member_profile, conn);
-      if (roleIdToAssign) {
-        await rolesRepository.assignToUser({ userId, roleId: roleIdToAssign, clubId: club.id, assignedBy: userId }, conn);
-      }
-      if (clubsCountBefore === 0) await usersRepository.setDefaultClub(userId, club.id, conn);
+      // Sin fallback a "Socio": si la invitación no trae un rol explícito, entra sin roles.
+      await clubEntryService.enter(conn, {
+        userId,
+        clubId: club.id,
+        roleIds: invitation.default_role_id ? [invitation.default_role_id] : [],
+        requiresProfile: !!invitation.requires_member_profile,
+        actorId: invitation.created_by ?? null,
+      });
       await invitationsRepository.recordUse({ invitationId: invitation.id, userId }, conn);
     });
 
@@ -354,8 +339,11 @@ class ClubsService {
     if (!club) throw AppError.notFound('Club no encontrado.');
     if (!club.is_public) throw AppError.forbidden('Este club no acepta solicitudes públicas de acceso.');
 
-    const membership = await usersRepository.findMembership(userId, clubId);
-    if (membership && membership.status === USER_CLUB_STATUS.ACTIVE) throw AppError.conflict('Ya perteneces a este club.');
+    clubEntryService.assertCanEnter(await usersRepository.findMembership(userId, clubId));
+    // Si el club ya lo invitó por correo, no hace falta pedir: basta con aceptar.
+    if (await clubUserInvitationsRepository.findByClubAndUser(clubId, userId)) {
+      throw AppError.conflict('Este club ya te invitó: acepta la invitación desde tu perfil.');
+    }
 
     const pending = await joinRequestsRepository.findPending(userId, clubId);
     if (pending) throw AppError.conflict('Ya tienes una solicitud pendiente para este club.');
@@ -382,9 +370,9 @@ class ClubsService {
     await withTransaction(async (conn) => {
       await joinRequestsRepository.resolve({ id: requestId, status, reviewedBy: actorId }, conn);
       if (status === JOIN_REQUEST_STATUS.APPROVED) {
-        // Mismo criterio que joinByCode: sin rol por defecto ("Socio" no existe en el seed de
-        // ningún club, ver defaultClubRoles.js) — entra sin roles hasta que un admin se los asigne.
-        await usersRepository.addToClub({ userId: request.user_id, clubId, status: USER_CLUB_STATUS.ACTIVE, isDefault: false }, conn);
+        // Mismo camino que el resto: sin roles (los asigna un admin), reactiva su ficha si venía
+        // retirado y no deja a un suspendido entrar por acá.
+        await clubEntryService.enter(conn, { userId: request.user_id, clubId, roleIds: [], requiresProfile: false, actorId });
       }
     });
 

@@ -3,16 +3,15 @@ const usersRepository = require('../repositories/users.repository');
 const rolesRepository = require('../repositories/roles.repository');
 const clubsRepository = require('../repositories/clubs.repository');
 const membersRepository = require('../repositories/members.repository');
-const joinRequestsRepository = require('../repositories/joinRequests.repository');
 const auditRepository = require('../repositories/audit.repository');
 const permissionService = require('./permission.service');
-const membersService = require('./members.service');
+const clubEntryService = require('./clubEntry.service');
 const notificationsService = require('./notifications.service');
 const AppError = require('../helpers/AppError');
 const logger = require('../helpers/logger');
 const { withTransaction } = require('../config/database');
 const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
-const { CLUB_STATUS, USER_CLUB_STATUS, FUNCTIONS, JOIN_REQUEST_STATUS } = require('../config/constants');
+const { CLUB_STATUS, USER_CLUB_STATUS, FUNCTIONS } = require('../config/constants');
 
 /** Pestaña del perfil donde la persona ve sus invitaciones (link de la notificación y del correo). */
 const PROFILE_INVITATIONS_LINK = '/profile?tab=invitations';
@@ -37,12 +36,26 @@ class ClubUserInvitationsService {
     return ids;
   }
 
-  async invite(clubId, { userId, message, roleIds }, actorId) {
+  /** `memberId`: ficha que ya existe en el club (sin cuenta) para vincularla al aceptar.
+   * `guardianOf`: fichas del club de las que quedará como apoderado al aceptar. */
+  async invite(clubId, { userId, message, roleIds, memberId = null, guardianOf = [], guardianRelation = null }, actorId) {
     const user = await usersRepository.findById(userId);
     if (!user) throw AppError.notFound('Usuario no encontrado.');
     const membership = await usersRepository.findMembership(userId, clubId);
     // Un retirado puede volver a ser invitado; activo/suspendido/pendiente ya está en el club.
     if (membership && membership.status !== USER_CLUB_STATUS.WITHDRAWN) throw AppError.conflict('Esta persona ya pertenece al club.');
+    let linkMemberId = null;
+    if (memberId) {
+      const member = await membersRepository.findActiveById(Number(memberId));
+      if (!member || member.club_id !== clubId) throw AppError.badRequest('La ficha indicada no pertenece a este club.');
+      if (member.user_id) throw AppError.conflict('Esa ficha ya está vinculada a otra cuenta.');
+      linkMemberId = member.id;
+    }
+    const guardianIds = [...new Set((guardianOf || []).map(Number).filter(Boolean))].filter((id) => id !== linkMemberId);
+    for (const id of guardianIds) {
+      const member = await membersRepository.findActiveById(id);
+      if (!member || member.club_id !== clubId) throw AppError.badRequest('Una de las fichas a cargo no pertenece a este club.');
+    }
     if (await clubUserInvitationsRepository.findByClubAndUser(clubId, userId)) {
       throw AppError.conflict('Esta persona ya tiene una invitación pendiente de este club.');
     }
@@ -53,7 +66,10 @@ class ClubUserInvitationsService {
     let id;
     try {
       id = await withTransaction((conn) =>
-        clubUserInvitationsRepository.create({ clubId, userId, invitedBy: actorId, message: cleanMessage, roleIds: finalRoleIds }, conn)
+        clubUserInvitationsRepository.create(
+          { clubId, userId, invitedBy: actorId, message: cleanMessage, roleIds: finalRoleIds, memberId: linkMemberId, guardianOf: guardianIds, guardianRelation: guardianRelation ? String(guardianRelation).trim().slice(0, 40) : null },
+          conn
+        )
       );
     } catch (error) {
       // Dos admins invitando a la misma persona a la vez (uk_club_user_invitations).
@@ -131,6 +147,18 @@ class ClubUserInvitationsService {
     return invitation;
   }
 
+  _guardianIds(invitation) {
+    let raw = invitation.guardian_member_ids;
+    if (typeof raw === 'string') {
+      try {
+        raw = JSON.parse(raw);
+      } catch {
+        raw = [];
+      }
+    }
+    return Array.isArray(raw) ? raw.map(Number).filter(Boolean) : [];
+  }
+
   async accept(userId, invitationId) {
     const invitation = await this._ownInvitation(userId, invitationId);
     const club = await clubsRepository.findActiveById(invitation.club_id);
@@ -138,32 +166,24 @@ class ClubUserInvitationsService {
     const clubId = club.id;
     const roles = await clubUserInvitationsRepository.findRoles([invitation.id]);
     const existing = await usersRepository.findMembership(userId, clubId);
-
     if (existing && [USER_CLUB_STATUS.ACTIVE, USER_CLUB_STATUS.SUSPENDED].includes(existing.status)) {
       await clubUserInvitationsRepository.claimDelete(invitation.id);
-      throw AppError.conflict('Ya perteneces a este club.');
     }
+    clubEntryService.assertCanEnter(existing);
 
-    const clubsCountBefore = await usersRepository.countClubsForUser(userId);
     await withTransaction(async (conn) => {
       // Solo quien la borra primero sigue (doble clic, aceptar en dos pestañas, el club la cancela).
       if (!(await clubUserInvitationsRepository.claimDelete(invitation.id, conn))) throw AppError.notFound('Invitación no encontrada.');
-      await usersRepository.addToClub({ userId, clubId, status: USER_CLUB_STATUS.ACTIVE, isDefault: clubsCountBefore === 0 }, conn);
-      // Los roles los define la invitación (también si vuelve tras ser retirado con otros roles).
-      await conn.query('DELETE FROM user_roles WHERE user_id = ? AND club_id = ?', [userId, clubId]);
-      for (const role of roles) {
-        await rolesRepository.assignToUser({ userId, roleId: role.id, clubId, assignedBy: invitation.invited_by }, conn);
-      }
-      await usersRepository.setRequiresProfileCompletion(userId, clubId, false, conn);
-      // Vuelve tras haber sido retirado: se reactiva su ficha si el retiro la archivó.
-      if (existing?.status === USER_CLUB_STATUS.WITHDRAWN) {
-        const member = await membersRepository.findByUserId(userId, clubId, conn);
-        if (member) await membersService.applyStatus(member, 'active', userId, conn);
-      }
-      // Si además había pedido acceso, esa solicitud queda resuelta.
-      const request = await joinRequestsRepository.findPending(userId, clubId, conn);
-      if (request) await joinRequestsRepository.resolve({ id: request.id, status: JOIN_REQUEST_STATUS.APPROVED, reviewedBy: invitation.invited_by }, conn);
-      if (clubsCountBefore === 0) await usersRepository.setDefaultClub(userId, clubId, conn);
+      await clubEntryService.enter(conn, {
+        userId,
+        clubId,
+        roleIds: roles.map((r) => r.id),
+        requiresProfile: false,
+        linkMemberId: invitation.member_id || null,
+        guardianOf: this._guardianIds(invitation),
+        guardianRelation: invitation.guardian_relation || null,
+        actorId: invitation.invited_by,
+      });
     });
 
     const user = await usersRepository.findById(userId);

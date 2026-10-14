@@ -4,6 +4,7 @@ const settingsRepository = require('../repositories/settings.repository');
 const clubsRepository = require('../repositories/clubs.repository');
 const auditRepository = require('../repositories/audit.repository');
 const notificationsService = require('./notifications.service');
+const memberGuardiansRepository = require('../repositories/memberGuardians.repository');
 const emailService = require('./email.service');
 const logger = require('../helpers/logger');
 const { renderClubEmail } = require('../helpers/emailTemplate');
@@ -86,7 +87,9 @@ class DebtRemindersService {
       d.total += remaining;
       d.items.push({ chargeName: r.charge_name, period: periodText(r.period_label), remaining });
     }
-    return [...byMember.values()].map((d) => ({ ...d, channel: d.linkedUserId ? 'app' : d.email ? 'email' : null }));
+    // Cuentas que reciben el aviso en la app: la titular y los apoderados de la ficha.
+    for (const d of byMember.values()) d.userIds = await memberGuardiansRepository.findUserIdsForMember(d.memberId);
+    return [...byMember.values()].map((d) => ({ ...d, channel: d.userIds.length ? 'app' : d.email ? 'email' : null }));
   }
 
   async preview(clubId, chargeId = null) {
@@ -98,11 +101,17 @@ class DebtRemindersService {
     };
   }
 
-  async send(clubId, actorId = null, chargeId = null) {
+  /** `memberIds`: a quiénes enviar (por defecto, a todos los deudores con contacto); `note`: mensaje
+   * opcional de la directiva que se agrega al correo y a la notificación. */
+  async send(clubId, actorId = null, chargeId = null, { memberIds = null, note = null } = {}) {
     const club = await clubsRepository.findById(clubId);
     const settings = await settingsRepository.findAllByClub(clubId);
     const payBase = settings[PUBLIC_PAYMENTS_KEY] === '1' && club.public_code ? `${env.clientUrl.replace(/\/$/, '')}/pay/${club.public_code}` : null;
-    const list = await this.debtors(clubId, chargeId);
+    // Con "Mi club" activo, la notificación en la app lleva a "Mis pagos" de esa ficha.
+    const myClub = settings.self_service_enabled === '1' && settings.self_service_payments !== '0';
+    const all = await this.debtors(clubId, chargeId);
+    const list = Array.isArray(memberIds) ? all.filter((d) => memberIds.includes(d.memberId)) : all;
+    const extra = note ? String(note).trim().slice(0, 500) : '';
     let sent = 0;
     for (const d of list) {
       if (!d.channel) continue;
@@ -110,14 +119,17 @@ class DebtRemindersService {
       const lines = d.items.map((i) => `${i.chargeName} (${i.period}): ${clp(i.remaining)}`);
       try {
         if (d.channel === 'app') {
-          await notificationsService.notifyUser({
-            userId: d.linkedUserId,
-            clubId,
-            type: 'warning',
-            title: `Tienes ${clp(d.total)} pendientes en ${club.name}`,
-            message: `${lines.slice(0, 6).join(' · ')}${lines.length > 6 ? ' …' : ''}${link ? ' — Puedes pagar en la página del club.' : ''}`,
-            link: link || '/dashboard',
-          });
+          for (const userId of d.userIds) {
+            const own = userId === d.linkedUserId;
+            await notificationsService.notifyUser({
+              userId,
+              clubId,
+              type: 'warning',
+              title: own ? `Tienes ${clp(d.total)} pendientes en ${club.name}` : `${d.name.split(' ')[0]} tiene ${clp(d.total)} pendientes en ${club.name}`,
+              message: `${extra ? `${extra} — ` : ''}${lines.slice(0, 6).join(' · ')}${lines.length > 6 ? ' …' : ''}${myClub ? ' — Revisa y paga en "Mi club".' : link ? ' — Puedes pagar en la página del club.' : ''}`,
+              link: myClub ? `/my/payments?member=${d.memberId}` : link || '/dashboard',
+            });
+          }
         } else {
           await emailService.send({
             to: d.email,
@@ -127,7 +139,7 @@ class DebtRemindersService {
               title: `Tienes ${clp(d.total)} pendientes`,
               bodyHtml: `<p>Hola ${esc(d.name.split(' ')[0])},</p><p>Te recordamos que tienes estos pagos vencidos en <strong>${esc(club.name)}</strong>:</p><ul>${d.items
                 .map((i) => `<li>${esc(i.chargeName)} — ${esc(i.period)}: <strong>${clp(i.remaining)}</strong></li>`)
-                .join('')}</ul><p>Si ya pagaste, no te preocupes: puede que aún no lo hayamos registrado.</p>`,
+                .join('')}</ul>${extra ? `<p style="padding:10px 12px;border-left:3px solid ${esc(club.primary_color || '#999')};background:#f6f6f7">${esc(extra).replace(/\n/g, '<br>')}</p>` : ''}<p>Si ya pagaste, no te preocupes: puede que aún no lo hayamos registrado.</p>`,
               ctaText: link ? 'Ver y pagar' : undefined,
               ctaUrl: link || undefined,
             }),
@@ -146,7 +158,7 @@ class DebtRemindersService {
       action: 'DEBT_REMINDERS_SENT',
       entityType: chargeId ? 'charge' : 'club',
       entityId: chargeId ? Number(chargeId) : clubId,
-      changes: { sent, debtors: list.length },
+      changes: { sent, debtors: list.length, ...(extra ? { note: extra } : {}) },
     });
     return { sent, debtors: list.length, withoutContact: list.filter((d) => !d.channel).length };
   }

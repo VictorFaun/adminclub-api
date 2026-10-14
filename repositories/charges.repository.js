@@ -292,6 +292,19 @@ class ChargesRepository extends BaseRepository {
    *  - 'all': todos — la matriz decide qué filas mostrar según su historial de pertenencia (ver
    *    helpers/membership.js), y se pueden gestionar los períodos en que sí estaba.
    */
+  /** Miembros ELIMINADOS (fichas borradas antes de que solo se pudiera retirar) con períodos en
+   * este cobro — la matriz los sigue mostrando como retirados para no perder su historial. */
+  async findDeletedPayerIds(chargeId, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT DISTINCT ci.member_id AS id
+       FROM charge_instances ci
+       INNER JOIN members m ON m.id = ci.member_id AND m.deleted_at IS NOT NULL
+       WHERE ci.charge_id = ?`,
+      [chargeId]
+    );
+    return rows.map((r) => r.id);
+  }
+
   async expandTargetMemberIds(chargeId, conn = pool, { inactive = 'none' } = {}) {
     const statusFilter = inactive === 'all' ? "m.status IN ('active', 'inactive')" : "m.status = 'active'";
     const [rows] = await conn.query(

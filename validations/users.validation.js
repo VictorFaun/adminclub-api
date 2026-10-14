@@ -23,6 +23,8 @@ const removeUser = [
     .optional()
     .isIn(['keep', 'deactivate', 'delete'])
     .withMessage("memberAction debe ser 'keep', 'deactivate' o 'delete'."),
+  // Fecha del retiro de su ficha (solo con 'deactivate'); sin ella, hoy.
+  body('statusDate').optional({ nullable: true }).isISO8601().withMessage('Fecha de retiro inválida.'),
 ];
 
 const updateStatus = [
@@ -34,6 +36,8 @@ const updateRoles = [
   ...userId,
   body('roleIds').isArray({ min: 0 }).withMessage('roleIds debe ser un arreglo.'),
   body('roleIds.*').isInt({ min: 1 }),
+  // Ficha existente (sin cuenta) que se vincula al aceptar.
+  body('memberId').optional({ nullable: true }).isInt({ min: 1 }).withMessage('Ficha inválida.'),
 ];
 
 const updateMe = [
@@ -79,6 +83,9 @@ const inviteUser = [
   body('message').optional({ nullable: true }).isString().trim().isLength({ max: 500 }).withMessage('El mensaje admite hasta 500 caracteres.'),
   body('roleIds').optional().isArray().withMessage('roleIds debe ser un arreglo.'),
   body('roleIds.*').isInt({ min: 1 }),
+  body('guardianOf').optional().isArray({ max: 20 }).withMessage('guardianOf debe ser un arreglo.'),
+  body('guardianOf.*').isInt({ min: 1 }),
+  body('guardianRelation').optional({ nullable: true }).isString().trim().isLength({ max: 40 }),
 ];
 
 const invitationId = [param('invitationId').isInt({ min: 1 }).withMessage('Identificador de invitación inválido.')];

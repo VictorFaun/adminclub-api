@@ -37,4 +37,24 @@ const leaveEvent = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, null, 'Saliste del evento.');
 });
 
-module.exports = { feed, shareableUsers, getEvent, createEvent, updateEvent, removeEvent, leaveEvent };
+const listGroups = asyncHandler(async (req, res) => {
+  const data = await calendarService.listGroups(req.club.id, req.user.id);
+  return ApiResponse.ok(res, data, 'Grupos obtenidos correctamente.');
+});
+
+const createGroup = asyncHandler(async (req, res) => {
+  const data = await calendarService.createGroup(req.club.id, req.user.id, req.body);
+  return ApiResponse.created(res, data, 'Grupo creado correctamente.');
+});
+
+const updateGroup = asyncHandler(async (req, res) => {
+  const data = await calendarService.updateGroup(req.club.id, req.user.id, Number(req.params.groupId), req.body);
+  return ApiResponse.ok(res, data, 'Grupo actualizado correctamente.');
+});
+
+const removeGroup = asyncHandler(async (req, res) => {
+  await calendarService.removeGroup(req.club.id, req.user.id, Number(req.params.groupId));
+  return ApiResponse.ok(res, null, 'Grupo eliminado correctamente.');
+});
+
+module.exports = { feed, shareableUsers, getEvent, createEvent, updateEvent, removeEvent, leaveEvent, listGroups, createGroup, updateGroup, removeGroup };

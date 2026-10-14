@@ -1,3 +1,4 @@
+const { isPastDue } = require('../helpers/membership');
 const expensesRepository = require('../repositories/expenses.repository');
 const expensesService = require('./expenses.service');
 const expenseInstancesRepository = require('../repositories/expenseInstances.repository');
@@ -48,7 +49,7 @@ class ExpensePaymentsService {
   }
 
   _resolveDisplayStatus(row) {
-    if (row.status === 'pending' && new Date(row.due_date) < new Date()) return 'overdue';
+    if (row.status === 'pending' && isPastDue(row.due_date)) return 'overdue';
     return row.status;
   }
 
@@ -169,7 +170,7 @@ class ExpensePaymentsService {
    * criterio que payments.service.js#_virtualCellToDto. */
   _virtualCellToDto(expense, periodKey) {
     const dueDate = this._dueDateForPeriod(expense, periodKey);
-    const isOverdue = dueDate < new Date();
+    const isOverdue = isPastDue(dueDate);
     return {
       instanceId: null,
       periodLabel: periodKey,

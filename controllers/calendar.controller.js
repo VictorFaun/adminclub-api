@@ -1,9 +1,10 @@
 const asyncHandler = require('../helpers/asyncHandler');
 const ApiResponse = require('../helpers/ApiResponse');
 const calendarService = require('../services/calendar.service');
+const permissionService = require('../services/permission.service');
 
 const feed = asyncHandler(async (req, res) => {
-  const data = await calendarService.getFeed(req.club.id, req.user.id, req.authContext, { from: req.query.from, to: req.query.to });
+  const data = await calendarService.getFeed(req.club.id, req.user.id, req.authContext, { from: req.query.from, to: req.query.to, readOnly: !req.membership && !permissionService.hasFunction(req.authContext, 'EDIT_ALL_CLUBS') });
   return ApiResponse.ok(res, data, 'Calendario obtenido correctamente.');
 });
 

@@ -11,6 +11,11 @@ const list = asyncHandler(async (req, res) => {
   });
 });
 
+const getOne = asyncHandler(async (req, res) => {
+  const data = await notificationsService.getForUser(req.user.id, Number(req.params.id));
+  return ApiResponse.ok(res, data, 'Notificación obtenida correctamente.');
+});
+
 const markRead = asyncHandler(async (req, res) => {
   await notificationsService.markRead(req.user.id, Number(req.params.id));
   return ApiResponse.ok(res, null, 'Notificación marcada como leída.');
@@ -26,4 +31,4 @@ const broadcast = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, { sentTo: count }, 'Notificación enviada correctamente.');
 });
 
-module.exports = { list, markRead, markAllRead, broadcast };
+module.exports = { list, getOne, markRead, markAllRead, broadcast };

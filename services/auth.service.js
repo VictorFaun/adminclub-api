@@ -9,6 +9,9 @@ const chargesRepository = require('../repositories/charges.repository');
 const trainingsRepository = require('../repositories/trainings.repository');
 const platformSettingsRepository = require('../repositories/platformSettings.repository');
 const settingsRepository = require('../repositories/settings.repository');
+const pushSubscriptionsRepository = require('../repositories/pushSubscriptions.repository');
+const { describeUserAgent, displayIp } = require('../helpers/userAgent');
+const { emitToSession } = require('../sockets');
 const { withTransaction } = require('../config/database');
 const AppError = require('../helpers/AppError');
 const {
@@ -324,7 +327,8 @@ class AuthService {
   }
 
   async _issueTokenPair({ userId, sessionId, ipAddress, userAgent }, conn) {
-    const accessToken = signAccessToken({ sub: userId });
+    // `sid`: auth.middleware.js rechaza el token apenas se cierra esa sesión.
+    const accessToken = signAccessToken(sessionId ? { sub: userId, sid: sessionId } : { sub: userId });
     const refreshToken = signRefreshToken({ sub: userId, sid: sessionId });
     const expiresAt = new Date(Date.now() + msFromExpiresIn(env.jwt.refreshExpiresIn));
 
@@ -352,12 +356,16 @@ class AuthService {
 
     const user = await usersRepository.findById(payload.sub);
     if (!user || user.status !== USER_STATUS.ACTIVE) throw AppError.unauthorized('Usuario no válido.');
+    // Un token dentro del margen de rotación puede llegar justo después de cerrar su sesión.
+    if (stored.session_id && !(await sessionsRepository.isActive(stored.session_id))) {
+      throw AppError.unauthorized('La sesión ha expirado o ya fue cerrada.');
+    }
 
     const rotate = () =>
       withTransaction(async (conn) => {
         const pair = await this._issueTokenPair({ userId: user.id, sessionId: stored.session_id, ipAddress, userAgent }, conn);
         await sessionsRepository.revokeByHash(tokenHash, hashToken(pair.refreshToken), conn);
-        if (stored.session_id) await sessionsRepository.touch(stored.session_id, conn);
+        if (stored.session_id) await sessionsRepository.touch(stored.session_id, { ipAddress, userAgent }, conn);
         return pair;
       });
     let pair;
@@ -383,7 +391,75 @@ class AuthService {
   }
 
   async logoutAll(userId) {
+    const sessionIds = await sessionsRepository.findActiveIdsByUser(userId);
     await sessionsRepository.revokeAllForUser(userId);
+    sessionIds.forEach((id) => emitToSession(id, 'session:revoked', { sessionId: id }));
+  }
+
+  // ------------------------------------------------------------------ sesiones (Perfil → Sesiones)
+
+  /** Sesiones abiertas de la cuenta (una por dispositivo/navegador donde inició sesión). */
+  async listSessions(userId, currentSessionId) {
+    const [rows, withPush] = await Promise.all([
+      sessionsRepository.findOpenByUser(userId),
+      pushSubscriptionsRepository.findSessionIdsWithPush(userId),
+    ]);
+    return rows.map((s) => {
+      const device = describeUserAgent(s.user_agent);
+      return {
+        id: s.id,
+        ipAddress: displayIp(s.ip_address),
+        userAgent: s.user_agent,
+        deviceLabel: device.label,
+        deviceType: device.deviceType,
+        createdAt: s.created_at,
+        lastActivityAt: s.last_activity_at,
+        isCurrent: s.id === currentSessionId,
+        pushEnabled: withPush.has(s.id),
+      };
+    });
+  }
+
+  /** Cierra una sesión propia (otro dispositivo, o esta misma). Ese dispositivo pierde el acceso
+   * al instante (auth.middleware.js revisa la sesión del token) y deja de recibir push. */
+  async revokeSession(userId, sessionId, { ipAddress, userAgent } = {}) {
+    const session = await sessionsRepository.findById(sessionId);
+    if (!session || session.user_id !== userId || !session.is_active) throw AppError.notFound('Sesión no encontrada.');
+    await sessionsRepository.deactivate(sessionId);
+    emitToSession(sessionId, 'session:revoked', { sessionId });
+    await auditRepository.logAction({
+      userId,
+      clubId: null,
+      action: 'SESSION_REVOKED',
+      entityType: 'session',
+      entityId: sessionId,
+      changes: { device: describeUserAgent(session.user_agent).label, ip: displayIp(session.ip_address) },
+      ipAddress,
+      userAgent,
+    });
+  }
+
+  /** Cierra todas las sesiones de la cuenta menos la actual. Devuelve cuántas cerró. */
+  async revokeOtherSessions(userId, currentSessionId, { ipAddress, userAgent } = {}) {
+    const ids = await sessionsRepository.findActiveIdsByUser(userId, currentSessionId);
+    for (const id of ids) {
+      // eslint-disable-next-line no-await-in-loop
+      await sessionsRepository.deactivate(id);
+      emitToSession(id, 'session:revoked', { sessionId: id });
+    }
+    if (ids.length) {
+      await auditRepository.logAction({
+        userId,
+        clubId: null,
+        action: 'SESSIONS_REVOKED_OTHERS',
+        entityType: 'session',
+        entityId: currentSessionId,
+        changes: { count: ids.length },
+        ipAddress,
+        userAgent,
+      });
+    }
+    return ids.length;
   }
 
   async forgotPassword(email) {
@@ -418,7 +494,8 @@ class AuthService {
     });
   }
 
-  async changePassword({ userId, currentPassword, newPassword }) {
+  /** Cierra las DEMÁS sesiones (quien cambió la contraseña sigue dentro en este dispositivo). */
+  async changePassword({ userId, currentPassword, newPassword, currentSessionId = null }) {
     if (!isStrongPassword(newPassword)) {
       throw AppError.badRequest('La nueva contraseña no cumple con los requisitos de seguridad.');
     }
@@ -428,7 +505,8 @@ class AuthService {
 
     const passwordHash = await hashPassword(newPassword);
     await usersRepository.updatePasswordHash(userId, passwordHash);
-    await sessionsRepository.revokeAllForUser(userId);
+    if (currentSessionId) await this.revokeOtherSessions(userId, currentSessionId);
+    else await this.logoutAll(userId);
   }
 
   async getContext(userId, clubId) {

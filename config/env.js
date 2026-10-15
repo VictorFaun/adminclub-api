@@ -90,6 +90,14 @@ const env = {
     fromAddress: process.env.EMAIL_FROM || 'no-reply@adminclub.dev',
     fromName: process.env.EMAIL_FROM_NAME || 'Admin Club',
   },
+
+  // Notificaciones push (Web Push, ver push.service.js). Sin las dos claves el push queda
+  // desactivado: GET /push/config responde `enabled: false` y la app oculta la opción.
+  push: {
+    vapidPublicKey: process.env.VAPID_PUBLIC_KEY,
+    vapidPrivateKey: process.env.VAPID_PRIVATE_KEY,
+    vapidSubject: process.env.VAPID_SUBJECT || 'mailto:no-reply@adminclub.dev',
+  },
 };
 
 const requiredInProduction = ['JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET', 'DB_PASSWORD'];

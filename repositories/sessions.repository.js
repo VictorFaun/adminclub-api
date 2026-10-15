@@ -9,12 +9,49 @@ class SessionsRepository {
     return result.insertId;
   }
 
-  async touch(sessionId, conn = pool) {
-    await conn.query('UPDATE sessions SET last_activity_at = NOW() WHERE id = ?', [sessionId]);
+  /** En cada refresh: última actividad + IP/navegador actuales (la IP de un celular cambia). */
+  async touch(sessionId, { ipAddress, userAgent } = {}, conn = pool) {
+    await conn.query(
+      'UPDATE sessions SET last_activity_at = NOW(), ip_address = COALESCE(?, ip_address), user_agent = COALESCE(?, user_agent) WHERE id = ?',
+      [ipAddress || null, userAgent ? String(userAgent).slice(0, 255) : null, sessionId]
+    );
   }
 
+  /** Cierra la sesión: la desactiva, revoca sus refresh tokens y borra sus suscripciones push
+   * (ese dispositivo deja de recibir avisos de esta cuenta). */
   async deactivate(sessionId, conn = pool) {
     await conn.query('UPDATE sessions SET is_active = 0 WHERE id = ?', [sessionId]);
+    await conn.query('UPDATE refresh_tokens SET revoked_at = NOW() WHERE session_id = ? AND revoked_at IS NULL', [sessionId]);
+    await conn.query('DELETE FROM push_subscriptions WHERE session_id = ?', [sessionId]);
+  }
+
+  async findById(sessionId, conn = pool) {
+    const [rows] = await conn.query('SELECT * FROM sessions WHERE id = ? LIMIT 1', [sessionId]);
+    return rows[0] || null;
+  }
+
+  async isActive(sessionId, conn = pool) {
+    const [rows] = await conn.query('SELECT is_active FROM sessions WHERE id = ? LIMIT 1', [sessionId]);
+    return !!rows[0]?.is_active;
+  }
+
+  /** Sesiones abiertas de verdad: activas y con un refresh token vigente (una sesión de la que
+   * nunca se salió pero cuyo token venció ya no sirve para entrar, así que no se lista). */
+  async findOpenByUser(userId, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT s.* FROM sessions s
+       WHERE s.user_id = ? AND s.is_active = 1
+         AND EXISTS (SELECT 1 FROM refresh_tokens rt WHERE rt.session_id = s.id AND rt.revoked_at IS NULL AND rt.expires_at > NOW())
+       ORDER BY s.last_activity_at DESC`,
+      [userId]
+    );
+    return rows;
+  }
+
+  /** Ids de las sesiones activas de la cuenta, salvo `exceptId` (para cerrar las demás). */
+  async findActiveIdsByUser(userId, exceptId = null, conn = pool) {
+    const [rows] = await conn.query('SELECT id FROM sessions WHERE user_id = ? AND is_active = 1 AND id <> ?', [userId, exceptId || 0]);
+    return rows.map((r) => r.id);
   }
 
   async findActiveByUser(userId, conn = pool) {
@@ -70,6 +107,7 @@ class SessionsRepository {
       userId,
     ]);
     await conn.query('UPDATE sessions SET is_active = 0 WHERE user_id = ?', [userId]);
+    await conn.query('DELETE FROM push_subscriptions WHERE user_id = ?', [userId]);
   }
 
   async purgeExpired(conn = pool) {

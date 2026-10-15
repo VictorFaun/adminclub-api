@@ -19,6 +19,11 @@ router.post('/refresh', authRateLimit, controller.refresh);
 router.post('/logout', controller.logout);
 router.post('/logout-all', authMiddleware, controller.logoutAll);
 
+// Sesiones de la cuenta por dispositivo (Perfil → Sesiones).
+router.get('/sessions', authMiddleware, controller.listSessions);
+router.post('/sessions/revoke-others', authMiddleware, controller.revokeOtherSessions);
+router.delete('/sessions/:id', authMiddleware, validation.sessionId, handleValidation, controller.revokeSession);
+
 router.post(
   '/forgot-password',
   strictAuthRateLimit,

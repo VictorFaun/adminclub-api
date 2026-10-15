@@ -1,6 +1,7 @@
 const router = require('express').Router();
-const { body } = require('express-validator');
+const { body, param } = require('express-validator');
 const controller = require('../controllers/memberApplications.controller');
+const consentsController = require('../controllers/publicFormConsents.controller');
 const { handleValidation, sanitizeBody } = require('../middlewares/validation.middleware');
 const { publicPaymentsReadRateLimit, publicMemberFormSubmitRateLimit } = require('../middlewares/rateLimit.middleware');
 const { uploadPrivate } = require('../middlewares/privateUpload.middleware');
@@ -10,6 +11,14 @@ const { TEMP_SUBDIR, parseMultipartFields } = require('../helpers/memberUploads'
 // (`/inscripcion/<código-del-club>`). Solo responde si el club lo activó; lo enviado queda como
 // solicitud pendiente de revisión, nunca crea una ficha directamente. Limitado por IP.
 router.get('/:code', publicPaymentsReadRateLimit, controller.publicForm);
+// PDFs de los consentimientos (reglamento, protocolo...): solo con formulario y consentimiento activos.
+router.get(
+  '/:code/consents/:consentId/files/:fileId',
+  publicPaymentsReadRateLimit,
+  [param('consentId').isInt({ min: 1 }), param('fileId').isInt({ min: 1 })],
+  handleValidation,
+  consentsController.publicDownloadFile
+);
 router.post(
   '/:code',
   publicMemberFormSubmitRateLimit,

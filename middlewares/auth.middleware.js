@@ -2,6 +2,7 @@ const asyncHandler = require('../helpers/asyncHandler');
 const AppError = require('../helpers/AppError');
 const { verifyAccessToken } = require('../helpers/tokenUtils');
 const usersRepository = require('../repositories/users.repository');
+const sessionsRepository = require('../repositories/sessions.repository');
 const { USER_STATUS } = require('../config/constants');
 
 function extractBearerToken(req) {
@@ -26,6 +27,12 @@ const authMiddleware = asyncHandler(async (req, res, next) => {
   if (!user || user.deleted_at) throw AppError.unauthorized('Usuario no encontrado.');
   if (user.status === USER_STATUS.SUSPENDED) throw AppError.forbidden('Tu cuenta ha sido suspendida.');
   if (user.status === USER_STATUS.BLOCKED) throw AppError.forbidden('Tu cuenta ha sido bloqueada.');
+  // Sesión cerrada (desde Perfil → Sesiones en otro dispositivo, logout, cambio de contraseña):
+  // el access token deja de valer al instante, sin esperar a que expire. Los tokens emitidos
+  // antes de que llevaran `sid` siguen valiendo hasta su vencimiento (15 min).
+  if (payload.sid && !(await sessionsRepository.isActive(payload.sid))) {
+    throw AppError.unauthorized('La sesión fue cerrada.');
+  }
 
   req.user = {
     id: user.id,
@@ -37,6 +44,7 @@ const authMiddleware = asyncHandler(async (req, res, next) => {
     defaultClubId: user.default_club_id,
   };
   req.tokenPayload = payload;
+  req.sessionId = payload.sid || null;
   next();
 });
 

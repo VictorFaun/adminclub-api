@@ -27,6 +27,7 @@ router.use('/attendance', require('./trainingAttendance.routes'));
 router.use('/training-settings', require('./trainingSettings.routes'));
 router.use('/calendar', require('./calendar.routes'));
 router.use('/me', require('./me.routes'));
+router.use('/push', require('./push.routes'));
 
 router.get('/health', (req, res) => {
   res.json({ success: true, message: 'API operativa.', data: { uptime: process.uptime() } });

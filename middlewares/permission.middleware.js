@@ -115,15 +115,31 @@ function requireGlobalRole(...roleNames) {
  * solo-lectura de VIEW_ALL_CLUBS/Super Admin, que no tiene `req.membership`) y, como todo
  * endpoint protegido, que no tenga la ficha pendiente. Igual que `requireFunction`, deja armado
  * `req.authContext` (lo usa el módulo para decidir qué más mostrar).
+ * "Miembro" = cuenta activa en el club (user_clubs), NO tener una ficha de miembro vinculada.
+ * `allowGlobalEditors`: deja pasar también a quien tiene EDIT_ALL_CLUBS (Super Admin) aunque no
+ * tenga cuenta en el club — para módulos que tienen sentido sin ficha propia (el calendario).
  */
-function requireClubMember() {
+function requireClubMember({ allowGlobalEditors = false } = {}) {
   return asyncHandler(async (req, res, next) => {
     if (!req.user) throw AppError.unauthorized('No autenticado.');
-    if (!req.membership) throw AppError.forbidden('Debes ser miembro del club para usar esta sección.');
+    assertProfileNotPending(req);
+    req.authContext = await permissionService.buildAuthorizationContext(req.user.id, req.club.id);
+    const isGlobalEditor = allowGlobalEditors && permissionService.hasFunction(req.authContext, 'EDIT_ALL_CLUBS');
+    if (!req.membership && !isGlobalEditor) throw AppError.forbidden('Debes ser miembro del club para usar esta sección.');
+    next();
+  });
+}
+
+/** Como `requireClubMember`, pero deja pasar también al modo de solo lectura (Super Admin /
+ * VIEW_ALL_CLUBS explorando un club del que no es miembro, ver club.middleware.js): su
+ * `authContext` ya viene recortado a VIEW_*. El service decide qué mostrar sin `req.membership`. */
+function requireClubAccess() {
+  return asyncHandler(async (req, res, next) => {
+    if (!req.user) throw AppError.unauthorized('No autenticado.');
     assertProfileNotPending(req);
     req.authContext = await permissionService.buildAuthorizationContext(req.user.id, req.club.id);
     next();
   });
 }
 
-module.exports = { requireFunction, requireFunctionOrResponsibleCharge, requireFunctionOrResponsibleTraining, requireGlobalRole, requireClubMember };
+module.exports = { requireFunction, requireFunctionOrResponsibleCharge, requireFunctionOrResponsibleTraining, requireGlobalRole, requireClubMember, requireClubAccess };

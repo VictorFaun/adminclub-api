@@ -1,4 +1,4 @@
-const { body } = require('express-validator');
+const { body, param } = require('express-validator');
 const { PASSWORD_REGEX } = require('../helpers/passwordUtils');
 const { NORMALIZE_EMAIL_OPTIONS } = require('../helpers/emailUtils');
 
@@ -38,6 +38,8 @@ const changePassword = [
 
 const defaultClub = [body('clubId').isInt({ min: 1 }).withMessage('clubId inválido.')];
 
+const sessionId = [param('id').isInt({ min: 1 }).withMessage('Sesión inválida.')];
+
 module.exports = {
   register,
   login,
@@ -47,4 +49,5 @@ module.exports = {
   verifyEmail,
   changePassword,
   defaultClub,
+  sessionId,
 };

@@ -4,14 +4,20 @@ const validation = require('../validations/calendar.validation');
 const { handleValidation, sanitizeBody } = require('../middlewares/validation.middleware');
 const { authMiddleware } = require('../middlewares/auth.middleware');
 const { clubContextMiddleware } = require('../middlewares/club.middleware');
-const { requireClubMember } = require('../middlewares/permission.middleware');
+const { requireClubMember, requireClubAccess } = require('../middlewares/permission.middleware');
 
 // Calendario (ver calendar.service.js): personal de cada miembro del club, sin funcionalidad
 // propia — lo que se muestra además de sus eventos (cumpleaños, entrenamientos) lo decide el
 // service según sus permisos.
-router.use(authMiddleware, clubContextMiddleware, requireClubMember());
+router.use(authMiddleware, clubContextMiddleware);
 
-router.get('/feed', validation.feed, handleValidation, controller.feed);
+// El feed también se abre a quien explora el club sin cuenta en él. Con EDIT_ALL_CLUBS (Super
+// Admin) usa el calendario completo: sus propios eventos y grupos en ese club, más entrenamientos y
+// cumpleaños. Solo con VIEW_ALL_CLUBS queda en solo lectura (entrenamientos y cumpleaños). Nadie
+// ve eventos personales ajenos que no le compartieron.
+router.get('/feed', requireClubAccess(), validation.feed, handleValidation, controller.feed);
+
+router.use(requireClubMember({ allowGlobalEditors: true }));
 router.get('/users', controller.shareableUsers);
 router.get('/events/:id', validation.eventId, handleValidation, controller.getEvent);
 router.post('/events', sanitizeBody, validation.saveEvent, handleValidation, controller.createEvent);

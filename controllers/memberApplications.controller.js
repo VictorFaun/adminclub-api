@@ -11,7 +11,7 @@ const publicForm = asyncHandler(async (req, res) => {
 });
 
 const publicSubmit = asyncHandler(async (req, res) => {
-  const data = await service.submit(req.params.code, req.body, req.files);
+  const data = await service.submit(req.params.code, req.body, req.files, { ipAddress: req.ip, userAgent: req.headers['user-agent'] });
   return ApiResponse.created(res, data, 'Solicitud enviada. El club la revisará a la brevedad.');
 });
 

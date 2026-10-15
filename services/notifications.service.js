@@ -8,8 +8,10 @@ const { parsePagination, buildMeta } = require('../helpers/pagination');
 const Notification = require('../models/Notification.model');
 const { pool } = require('../config/database');
 const { emitToUser } = require('../sockets');
+const pushService = require('./push.service');
 const logger = require('../helpers/logger');
 const env = require('../config/env');
+const AppError = require('../helpers/AppError');
 
 /** Etiqueta sobre el título del correo según el tipo de notificación — mismos textos que
  * app/src/app/core/models/notification.model.ts#NOTIFICATION_TYPE_LABEL. */
@@ -47,6 +49,12 @@ class NotificationsService {
     };
   }
 
+  async getForUser(userId, notificationId) {
+    const row = await notificationsRepository.findById(notificationId);
+    if (!row || row.user_id !== userId) throw AppError.notFound('Notificación no encontrada.');
+    return Notification.fromRow(row);
+  }
+
   async markRead(userId, notificationId) {
     await notificationsRepository.markRead(notificationId, userId);
   }
@@ -68,6 +76,9 @@ class NotificationsService {
     } catch {
       // Socket.IO puede no estar inicializado (p.ej. en scripts/tests) — no es crítico.
     }
+    // Aviso del sistema en todos los dispositivos de la cuenta con sesión abierta que activaron
+    // las notificaciones (fire and forget, ver push.service.js). Al tocarlo abre esta notificación.
+    pushService.sendToUser(userId, { title, body: message, url: `/n/${id}`, tag: `notification-${id}` });
     // Sin await: un correo lento/fallido no debe demorar ni tumbar la creación de la
     // notificación (que ya quedó persistida y empujada por socket) — mismo espíritu "mejor
     // esfuerzo" que el resto de email.service.js.
@@ -119,7 +130,7 @@ class NotificationsService {
    * Siempre acotado a miembros ACTIVOS de ese club — incluye al remitente si él mismo
    * queda dentro de los criterios elegidos (ej. está en el rol seleccionado).
    */
-  async broadcastToClub(clubId, { type, title, message, link, targetAll, roleIds, userIds }) {
+  async broadcastToClub(clubId, { type = 'info', title, message, link, targetAll, roleIds, userIds }) {
     const userIdsToNotify = await this._resolveBroadcastRecipients(clubId, { targetAll, roleIds, userIds });
     await Promise.all(
       userIdsToNotify.map((id) => this.notifyUser({ userId: id, clubId, type, title, message, link }))

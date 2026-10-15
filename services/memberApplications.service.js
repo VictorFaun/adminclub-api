@@ -8,6 +8,7 @@ const auditRepository = require('../repositories/audit.repository');
 const membersService = require('./members.service');
 const memberFieldsService = require('./memberFields.service');
 const notificationsService = require('./notifications.service');
+const publicFormConsentsService = require('./publicFormConsents.service');
 const emailService = require('./email.service');
 const { renderClubEmail } = require('../helpers/emailTemplate');
 const AppError = require('../helpers/AppError');
@@ -96,6 +97,12 @@ class MemberApplicationsService {
     return club;
   }
 
+  /** Club del formulario público (lanza 404 si no está disponible) — también para descargar los
+   * PDFs de sus consentimientos sin sesión (publicFormConsents.controller.js). */
+  async publicClub(code) {
+    return this._publicClub(code);
+  }
+
   /** Campos que van en el formulario público (los marcados para él, de cualquier tipo). */
   async _publicFields(clubId) {
     return (await memberFieldsService.listForClub(clubId)).filter((f) => f.inPublicForm);
@@ -121,6 +128,8 @@ class MemberApplicationsService {
       // Categoría a la que postula (si el club la pide): opcional u obligatoria.
       groupChoice: await this._offeredGroups(club.id),
       askMessage: await this._askMessage(club.id),
+      // Consentimientos y documentos activos (uso de imagen, términos, reglamento...).
+      consents: await publicFormConsentsService.listActive(club.id),
     };
   }
 
@@ -140,7 +149,8 @@ class MemberApplicationsService {
     };
   }
 
-  async submit(code, body, files = []) {
+  /** `meta`: IP y navegador de quien envía, para el respaldo de los consentimientos aceptados. */
+  async submit(code, body, files = [], meta = {}) {
     let club;
     try {
       club = await this._publicClub(code);
@@ -171,7 +181,10 @@ class MemberApplicationsService {
       if (groupId && !choice.groups.some((g) => g.id === groupId)) throw AppError.badRequest('La categoría elegida no está disponible.');
       // Si el club no pide mensaje, se ignora aunque venga.
       const message = body.message && (await this._askMessage(club.id)) ? String(body.message).trim().slice(0, 500) || null : null;
+      // Consentimientos: sin los obligatorios marcados no se envía.
+      const consents = await publicFormConsentsService.resolveAcceptance(club.id, this._parseConsentIds(body.consents), meta);
       id = await memberApplicationsRepository.create({ clubId: club.id, fields, message, groupId: groupId || null });
+      if (consents.length) await publicFormConsentsService.saveAcceptance(id, consents);
       for (const { field, files: list } of uploads) await memberApplicationsRepository.addFiles(id, field.id, list);
     } catch (error) {
       discard(files);
@@ -181,6 +194,18 @@ class MemberApplicationsService {
     await auditRepository.logAction({ userId: null, clubId: club.id, action: 'MEMBER_APPLICATION_SUBMITTED', entityType: 'member_application', entityId: id, changes: { name } });
     this._notifyReviewers(club.id, name);
     return { id };
+  }
+
+  /** Ids de consentimientos marcados: en multipart llegan como texto JSON ("[1,2]"). */
+  _parseConsentIds(raw) {
+    if (Array.isArray(raw)) return raw;
+    if (typeof raw !== 'string' || !raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
   }
 
   /** Una misma persona no puede tener dos solicitudes pendientes (por su identificador). */
@@ -245,6 +270,7 @@ class MemberApplicationsService {
   async _toDtos(clubId, rows) {
     const catalog = await memberFieldsRepository.findByClub(clubId);
     const files = await memberApplicationsRepository.findFiles(rows.map((r) => r.id));
+    const consents = await publicFormConsentsService.acceptanceByApplication(rows.map((r) => r.id));
     const codeOf = (role) => catalog.find((x) => x.role === role)?.code;
     const nameCodes = ['first_name', 'middle_name', 'last_name', 'second_last_name'].map(codeOf).filter(Boolean);
     return rows.map((row) => {
@@ -264,6 +290,8 @@ class MemberApplicationsService {
         createdAt: row.created_at,
         // Imágenes y archivos enviados (solo mientras está pendiente: al revisarla pasan a la ficha o se borran).
         files: files.filter((f) => f.application_id === row.id).map((f) => this._fileDto(f)),
+        // Copia de los consentimientos tal como estaban al enviar (qué aceptó, cuándo y desde qué IP).
+        consents: consents.get(row.id) || [],
       };
     });
   }

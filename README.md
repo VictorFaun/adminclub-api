@@ -80,6 +80,20 @@ Prefijo base: `/api/v1`. Salvo que se indique "público", todos los endpoints re
 | `POST /auth/refresh` | Renueva el access token usando el refresh token | Público |
 | `POST /auth/logout` | Cierra la sesión actual (revoca el refresh token) | Público |
 | `POST /auth/logout-all` | Cierra todas las sesiones activas del usuario | Autenticado |
+| `GET /auth/sessions` | Sesiones abiertas de la cuenta por dispositivo (IP, navegador, última actividad, si tiene push) | Autenticado |
+| `DELETE /auth/sessions/:id` | Cierra una sesión propia: ese dispositivo pierde el acceso al instante y deja de recibir push | Autenticado |
+| `POST /auth/sessions/revoke-others` | Cierra todas las sesiones salvo la actual | Autenticado |
+| `GET /push/config` | `{ enabled, publicKey }` (clave pública VAPID) para suscribirse a notificaciones push | Público |
+| `POST /push/subscriptions` | Guarda/reasigna la suscripción push de este dispositivo, ligada a la sesión actual | Autenticado |
+| `DELETE /push/subscriptions` | Quita la suscripción push de este dispositivo (`{ endpoint }`) | Autenticado |
+| `POST /push/test` | Aviso push de prueba a mis dispositivos | Autenticado |
+| `GET /notifications/:id` | Una notificación propia (la abre el aviso push) | Autenticado |
+| `GET /member-applications/consents` | Consentimientos y documentos del formulario público (uso de imagen, términos, reglamento...) | `VIEW_MEMBER_FIELDS` |
+| `POST /member-applications/consents` · `PUT /member-applications/consents/:consentId` · `DELETE ...` | Crear / editar (título, texto, casilla, obligatorio, activo) / eliminar | `EDIT_MEMBER_FIELDS` |
+| `PUT /member-applications/consents/order` | Orden en el formulario (`{ ids }`) | `EDIT_MEMBER_FIELDS` |
+| `POST /member-applications/consents/:consentId/files` · `DELETE .../files/:fileId` | Subir PDFs (`files`, hasta 10, 20MB c/u) / quitar uno | `EDIT_MEMBER_FIELDS` |
+| `GET /member-applications/consents/:consentId/files/:fileId` | Ver un PDF | `VIEW_MEMBER_FIELDS` |
+| `GET /public/join/:code/consents/:consentId/files/:fileId` | PDF de un consentimiento activo, desde el formulario público | Público |
 | `POST /auth/forgot-password` | Envía instrucciones para restablecer la contraseña | Público |
 | `POST /auth/reset-password` | Restablece la contraseña usando el token recibido por correo | Público |
 | `POST /auth/verify-email` | Verifica el correo electrónico con el token recibido | Público |

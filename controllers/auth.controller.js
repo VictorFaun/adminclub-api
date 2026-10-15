@@ -108,8 +108,26 @@ const changePassword = asyncHandler(async (req, res) => {
     userId: req.user.id,
     currentPassword: req.body.currentPassword,
     newPassword: req.body.newPassword,
+    currentSessionId: req.sessionId,
   });
   return ApiResponse.ok(res, null, 'Contraseña actualizada correctamente.');
+});
+
+const listSessions = asyncHandler(async (req, res) => {
+  const data = await authService.listSessions(req.user.id, req.sessionId);
+  return ApiResponse.ok(res, data, 'Sesiones obtenidas correctamente.');
+});
+
+const revokeSession = asyncHandler(async (req, res) => {
+  const sessionId = Number(req.params.id);
+  await authService.revokeSession(req.user.id, sessionId, { ipAddress: req.ip, userAgent: req.headers['user-agent'] });
+  if (sessionId === req.sessionId) clearRefreshCookie(res);
+  return ApiResponse.ok(res, null, 'Sesión cerrada correctamente.');
+});
+
+const revokeOtherSessions = asyncHandler(async (req, res) => {
+  const closed = await authService.revokeOtherSessions(req.user.id, req.sessionId, { ipAddress: req.ip, userAgent: req.headers['user-agent'] });
+  return ApiResponse.ok(res, { closed }, closed ? 'Se cerraron las demás sesiones.' : 'No había otras sesiones abiertas.');
 });
 
 const setDefaultClub = asyncHandler(async (req, res) => {
@@ -131,4 +149,7 @@ module.exports = {
   me,
   changePassword,
   setDefaultClub,
+  listSessions,
+  revokeSession,
+  revokeOtherSessions,
 };

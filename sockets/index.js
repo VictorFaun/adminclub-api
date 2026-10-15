@@ -25,6 +25,7 @@ function initSockets(httpServer) {
       if (!token) return next(new Error('No autenticado.'));
       const payload = verifyAccessToken(token);
       socket.userId = payload.sub;
+      socket.sessionId = payload.sid || null;
       next();
     } catch {
       next(new Error('Token inválido.'));
@@ -33,6 +34,8 @@ function initSockets(httpServer) {
 
   io.on('connection', (socket) => {
     socket.join(`user:${socket.userId}`);
+    // Al cerrar esta sesión desde otro dispositivo, se le avisa para que salga al instante.
+    if (socket.sessionId) socket.join(`session:${socket.sessionId}`);
 
     // `emitToClub` no se usa todavía en ningún módulo (hoy toda notificación en vivo va por
     // `emitToUser`), pero la room `club:{id}` ya existe y cualquier cliente autenticado con
@@ -83,4 +86,10 @@ function emitToClub(clubId, event, payload) {
   io.to(`club:${clubId}`).emit(event, payload);
 }
 
-module.exports = { initSockets, getIO, emitToUser, emitToClub };
+/** Emite un evento solo a las conexiones de una sesión (un dispositivo/navegador). */
+function emitToSession(sessionId, event, payload) {
+  if (!io) return;
+  io.to(`session:${sessionId}`).emit(event, payload);
+}
+
+module.exports = { initSockets, getIO, emitToUser, emitToClub, emitToSession };

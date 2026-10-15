@@ -58,16 +58,20 @@ class CalendarService {
     if ((parseDate(to) - parseDate(from)) / 86400000 > MAX_RANGE_DAYS) throw AppError.badRequest('El rango pedido es demasiado largo.');
   }
 
-  async getFeed(clubId, userId, authContext, { from, to }) {
+  /** `readOnly`: quien explora el club sin cuenta en él y solo con VIEW_ALL_CLUBS (el Super Admin,
+   * con EDIT_ALL_CLUBS, usa el calendario completo). No ve eventos ni puede crear: solo
+   * entrenamientos y cumpleaños. */
+  async getFeed(clubId, userId, authContext, { from, to, readOnly = false }) {
     this._assertRange(from, to);
     const canBirthdays = permissionService.hasAnyFunction(authContext, [FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED]);
     const [events, birthdays, trainings, groups] = await Promise.all([
-      this._events(clubId, userId, from, to),
+      readOnly ? [] : this._events(clubId, userId, from, to),
       canBirthdays ? this._birthdays(clubId, userId, authContext, from, to) : null,
       this._trainings(clubId, userId, authContext, from, to),
-      this.listGroups(clubId, userId),
+      readOnly ? [] : this.listGroups(clubId, userId),
     ]);
     return {
+      readOnly,
       events,
       // Grupos propios de la persona (filtros de la vista y opción al crear un evento).
       groups,

@@ -14,6 +14,7 @@ require('dotenv').config();
 const crypto = require('crypto');
 const { pool } = require('../config/database');
 const memberFieldsService = require('../services/memberFields.service');
+const memberFormsService = require('../services/memberForms.service');
 const { hashPassword } = require('../helpers/passwordUtils');
 const { FUNCTIONS } = require('../config/constants');
 
@@ -171,6 +172,8 @@ async function createMember(conn, { clubId, firstName, lastName, secondLastName,
   );
   const memberId = result.insertId;
   const fields = await roleFields(conn, clubId);
+  // Responde las fichas por defecto del club (sql/072).
+  await conn.query('INSERT IGNORE INTO member_form_members (form_id, member_id) SELECT id, ? FROM member_forms WHERE club_id = ? AND is_default = 1', [memberId, clubId]);
   const values = { first_name: firstName, last_name: lastName, second_last_name: secondLastName, email, phone, identifier: nextRut(), birth_date: birthDate };
   for (const [role, value] of Object.entries(values)) {
     if (!fields[role] || value === null || value === undefined || value === '') continue;
@@ -302,6 +305,8 @@ async function main() {
         'INSERT INTO member_fields (club_id, code, label, field_type, options, is_required, sort_order) VALUES (?, ?, ?, ?, ?, 0, ?)',
         [clubId, code, label, fieldType, options ? JSON.stringify(options) : null, sortOrder]
       );
+      // A la ficha por defecto, al final.
+      await memberFormsService.attachField(clubId, result.insertId, null, conn);
       return result.insertId;
     }
     const fieldTalla = await ensureMemberField(trawenId, 'talla_camiseta', 'Talla de camiseta', 'select', ['XS', 'S', 'M', 'L', 'XL'], 1);
@@ -818,6 +823,10 @@ async function main() {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [uuid(), clubId, code, createdBy, maxUses || null, expiresAt || null, status, defaultRoleId || null, requiresProfile ? 1 : 0, note || null]
       );
+      // Pedir ficha = pedir la ficha por defecto del club (sql/072).
+      if (requiresProfile) {
+        await conn.query('INSERT IGNORE INTO invitation_forms (invitation_id, form_id) SELECT ?, id FROM member_forms WHERE club_id = ? AND is_default = 1', [result.insertId, clubId]);
+      }
       return result.insertId;
     }
     await ensureInvitation(trawenId, { code: 'TRAWEN-2026', createdBy: trawenAdminUserId, maxUses: 50, status: 'active', requiresProfile: true, note: 'Invitación general de temporada 2026' });

@@ -17,7 +17,7 @@ const trainingsService = require('../services/trainings.service');
  */
 function assertProfileNotPending(req) {
   if (req.membership?.requires_profile_completion) {
-    throw AppError.forbidden('Debes completar tu ficha de miembro antes de continuar.', { code: 'PROFILE_REQUIRED' });
+    throw AppError.forbidden('Debes completar tu ficha de miembro y esperar que el club la apruebe antes de continuar.', { code: 'PROFILE_REQUIRED' });
   }
 }
 

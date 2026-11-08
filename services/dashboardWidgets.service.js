@@ -6,6 +6,7 @@ const paymentsRepository = require('../repositories/payments.repository');
 const chargeSettlementsRepository = require('../repositories/chargeSettlements.repository');
 const expensePaymentsRepository = require('../repositories/expensePayments.repository');
 const settingsRepository = require('../repositories/settings.repository');
+const treasuryAccountsRepository = require('../repositories/treasuryAccounts.repository');
 const { PROFILE_COLS, profileJoin } = require('../helpers/memberProfileSql');
 const { FUNCTIONS } = require('../config/constants');
 
@@ -46,6 +47,7 @@ class DashboardWidgetsService {
       'charge-progress': { requires: [F.VIEW_PAYMENTS, F.VIEW_PAYMENTS_SCOPED], load: this._chargeProgress },
       attendance: { requires: [F.VIEW_ATTENDANCE, F.VIEW_ATTENDANCE_SCOPED, F.VIEW_TRAININGS], load: this._attendance },
       applications: { requires: [F.VIEW_MEMBERS], load: this._applications },
+      'account-movements': { requires: [F.VIEW_TREASURY_DASHBOARD], load: this._accountMovements },
     };
   }
 
@@ -364,6 +366,61 @@ class DashboardWidgetsService {
           : null;
         return { trainingId: r.id, name: r.name, color: r.color, attended, marked, pct: marked ? Math.round((attended / marked) * 100) : null, lastSession };
       }),
+    };
+  }
+
+  /** Últimos movimientos de una cuenta de Tesorería (o de todas): entradas y salidas con su
+   * origen (pago de quién, gasto, entrega de un responsable, transferencia). */
+  async _accountMovements(clubId, _auth, _actor, { accountId, limit }) {
+    const accounts = await treasuryAccountsRepository.findAllByClub(clubId);
+    const names = new Map(accounts.map((a) => [a.id, a.deleted_at ? `${a.name} (eliminada)` : a.name]));
+    // Una cuenta que no es del club (o eliminada y ya no elegible) cae a "todas".
+    const selected = accountId && accounts.some((a) => a.id === Number(accountId) && !a.deleted_at) ? Number(accountId) : null;
+    const rows = await treasuryAccountsRepository.movements(clubId, { accountId: selected, limit: Math.min(Math.max(Number(limit) || 20, 1), 50) });
+    const items = rows.map((r) => {
+      const amount = Number(r.amount);
+      let title;
+      let subtitle;
+      switch (r.kind) {
+        case 'payment':
+          title = r.detail ? `Pago de ${r.detail}` : 'Pago';
+          subtitle = r.label;
+          break;
+        case 'settlement':
+          title = r.detail ? `Entrega de ${r.detail}` : 'Entrega de un responsable';
+          subtitle = r.label;
+          break;
+        case 'expense':
+          title = r.label;
+          subtitle = 'Pago de gasto';
+          break;
+        case 'transfer_in':
+          title = `Transferencia desde ${r.from_name}`;
+          subtitle = r.detail;
+          break;
+        case 'transfer_out':
+          title = `Transferencia a ${r.to_name}`;
+          subtitle = r.detail;
+          break;
+        default:
+          title = `${r.from_name} → ${r.to_name}`;
+          subtitle = r.detail || 'Transferencia entre cuentas';
+      }
+      return {
+        key: `${r.kind}-${r.ref_id}`,
+        kind: r.kind,
+        amount,
+        date: r.happened_at,
+        title,
+        subtitle: subtitle || null,
+        accountName: r.account_id ? names.get(r.account_id) ?? null : 'Sin cuenta asignada',
+      };
+    });
+    return {
+      accountId: selected,
+      accountName: selected ? names.get(selected) : null,
+      accounts: accounts.filter((a) => !a.deleted_at).map((a) => ({ id: a.id, name: a.name })),
+      items,
     };
   }
 

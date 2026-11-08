@@ -4,6 +4,7 @@ const membersRepository = require('../repositories/members.repository');
 const joinRequestsRepository = require('../repositories/joinRequests.repository');
 const membersService = require('./members.service');
 const memberGuardiansRepository = require('../repositories/memberGuardians.repository');
+const memberFormsRepository = require('../repositories/memberForms.repository');
 const AppError = require('../helpers/AppError');
 const { USER_CLUB_STATUS, JOIN_REQUEST_STATUS } = require('../config/constants');
 
@@ -31,7 +32,9 @@ class ClubEntryService {
     }
   }
 
-  async enter(conn, { userId, clubId, roleIds = [], requiresProfile = false, linkMemberId = null, guardianOf = [], guardianRelation = null, actorId = null }) {
+  /** `formIds`: fichas que pide el camino (invitación por código); `requiresProfile` sin `formIds`
+   * = las fichas por defecto del club (compatibilidad). */
+  async enter(conn, { userId, clubId, roleIds = [], requiresProfile = false, formIds = [], linkMemberId = null, guardianOf = [], guardianRelation = null, actorId = null }) {
     const existing = await usersRepository.findMembership(userId, clubId, conn);
     this.assertCanEnter(existing);
 
@@ -57,15 +60,26 @@ class ClubEntryService {
     if (member && member.status !== 'active' && existing?.status === USER_CLUB_STATUS.WITHDRAWN) {
       await membersService.reactivateOnReturn(member, actorId ?? userId, conn);
     }
-    // Apoderado: las fichas que tendrá a cargo (si siguen existiendo en el club).
+    // Apoderado: las fichas que tendrá a cargo (si siguen existiendo en el club). El apoderado es
+    // un miembro: su registro (el que ya tenía, o uno nuevo vinculado a la cuenta) queda vinculado
+    // a cada una.
+    const children = [];
     for (const id of guardianOf) {
       const child = await membersRepository.findActiveById(id, conn);
-      if (child && child.club_id === clubId && child.user_id !== userId) {
-        await memberGuardiansRepository.add({ memberId: child.id, userId, relation: guardianRelation, createdBy: actorId }, conn);
-      }
+      if (child && child.club_id === clubId && child.user_id !== userId) children.push(child);
     }
-    // Quien entra solo como apoderado no necesita ficha propia.
-    await usersRepository.setRequiresProfileCompletion(userId, clubId, !member && !!requiresProfile && !guardianOf.length, conn);
+    if (children.length && !member) member = await membersService.ensureForAccount(clubId, userId, actorId, conn);
+    for (const child of children) {
+      if (child.id === member.id) continue;
+      await memberGuardiansRepository.add({ memberId: child.id, guardianMemberId: member.id, relation: guardianRelation, createdBy: actorId }, conn);
+    }
+    // Fichas pendientes: solo si se pidieron y no tiene ya un registro de miembro (un apoderado
+    // que entra lo tiene desde arriba, así que no se le exige ficha propia).
+    let pending = [];
+    if (!member && (requiresProfile || formIds.length)) {
+      pending = formIds.length ? formIds : await memberFormsRepository.findDefaultIds(clubId, conn);
+    }
+    await usersRepository.setPendingForms(userId, clubId, pending, conn);
 
     // Otros caminos pendientes de esta persona en este club: quedan resueltos.
     const request = await joinRequestsRepository.findPending(userId, clubId, conn);

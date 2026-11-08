@@ -692,12 +692,13 @@ class TrainingAttendanceService {
         ? await pool.query('SELECT id, user_id FROM members WHERE id IN (?) AND user_id IS NOT NULL', [coaches.map((c) => c.memberId)])
         : [[]];
       if (!coachUsers.length) return;
+      const today = await this._clubToday(training.club_id);
       for (const memberId of memberIds) {
         const [rows] = await pool.query(
           `SELECT status FROM training_attendances
-           WHERE training_id = ? AND member_id = ? AND status IN ('attended', 'absent') AND session_date <= CURDATE()
+           WHERE training_id = ? AND member_id = ? AND status IN ('attended', 'absent') AND session_date <= ?
            ORDER BY session_date DESC LIMIT ?`,
-          [training.id, memberId, ABSENCE_STREAK_ALERT + 1]
+          [training.id, memberId, today, ABSENCE_STREAK_ALERT + 1]
         );
         const streak = rows.findIndex((r) => r.status !== 'absent');
         const count = streak === -1 ? rows.length : streak;
@@ -727,13 +728,14 @@ class TrainingAttendanceService {
     if (!training || training.club_id !== clubId) throw AppError.notFound('Entrenamiento no encontrado.');
     const { memberIds } = await this._resolveTrainingParticipants(training, actorId, authContext);
     if (!memberIds.length) return { days: STATS_WINDOW_DAYS, members: {} };
-    await this.closePastSessions(trainingId, await this._clubToday(clubId));
+    const today = await this._clubToday(clubId);
+    await this.closePastSessions(trainingId, today);
     const [rows] = await pool.query(
       `SELECT member_id, session_date, status FROM training_attendances
        WHERE training_id = ? AND member_id IN (?) AND status IN ('attended', 'absent')
-         AND session_date BETWEEN DATE_SUB(CURDATE(), INTERVAL ? DAY) AND CURDATE()
+         AND session_date BETWEEN DATE_SUB(?, INTERVAL ? DAY) AND ?
        ORDER BY session_date DESC`,
-      [trainingId, memberIds, STATS_WINDOW_DAYS]
+      [trainingId, memberIds, today, STATS_WINDOW_DAYS, today]
     );
     const members = {};
     for (const r of rows) {

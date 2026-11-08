@@ -57,7 +57,11 @@ class MembersRepository extends BaseRepository {
    * pasó). `memberIds` = whitelist (scope) o null para todo el club. `search` filtra por nombre y
    * `groupId` por grupo — mismos filtros (y mismo orden de placeholders JOIN-antes-que-WHERE) que
    * `paginateByClub`. */
-  async findUpcomingBirthdays(clubId, days, memberIds, { search, groupId } = {}, conn = pool) {
+  /** `groupFilter` ({ groupIds, noGroup }): solo los de esos grupos y/o los que no tienen ninguno
+   * (lo que eligió cada uno en su notificación de cumpleaños); null = todos. `today`
+   * ('YYYY-MM-DD'): el "hoy" de quien recibe el aviso (CURDATE() es UTC: en Chile, desde las 21:00
+   * ya sería mañana); sin él, CURDATE(). */
+  async findUpcomingBirthdays(clubId, days, memberIds, { search, groupId, groupFilter = null, today = null } = {}, conn = pool) {
     if (memberIds && !memberIds.length) return [];
     const joins = [];
     const joinParams = [];
@@ -71,25 +75,36 @@ class MembersRepository extends BaseRepository {
       scopeSql = 'AND m.id IN (?)';
       whereParams.push(memberIds);
     }
+    if (groupFilter && (groupFilter.groupIds?.length || groupFilter.noGroup)) {
+      const parts = [];
+      if (groupFilter.groupIds?.length) {
+        parts.push('m.id IN (SELECT member_id FROM member_group_members WHERE group_id IN (?))');
+        whereParams.push(groupFilter.groupIds);
+      }
+      if (groupFilter.noGroup) parts.push('NOT EXISTS (SELECT 1 FROM member_group_members mgm_n WHERE mgm_n.member_id = m.id)');
+      scopeSql += ` AND (${parts.join(' OR ')})`;
+    }
     let searchSql = '';
     if (search) {
       searchSql = 'AND (mp.first_name LIKE ? OR mp.middle_name LIKE ? OR mp.last_name LIKE ? OR mp.second_last_name LIKE ?)';
       whereParams.push(...Array(4).fill(`%${search}%`));
     }
     const joinSql = joins.join(' ');
+    const ref = today ? 'CAST(? AS DATE)' : 'CURDATE()';
+    const refParams = (n) => (today ? Array(n).fill(today) : []);
     const [rows] = await conn.query(
-      `SELECT t.*, DATEDIFF(t.next_birthday, CURDATE()) AS days_until FROM (
+      `SELECT t.*, DATEDIFF(t.next_birthday, ${ref}) AS days_until FROM (
          SELECT m.*, ${PROFILE_COLS}, IF(
-           DATE_ADD(mp.birth_date, INTERVAL TIMESTAMPDIFF(YEAR, mp.birth_date, CURDATE()) YEAR) >= CURDATE(),
-           DATE_ADD(mp.birth_date, INTERVAL TIMESTAMPDIFF(YEAR, mp.birth_date, CURDATE()) YEAR),
-           DATE_ADD(mp.birth_date, INTERVAL TIMESTAMPDIFF(YEAR, mp.birth_date, CURDATE()) + 1 YEAR)
+           DATE_ADD(mp.birth_date, INTERVAL TIMESTAMPDIFF(YEAR, mp.birth_date, ${ref}) YEAR) >= ${ref},
+           DATE_ADD(mp.birth_date, INTERVAL TIMESTAMPDIFF(YEAR, mp.birth_date, ${ref}) YEAR),
+           DATE_ADD(mp.birth_date, INTERVAL TIMESTAMPDIFF(YEAR, mp.birth_date, ${ref}) + 1 YEAR)
          ) AS next_birthday
          FROM members m ${profileJoin()} ${joinSql}
          WHERE m.club_id = ? AND m.deleted_at IS NULL AND m.status = 'active' AND mp.birth_date IS NOT NULL ${scopeSql} ${searchSql}
        ) t
-       WHERE DATEDIFF(t.next_birthday, CURDATE()) BETWEEN 0 AND ?
+       WHERE DATEDIFF(t.next_birthday, ${ref}) BETWEEN 0 AND ?
        ORDER BY days_until ASC, t.first_name ASC`,
-      [...joinParams, ...whereParams, days]
+      [...refParams(5), ...joinParams, ...whereParams, ...refParams(1), days]
     );
     return rows;
   }
@@ -135,7 +150,7 @@ class MembersRepository extends BaseRepository {
    * VIEW_MEMBERS_SCOPED; si viene un arreglo VACÍO, el llamador debe evitar llamar acá y
    * devolver una página vacía directamente, sin query).
    */
-  async paginateByClub(clubId, { limit, offset, sortBy, sortOrder, search, status, groupId, linked, memberIds, fieldFilters = [], hiddenFieldIds = [] }) {
+  async paginateByClub(clubId, { limit, offset, sortBy, sortOrder, search, status, groupId, formId = null, linked, memberIds, fieldFilters = [], hiddenFieldIds = [] }) {
     const whereParams = [clubId];
     const where = ['m.club_id = ?', 'm.deleted_at IS NULL'];
     const joins = [];
@@ -153,6 +168,11 @@ class MembersRepository extends BaseRepository {
       // Un RUT/identificador se guarda sin puntos: los que tipee quien busca se ignoran.
       whereParams.push(`%${search}%`, `%${search.replace(/\./g, '')}%`);
       if (hiddenFieldIds.length) whereParams.push(hiddenFieldIds);
+    }
+    // Solo quienes responden esa ficha (sql/072).
+    if (formId) {
+      where.push('EXISTS (SELECT 1 FROM member_form_members fm WHERE fm.member_id = m.id AND fm.form_id = ?)');
+      whereParams.push(formId);
     }
     if (groupId) {
       joins.push('INNER JOIN member_group_members mgm_f ON mgm_f.member_id = m.id AND mgm_f.group_id = ?');

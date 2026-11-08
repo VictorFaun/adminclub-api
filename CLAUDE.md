@@ -140,8 +140,14 @@ no la tiene (ver `invitations.service.js#create`).
 ## Archivos privados y jobs
 
 - Archivos que NO deben ser públicos (documentos de miembros, comprobantes de pago) van con `middlewares/privateUpload.middleware.js` a `private_uploads/` (fuera de `/uploads`, que se sirve estático) y se entregan solo por un endpoint autenticado que revalida el acceso.
-- Endpoints públicos (sin `authMiddleware`) hoy: `/public/pay/:code` (la persona se identifica con su RUT; solo si el club la activó) — siempre con rate limit y sin revelar más que lo mínimo.
-- Crons: `cron/birthdayEmails.cron.js` (08:00) manda el correo de cumpleaños a quien lo activó.
+- Endpoints públicos (sin `authMiddleware`) hoy: `/public/pay/:code` (la persona se identifica con su RUT; solo si el club la activó) y `/public/join/:code` (formulario de una invitación sin cuenta) — siempre con rate limit y sin revelar más que lo mínimo.
+- Crons: `cron/birthdayEmails.cron.js` (cada 5 min) envía cada aviso de cumpleaños de cada usuario (varios por día, por grupos; ver `birthdays.service.js`) una vez al día; `cron/calendarReminders.cron.js` (cada minuto) envía los recordatorios de eventos (`calendar_event_reminders`, varios por evento).
+- Comprobantes de pago: al enviarse, aviso (app, push y correo) a quienes ven comprobantes (`paymentProofs.service.js#_notifyNewProof`); al aprobar/rechazar, `paymentNotices.service.js` manda UN correo por dirección (ficha + cuentas del miembro y apoderados; aprobado con el recibo PDF adjunto) y la notificación de la app sin correo (`sendEmail: false`). Un pago registrado directamente por tesorería no avisa a nadie.
+- Notificaciones: `notificationsService.notifyUser` crea la notificación + push + correo (`sendEmail: false` para omitir el correo). Pasarle `category` (`birthday`, `event`, `members`, `payments`, `trainings`, `invitation`, `general`; ver sql/070) para que se pueda filtrar en la pestaña Notificaciones.
+- Fichas por código de invitación: `POST /members/me` ya no crea el miembro, deja una solicitud (`member_applications.user_id`) que se aprueba en Solicitudes; hasta entonces la membresía sigue con `requires_profile_completion` y `pending_form_ids` (ver `memberApplications.service.js#submitForAccount`).
+- Varias fichas (sql/072): `member_forms` es una selección ordenada de campos del catálogo (`member_form_fields`); los usos especiales siguen siendo únicos por club y cada valor se guarda una vez por miembro aunque el campo esté en varias fichas. `member_form_members` = qué fichas responde cada miembro; toda validación de la ficha va acotada a esas fichas (`members.service.js#_prepareFieldValues` con `formIds`, `memberForms.service.js#fieldsOf`).
+- Apoderados = miembros vinculados a otro miembro (`member_guardians.guardian_member_id`); la cuenta es opcional. Para una cuenta usar `members.service.js#ensureForAccount` (su registro o uno nuevo, nunca dos).
+- Invitaciones: `requires_account` y `invitation_forms` son independientes (al menos una). `clubs.service.js#joinByCode` rechaza las que no exigen cuenta: esas solo sirven por su enlace público (`/public/join/:code`), que consume el uso con `claimUse` en la misma transacción que crea la solicitud.
 
 ## RUT
 

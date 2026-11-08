@@ -12,6 +12,16 @@ class ChargesRepository extends BaseRepository {
     return rows[0] || null;
   }
 
+  /** id + nombre actual de los cobros vigentes (ni eliminados ni archivados) de esa lista. */
+  async findNamesByIds(clubId, ids, conn = pool) {
+    if (!ids.length) return [];
+    const [rows] = await conn.query(
+      'SELECT id, name FROM charges WHERE club_id = ? AND id IN (?) AND deleted_at IS NULL AND archived_at IS NULL',
+      [clubId, ids]
+    );
+    return rows;
+  }
+
   /** Solo cobros NO archivados — un cobro archivado no debe generar ruido en la vista "Cobros" ni
    * en los tabs de "Pagos" (ver charges.service.js#listArchivedForClub para la vista contraria). */
   async findByClub(clubId, { sortBy = 'name', sortOrder = 'ASC' } = {}, conn = pool) {

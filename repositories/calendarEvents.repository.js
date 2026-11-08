@@ -89,20 +89,50 @@ class CalendarEventsRepository extends BaseRepository {
     return result.affectedRows > 0;
   }
 
-  /** Recordatorios vencidos sin enviar (los de hace más de un día se descartan: un aviso tan
-   * atrasado, p. ej. tras una caída larga del servidor, ya no sirve). */
+  // --- Recordatorios (varios por evento, ver sql/071) ---
+
+  async findReminders(eventIds, conn = pool) {
+    if (!eventIds.length) return [];
+    const [rows] = await conn.query('SELECT * FROM calendar_event_reminders WHERE event_id IN (?) ORDER BY minutes_before DESC', [eventIds]);
+    return rows;
+  }
+
+  /**
+   * Deja los recordatorios del evento en `reminders` ([{ minutes, remindAt }]): borra los que ya
+   * no están, agrega los nuevos y, si cambió el instante de uno que sigue, lo vuelve a dejar
+   * pendiente. Uno que no cambió conserva si ya se envió (no se repite al editar otra cosa).
+   */
+  async setReminders(eventId, reminders, conn = pool) {
+    const [current] = await conn.query('SELECT * FROM calendar_event_reminders WHERE event_id = ?', [eventId]);
+    const byMinutes = new Map(current.map((r) => [r.minutes_before, r]));
+    const wanted = new Set(reminders.map((r) => r.minutes));
+    const removed = current.filter((r) => !wanted.has(r.minutes_before)).map((r) => r.id);
+    if (removed.length) await conn.query('DELETE FROM calendar_event_reminders WHERE id IN (?)', [removed]);
+    for (const r of reminders) {
+      const existing = byMinutes.get(r.minutes);
+      if (!existing) {
+        await conn.query('INSERT INTO calendar_event_reminders (event_id, minutes_before, remind_at) VALUES (?, ?, ?)', [eventId, r.minutes, r.remindAt]);
+      } else if (new Date(existing.remind_at).getTime() !== r.remindAt.getTime()) {
+        await conn.query('UPDATE calendar_event_reminders SET remind_at = ?, sent_at = NULL WHERE id = ?', [r.remindAt, existing.id]);
+      }
+    }
+  }
+
+  /** Recordatorios vencidos sin enviar, con los datos de su evento (los de hace más de un día se
+   * descartan: un aviso tan atrasado, p. ej. tras una caída larga del servidor, ya no sirve). */
   async findDueReminders(conn = pool) {
     const [rows] = await conn.query(
-      `SELECT * FROM calendar_events
-       WHERE remind_at IS NOT NULL AND reminder_sent_at IS NULL AND remind_at <= UTC_TIMESTAMP() AND remind_at > UTC_TIMESTAMP() - INTERVAL 1 DAY
-       ORDER BY remind_at ASC LIMIT 500`
+      `SELECT e.*, r.id AS reminder_id, r.minutes_before
+       FROM calendar_event_reminders r INNER JOIN calendar_events e ON e.id = r.event_id
+       WHERE r.sent_at IS NULL AND r.remind_at <= UTC_TIMESTAMP() AND r.remind_at > UTC_TIMESTAMP() - INTERVAL 1 DAY
+       ORDER BY r.remind_at ASC LIMIT 500`
     );
     return rows;
   }
 
   /** Marca el aviso como enviado solo si nadie lo hizo antes (dos procesos a la vez). */
-  async claimReminder(eventId, conn = pool) {
-    const [result] = await conn.query('UPDATE calendar_events SET reminder_sent_at = UTC_TIMESTAMP() WHERE id = ? AND reminder_sent_at IS NULL', [eventId]);
+  async claimReminder(reminderId, conn = pool) {
+    const [result] = await conn.query('UPDATE calendar_event_reminders SET sent_at = UTC_TIMESTAMP() WHERE id = ? AND sent_at IS NULL', [reminderId]);
     return result.affectedRows > 0;
   }
 

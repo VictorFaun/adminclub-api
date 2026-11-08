@@ -8,6 +8,7 @@ class Notification {
       userId: row.user_id,
       clubId: row.club_id,
       type: row.type,
+      category: row.category || 'general',
       title: row.title,
       message: row.message,
       link: row.link,

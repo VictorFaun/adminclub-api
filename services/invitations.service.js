@@ -1,7 +1,7 @@
-const { pool } = require('../config/database');
 const invitationsRepository = require('../repositories/invitations.repository');
 const rolesRepository = require('../repositories/roles.repository');
 const auditRepository = require('../repositories/audit.repository');
+const memberFormsService = require('./memberForms.service');
 const AppError = require('../helpers/AppError');
 const { parsePagination, buildMeta } = require('../helpers/pagination');
 const { generateShortCode } = require('../helpers/tokenUtils');
@@ -11,8 +11,19 @@ const { FUNCTIONS } = require('../config/constants');
 
 const SORTABLE = ['created_at', 'expires_at', 'uses_count', 'status'];
 
+/**
+ * Invitaciones del club (sql/072). Cada una configura por separado:
+ *  - `requiresAccount`: exige crear una cuenta / iniciar sesión e ingresar al club (el flujo de
+ *    siempre: código en "Unirse a un club" o su enlace `/join?code=`).
+ *  - `formIds`: fichas que pide completar. Con cuenta, quedan pendientes al entrar (como el viejo
+ *    "exigir ficha"); sin cuenta, se responden directo en su enlace público `/inscripcion/<código>`
+ *    sin sesión y quedan como solicitud (memberApplications.service.js#submit).
+ * Al menos una de las dos (una invitación sin cuenta ni fichas no serviría para nada). El límite de
+ * usos y la expiración aplican igual a ambos tipos: un uso = una cuenta que entra o una solicitud.
+ */
 class InvitationsService {
-  toDto(row) {
+  toDto(row, forms = []) {
+    const requiresAccount = row.requires_account === undefined ? true : !!row.requires_account;
     return {
       id: row.id,
       uuid: row.uuid,
@@ -23,13 +34,43 @@ class InvitationsService {
       expiresAt: row.expires_at,
       status: row.status,
       defaultRoleId: row.default_role_id,
-      requiresMemberProfile: !!row.requires_member_profile,
+      requiresAccount,
+      formIds: forms.map((f) => f.id),
+      forms,
+      requiresMemberProfile: forms.length > 0,
       note: row.note,
       createdBy: row.created_by,
       creatorName: row.creator_username ?? null,
       createdAt: row.created_at,
-      shareUrl: `${env.clientUrl}/join?code=${row.code}`,
+      // Con cuenta: el flujo de ingreso al club. Sin cuenta: el formulario público de las fichas.
+      shareUrl: requiresAccount ? `${env.clientUrl}/join?code=${row.code}` : `${env.clientUrl}/inscripcion/${row.code}`,
     };
+  }
+
+  async _dto(id) {
+    const row = await invitationsRepository.findById(id);
+    return this.toDto(row, (await invitationsRepository.findFormsFor([id]))[id] || []);
+  }
+
+  /**
+   * ¿Se puede usar ahora? Lanza el motivo (y deja el estado al día si expiró o se agotó). La usan
+   * el ingreso por código (clubs.service.js#joinByCode) y el enlace público. El chequeo de usos
+   * se repite de forma atómica al consumir el uso (`claimUse`).
+   */
+  async assertUsable(invitation) {
+    if (!invitation) throw AppError.notFound('Código de invitación inválido.');
+    if (invitation.status === 'revoked') throw AppError.badRequest('Esta invitación fue deshabilitada por el club.');
+    if (invitation.status === 'exhausted') throw AppError.badRequest('Esta invitación ya alcanzó su límite de usos.');
+    if (invitation.status === 'expired') throw AppError.badRequest('Esta invitación ha expirado.');
+    if (invitation.status !== 'active') throw AppError.badRequest('Esta invitación ya no está activa.');
+    if (invitation.expires_at && new Date(invitation.expires_at) < new Date()) {
+      await invitationsRepository.setStatus(invitation.id, 'expired');
+      throw AppError.badRequest('Esta invitación ha expirado.');
+    }
+    if (invitation.max_uses && invitation.uses_count >= invitation.max_uses) {
+      await invitationsRepository.setStatus(invitation.id, 'exhausted');
+      throw AppError.badRequest('Esta invitación ya alcanzó su límite de usos.');
+    }
   }
 
   /** Elegir el rol con el que entrará quien use la invitación es, en la práctica, asignar un
@@ -44,7 +85,24 @@ class InvitationsService {
     return requestedRoleId;
   }
 
-  async update(clubId, invitationId, { maxUses, expiresAt, defaultRoleId, note, requiresMemberProfile }, actorId) {
+  /**
+   * Cuenta + fichas ya validadas. `formIds` sin indicar: se respeta el viejo `requiresMemberProfile`
+   * (→ las fichas por defecto) o, al editar, las que ya pedía. Caso inválido: ni cuenta ni fichas.
+   */
+  async _resolveConfig(clubId, { requiresAccount, formIds, requiresMemberProfile }, current = null) {
+    const account = requiresAccount === undefined ? (current ? !!current.requires_account : true) : !!requiresAccount;
+    let forms = await memberFormsService.resolveIds(clubId, formIds);
+    if (forms === null) {
+      if (requiresMemberProfile !== undefined) forms = requiresMemberProfile ? await memberFormsService.defaultIds(clubId) : [];
+      else forms = current ? await invitationsRepository.findFormIds(current.id) : [];
+    }
+    if (!account && !forms.length) {
+      throw AppError.unprocessable('La invitación debe pedir crear una cuenta, completar al menos una ficha, o ambas cosas.');
+    }
+    return { account, forms };
+  }
+
+  async update(clubId, invitationId, { maxUses, expiresAt, defaultRoleId, note, requiresAccount, formIds, requiresMemberProfile }, actorId) {
     const invitation = await invitationsRepository.findById(invitationId);
     if (!invitation || invitation.club_id !== clubId) throw AppError.notFound('Invitación no encontrada.');
 
@@ -53,9 +111,12 @@ class InvitationsService {
     if (newMaxUses !== null && newMaxUses < invitation.uses_count) {
       throw AppError.unprocessable(`Los usos máximos no pueden ser menores a los ya realizados (${invitation.uses_count}).`);
     }
+    const { account, forms } = await this._resolveConfig(clubId, { requiresAccount, formIds, requiresMemberProfile }, invitation);
+    const previousForms = await invitationsRepository.findFormIds(invitationId);
 
-    // Si el actor no puede asignar roles, el rol de la invitación se conserva tal cual.
-    const newRoleId = await this._resolveDefaultRole(clubId, actorId, defaultRoleId, invitation.default_role_id);
+    // Si el actor no puede asignar roles, el rol de la invitación se conserva tal cual. Sin cuenta
+    // no hay a quién asignárselo.
+    const newRoleId = account ? await this._resolveDefaultRole(clubId, actorId, defaultRoleId, invitation.default_role_id) : null;
 
     // 'revoked' es una decisión explícita (solo se cambia con reactivate). Para el resto, el
     // estado se recalcula con los nuevos límites: p. ej. subir `maxUses` de una agotada la
@@ -71,22 +132,16 @@ class InvitationsService {
       maxUses: newMaxUses,
       expiresAt: newExpiresAt,
       defaultRoleId: newRoleId,
-      requiresMemberProfile: requiresMemberProfile ? 1 : 0,
+      requiresAccount: account ? 1 : 0,
+      requiresMemberProfile: forms.length ? 1 : 0,
       note: note || null,
       status,
     });
+    await invitationsRepository.setForms(invitationId, forms);
 
-    // Si deja de exigir ficha, quienes ya entraron con este código y aún no la completaron dejan
-    // de tenerla pendiente (la marca se guarda en su membresía al unirse, ver clubEntry.service.js).
-    if (invitation.requires_member_profile && !requiresMemberProfile) {
-      await pool.query(
-        `UPDATE user_clubs uc
-         INNER JOIN invitation_uses iu ON iu.user_id = uc.user_id AND iu.invitation_id = ?
-         SET uc.requires_profile_completion = 0
-         WHERE uc.club_id = ? AND uc.requires_profile_completion = 1`,
-        [invitationId, clubId]
-      );
-    }
+    // Quienes ya entraron con este código y aún no completan sus fichas pasan a tener pendientes
+    // las nuevas (o ninguna, si dejó de pedirlas). La marca vive en su membresía (clubEntry.service.js).
+    if (previousForms.join(',') !== forms.join(',')) await invitationsRepository.syncPendingForms(invitationId, clubId, forms);
 
     await auditRepository.logAction({
       userId: actorId,
@@ -97,19 +152,22 @@ class InvitationsService {
       changes: {
         maxUses: { from: invitation.max_uses, to: newMaxUses },
         expiresAt: { from: invitation.expires_at, to: newExpiresAt },
+        ...(account !== !!invitation.requires_account ? { requiresAccount: { from: !!invitation.requires_account, to: account } } : {}),
+        ...(previousForms.join(',') !== forms.join(',') ? { forms: { from: previousForms.length, to: forms.length } } : {}),
         ...(status !== invitation.status ? { status: { from: invitation.status, to: status } } : {}),
       },
     });
 
-    return this.toDto(await invitationsRepository.findById(invitationId));
+    return this._dto(invitationId);
   }
 
-  async create(clubId, { maxUses, expiresAt, defaultRoleId, note, requiresMemberProfile }, actorId) {
+  async create(clubId, { maxUses, expiresAt, defaultRoleId, note, requiresAccount, formIds, requiresMemberProfile }, actorId) {
+    const { account, forms } = await this._resolveConfig(clubId, { requiresAccount, formIds, requiresMemberProfile });
     // Elegir el rol con el que entrará quien use la invitación es, en la práctica,
     // asignar un rol: exige el mismo permiso (ASSIGN_USER_ROLES) que hacerlo a mano
     // desde el perfil de un usuario. Si el actor no lo tiene, se ignora lo que haya
     // mandado el cliente en vez de confiar en que el frontend ocultó el selector.
-    defaultRoleId = await this._resolveDefaultRole(clubId, actorId, defaultRoleId);
+    defaultRoleId = account ? await this._resolveDefaultRole(clubId, actorId, defaultRoleId) : null;
 
     let code;
     do {
@@ -125,9 +183,11 @@ class InvitationsService {
       expiresAt: expiresAt || null,
       status: 'active',
       defaultRoleId: defaultRoleId || null,
-      requiresMemberProfile: requiresMemberProfile ? 1 : 0,
+      requiresAccount: account ? 1 : 0,
+      requiresMemberProfile: forms.length ? 1 : 0,
       note: note || null,
     });
+    await invitationsRepository.setForms(id, forms);
 
     await auditRepository.logAction({
       userId: actorId,
@@ -135,17 +195,18 @@ class InvitationsService {
       action: 'INVITATION_CREATED',
       entityType: 'invitation',
       entityId: id,
-      changes: { maxUses: maxUses || null, expiresAt: expiresAt || null },
+      changes: { maxUses: maxUses || null, expiresAt: expiresAt || null, requiresAccount: account, forms: forms.length },
     });
 
-    return this.toDto(await invitationsRepository.findById(id));
+    return this._dto(id);
   }
 
   async listForClub(clubId, query) {
     const { limit, offset, sortBy, sortOrder, page } = parsePagination(query, SORTABLE);
     await invitationsRepository.expireOutdated();
     const { rows, total } = await invitationsRepository.paginateByClub(clubId, { limit, offset, sortBy, sortOrder, status: query.status });
-    return { items: rows.map((r) => this.toDto(r)), meta: buildMeta({ page, limit, total }) };
+    const forms = await invitationsRepository.findFormsFor(rows.map((r) => r.id));
+    return { items: rows.map((r) => this.toDto(r, forms[r.id] || [])), meta: buildMeta({ page, limit, total }) };
   }
 
   async revoke(clubId, invitationId, actorId) {

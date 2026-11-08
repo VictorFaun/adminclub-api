@@ -93,6 +93,8 @@ Prefijo base: `/api/v1`. Salvo que se indique "público", todos los endpoints re
 | `PUT /member-applications/consents/order` | Orden en el formulario (`{ ids }`) | `EDIT_MEMBER_FIELDS` |
 | `POST /member-applications/consents/:consentId/files` · `DELETE .../files/:fileId` | Subir PDFs (`files`, hasta 10, 20MB c/u) / quitar uno | `EDIT_MEMBER_FIELDS` |
 | `GET /member-applications/consents/:consentId/files/:fileId` | Ver un PDF | `VIEW_MEMBER_FIELDS` |
+| `GET /public/join/:code` | Formulario público de una invitación SIN cuenta (`:code` = código de la invitación; el viejo código público del club sigue funcionando): club, fichas (`forms`) y sus campos del formulario público. Si la invitación exige cuenta responde `{ requiresAccount: true, code }` (el frontend deriva a `/join?code=`). Vencida / deshabilitada / sin usos → 400 con el motivo | Público |
+| `POST /public/join/:code` | Envía las fichas sin cuenta (multipart: `fields` JSON + `file_<id>`): consume un uso de la invitación (atómico) y queda como solicitud; si el identificador coincide con un miembro, al aceptarla se suma a su registro | Público |
 | `GET /public/join/:code/consents/:consentId/files/:fileId` | PDF de un consentimiento activo, desde el formulario público | Público |
 | `POST /auth/forgot-password` | Envía instrucciones para restablecer la contraseña | Público |
 | `POST /auth/reset-password` | Restablece la contraseña usando el token recibido por correo | Público |
@@ -173,8 +175,8 @@ Prefijo base: `/api/v1`. Salvo que se indique "público", todos los endpoints re
 | Método y ruta | Descripción | Requiere |
 |---|---|---|
 | `GET /invitations` | Lista las invitaciones creadas en el club activo | `VIEW_INVITATIONS` |
-| `POST /invitations` | Crea una invitación (con límite de usos, expiración y rol por defecto opcionales) | `CREATE_INVITATIONS` |
-| `PUT /invitations/:id` | Edita una invitación (usos máximos, expiración, rol, nota, ficha requerida); recalcula su estado | `EDIT_INVITATIONS` |
+| `POST /invitations` | Crea una invitación: `requiresAccount` (crear cuenta e ingresar al club) y `formIds` (fichas a completar) son independientes, pero al menos una (422 si no). Límite de usos, expiración, rol (solo con cuenta) y nota opcionales. `shareUrl`: `/join?code=` con cuenta, `/inscripcion/<código>` sin cuenta | `CREATE_INVITATIONS` |
+| `PUT /invitations/:id` | Edita una invitación (usos máximos, expiración, rol, nota, cuenta, fichas); recalcula su estado | `EDIT_INVITATIONS` |
 | `PUT /invitations/:id/revoke` | Revoca una invitación activa | `REVOKE_INVITATIONS` |
 
 ### Miembros — fichas, cumpleaños, documentos (`/members`)
@@ -182,12 +184,19 @@ Prefijo base: `/api/v1`. Salvo que se indique "público", todos los endpoints re
 | Método y ruta | Descripción | Requiere |
 |---|---|---|
 | `GET /members/birthdays?days=30` | Próximos cumpleaños de miembros activos (respeta el alcance del actor) | `VIEW_MEMBERS` / `VIEW_MEMBERS_SCOPED` |
-| `GET\|PUT /members/birthdays/settings` | Preferencia PROPIA del correo de cumpleaños (`enabled`, `daysBefore`) | `VIEW_MEMBERS` / `_SCOPED` |
-| `POST /members/birthdays/send-me` | Se envía a sí mismo el correo con los próximos cumpleaños (foto + datos) | `VIEW_MEMBERS` / `_SCOPED` |
+| `GET\|PUT /members/birthdays/settings` | Notificación de cumpleaños PROPIA: `enabled`, `reminders` (1–6 avisos `{ daysBefore, sendTime }`), `groupIds` + `noGroup`. Quien no ve Miembros solo la tiene si se la asignaron (cambia horarios o la apaga, no los grupos) | miembro activo |
+| `POST /members/birthdays/send-me` | Se envía a sí mismo los próximos cumpleaños (de sus grupos elegidos) | miembro activo |
+| `GET /members/birthdays/assignments` | Usuarios activos del club con su notificación de cumpleaños | `MANAGE_BIRTHDAY_NOTIFICATIONS` |
+| `PUT /members/birthdays/assignments/:userId` | Configura la notificación de cumpleaños de otro usuario (mismos campos) | `MANAGE_BIRTHDAY_NOTIFICATIONS` |
 | `POST\|DELETE /members/:id/photo` | Sube/quita la foto de la ficha (pública, para plantillas de cumpleaños) | `EDIT_MEMBERS` |
 | `GET\|POST /members/:id/documents` | Lista / sube documentos adjuntos (PRIVADOS, `private_uploads/`, hasta 10MB) | `VIEW_MEMBERS` · `EDIT_MEMBERS` |
 | `GET /members/:id/documents/:docId/download` | Descarga autenticada de un documento | `VIEW_MEMBERS` / `_SCOPED` |
 | `DELETE /members/:id/documents/:docId` | Elimina un documento | `EDIT_MEMBERS` |
+| `GET /members/forms` | Fichas del club (`fieldIds` en orden, `isDefault`, `memberCount`) | lectura de campos, `CREATE_/EDIT_INVITATIONS` |
+| `POST /members/forms` · `PUT /members/forms/:id` · `DELETE /members/forms/:id` | Crear / editar (nombre, descripción, por defecto) / eliminar (los campos que solo estaban en ella se eliminan; el club conserva al menos una) | `VIEW_MEMBER_FIELDS` + `CREATE_/EDIT_/DELETE_MEMBER_FIELDS` |
+| `PUT /members/forms/:id/fields` | Campos de la ficha y su orden (`{ fieldIds }`); no permite quitar un campo que no está en otra ficha | `VIEW_MEMBER_FIELDS` + `EDIT_MEMBER_FIELDS` |
+| `GET /members/forms/:id/members` · `POST .../assign` (`{ all, groupIds, memberIds }`) · `POST .../unassign` (`{ memberIds }`) | A quiénes se les pide la ficha | `VIEW_MEMBERS` (+ `EDIT_MEMBERS` para cambiarlo) |
+| `GET /members/:id/wards` | Miembros de los que es apoderado | `VIEW_MEMBERS` / `VIEW_MEMBERS_SCOPED` |
 | `GET\|PUT /members/fields/defaults` | Campos por defecto de la ficha (etiqueta / obligatorio / visible) | lectura: `VIEW_MEMBER_FIELDS`, `VIEW_MEMBERS`… · escritura: `EDIT_MEMBER_FIELDS` |
 
 ### Comprobantes de pago (`/payment-proofs`) y vista pública (`/public/pay`)
@@ -253,7 +262,7 @@ Lo que un socio ve de su propia ficha, y un apoderado de las fichas que tiene a 
 | `GET /me/members/:memberId/guardians` | Quiénes tienen acceso a la ficha (sin correos) | Mi club |
 | `POST /me/members/:memberId/guardians` | Suma otro apoderado por correo (`email`, `relation`). Si la cuenta ya es del club se vincula directo; si no, le llega una invitación | `guardiansInvite` |
 
-Para la directiva: `GET /members/:id/guardians` (requiere `VIEW_MEMBERS`/`_SCOPED`), y `POST /members/:id/guardians` `{ userId, relation }` y `DELETE /members/:id/guardians/:userId` (requieren `LINK_MEMBER_USER`). La invitación por correo (`POST /users/:id/invite`) acepta además `guardianOf: number[]` y `guardianRelation`: al aceptarla, la cuenta queda como apoderado de esas fichas.
+Los apoderados son MIEMBROS vinculados a otro miembro (`member_guardians.guardian_member_id`, sql/072); la cuenta es opcional y, si existe, es la del registro del apoderado (`members.user_id`). Para la directiva: `GET /members/:id/guardians` (requiere `VIEW_MEMBERS`/`_SCOPED`), `POST /members/:id/guardians` `{ guardianMemberId, relation }` (o `{ userId }`: usa —o crea— el registro de miembro de esa cuenta, sin duplicarlo) y `DELETE /members/:id/guardians/:guardianMemberId` (requieren `EDIT_MEMBERS` o `LINK_MEMBER_USER`). La invitación por correo (`POST /users/:id/invite`) acepta además `guardianOf: number[]` y `guardianRelation`: al aceptarla, el registro de miembro de la cuenta queda como apoderado de esas fichas.
 
 ### Notificaciones (`/notifications`)
 

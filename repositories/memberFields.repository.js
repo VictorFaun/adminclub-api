@@ -64,6 +64,16 @@ class MemberFieldsRepository extends BaseRepository {
     );
     return rows.length > 0;
   }
+
+  /** Miembro (no eliminado) del club que tiene este identificador (`normalized` en mayúsculas/canon). */
+  async findMemberIdByIdentifier(clubId, fieldId, normalized, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT m.id FROM member_field_values v INNER JOIN members m ON m.id = v.member_id
+       WHERE v.field_id = ? AND m.club_id = ? AND m.deleted_at IS NULL AND UPPER(v.value) = ? LIMIT 1`,
+      [fieldId, clubId, normalized]
+    );
+    return rows[0]?.id ?? null;
+  }
 }
 
 module.exports = new MemberFieldsRepository();

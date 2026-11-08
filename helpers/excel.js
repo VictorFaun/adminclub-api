@@ -1,9 +1,15 @@
 const ExcelJS = require('exceljs');
 
+/** Colores de la fila de grupos (uno por grupo, en orden; se repiten si hay más). */
+const GROUP_COLORS = ['FFDBEAFE', 'FFDCFCE7', 'FFFEF3C7', 'FFFCE7F3', 'FFE0E7FF', 'FFCCFBF1', 'FFFFEDD5', 'FFF3E8FF'];
+
 /**
  * Exportaciones a Excel (.xlsx). `sheets` = [{ name, columns: [{ header, width?, type? }], rows: [[...]] }].
  * Encabezado en negrita con fondo, fila fija y filtro automático. Las celdas `Date` quedan como
  * fecha de Excel; los números, como número.
+ * `groups` (opcional): [{ label, span }] alineados con las columnas — una fila ARRIBA del
+ * encabezado con celdas combinadas y un color por grupo (ej. a qué ficha pertenece cada campo).
+ * Un `label` vacío deja esas columnas sin grupo.
  */
 async function buildWorkbook(sheets) {
   const wb = new ExcelJS.Workbook();
@@ -17,8 +23,34 @@ async function buildWorkbook(sheets) {
     header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
     header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F2937' } };
     header.alignment = { vertical: 'middle' };
-    ws.views = [{ state: 'frozen', ySplit: 1, xSplit: sheet.freezeColumns || 0 }];
-    if (sheet.columns.length) ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: sheet.columns.length } };
+    let headerRow = 1;
+    if (sheet.groups?.length) {
+      // Fila de grupos arriba del encabezado.
+      ws.spliceRows(1, 0, []);
+      headerRow = 2;
+      let col = 1;
+      let colorIndex = 0;
+      for (const g of sheet.groups) {
+        const span = Math.max(1, g.span || 1);
+        if (g.label) {
+          const argb = GROUP_COLORS[colorIndex % GROUP_COLORS.length];
+          colorIndex += 1;
+          if (span > 1) ws.mergeCells(1, col, 1, col + span - 1);
+          const cell = ws.getCell(1, col);
+          cell.value = g.label;
+          cell.font = { bold: true, color: { argb: 'FF1F2937' } };
+          cell.alignment = { horizontal: 'center', vertical: 'middle' };
+          for (let c = col; c < col + span; c++) {
+            ws.getCell(1, c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb } };
+            // El encabezado de esas columnas lleva una franja del mismo color abajo.
+            ws.getCell(2, c).border = { bottom: { style: 'thick', color: { argb } } };
+          }
+        }
+        col += span;
+      }
+    }
+    ws.views = [{ state: 'frozen', ySplit: headerRow, xSplit: sheet.freezeColumns || 0 }];
+    if (sheet.columns.length) ws.autoFilter = { from: { row: headerRow, column: 1 }, to: { row: headerRow, column: sheet.columns.length } };
     for (const note of sheet.notes || []) {
       ws.addRow([]);
       ws.addRow([note]).font = { italic: true, color: { argb: 'FF6B7280' } };
@@ -36,8 +68,10 @@ async function sendWorkbook(res, filename, sheets) {
   res.end();
 }
 
-/** Lee la primera hoja de un .xlsx: `{ headers: [texto], rows: [{ rowNumber, values: [celda] }] }`. */
-async function readFirstSheet(buffer) {
+/** Lee la primera hoja de un .xlsx: `{ headers: [texto], rows: [{ rowNumber, values: [celda] }] }`.
+ * `isHeaderRow(textos)` (opcional): si la fila 1 no es el encabezado y la 2 sí (ej. la fila 1 es
+ * la de grupos de `buildWorkbook`), el encabezado es la fila 2 y los datos empiezan en la 3. */
+async function readFirstSheet(buffer, { isHeaderRow = null } = {}) {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buffer);
   const ws = wb.worksheets[0];
@@ -52,13 +86,19 @@ async function readFirstSheet(buffer) {
     }
     return v;
   };
-  const headers = [];
-  ws.getRow(1).eachCell({ includeEmpty: true }, (cell, col) => {
-    headers[col - 1] = String(cellValue(cell.value) ?? '').trim();
-  });
+  const rowTexts = (n) => {
+    const out = [];
+    ws.getRow(n).eachCell({ includeEmpty: true }, (cell, col) => {
+      out[col - 1] = String(cellValue(cell.value) ?? '').trim();
+    });
+    return out;
+  };
+  let headerRow = 1;
+  if (isHeaderRow && !isHeaderRow(rowTexts(1)) && isHeaderRow(rowTexts(2))) headerRow = 2;
+  const headers = rowTexts(headerRow);
   const rows = [];
   ws.eachRow({ includeEmpty: false }, (row, rowNumber) => {
-    if (rowNumber === 1) return;
+    if (rowNumber <= headerRow) return;
     const values = headers.map((_, i) => cellValue(row.getCell(i + 1).value));
     if (values.every((v) => v === null || String(v).trim() === '')) return;
     rows.push({ rowNumber, values });

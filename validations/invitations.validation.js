@@ -9,6 +9,10 @@ const createInvitation = [
   body('defaultRoleId').optional({ nullable: true }).isInt({ min: 1 }),
   body('note').optional({ nullable: true }).trim().isLength({ max: 255 }),
   body('requiresMemberProfile').optional().isBoolean().withMessage('requiresMemberProfile debe ser booleano.'),
+  // Opciones independientes (ver invitations.service.js): exigir cuenta y/o pedir fichas.
+  body('requiresAccount').optional().isBoolean().withMessage('requiresAccount debe ser booleano.').toBoolean(),
+  body('formIds').optional().isArray({ max: 50 }).withMessage('formIds debe ser un arreglo.'),
+  body('formIds.*').isInt({ min: 1 }).withMessage('Ficha inválida.').toInt(),
 ];
 
 const updateInvitation = [...invitationId, ...createInvitation];

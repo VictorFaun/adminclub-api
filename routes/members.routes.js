@@ -8,7 +8,7 @@ const validation = require('../validations/members.validation');
 const { handleValidation, sanitizeBody } = require('../middlewares/validation.middleware');
 const { authMiddleware } = require('../middlewares/auth.middleware');
 const { clubContextMiddleware } = require('../middlewares/club.middleware');
-const { requireFunction } = require('../middlewares/permission.middleware');
+const { requireFunction, requireClubMember } = require('../middlewares/permission.middleware');
 const { FUNCTIONS } = require('../config/constants');
 const { uploadFor } = require('../middlewares/upload.middleware');
 const { uploadPrivate } = require('../middlewares/privateUpload.middleware');
@@ -28,10 +28,22 @@ router.get(
 );
 router.get('/dashboard', requireFunction(FUNCTIONS.VIEW_MEMBERS_DASHBOARD), controller.dashboard);
 router.get('/birthdays', requireFunction(FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED), controller.birthdays);
-// Preferencias PROPIAS del correo de cumpleaños (por usuario y club) y envío de prueba.
-router.get('/birthdays/settings', requireFunction(FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED), controller.birthdaySettings);
-router.put('/birthdays/settings', requireFunction(FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED), sanitizeBody, controller.updateBirthdaySettings);
-router.post('/birthdays/send-me', requireFunction(FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED), sanitizeBody, controller.sendBirthdaysToMe);
+// Preferencias PROPIAS de la notificación de cumpleaños (por usuario y club) y envío de prueba.
+// Sin requireFunction: también las usa quien no ve Miembros pero tiene la notificación asignada
+// (birthdays.service.js decide qué puede cambiar cada uno).
+router.get('/birthdays/settings', requireClubMember(), controller.birthdaySettings);
+router.put('/birthdays/settings', requireClubMember(), sanitizeBody, validation.birthdaySettings, handleValidation, controller.updateBirthdaySettings);
+router.post('/birthdays/send-me', requireClubMember(), sanitizeBody, controller.sendBirthdaysToMe);
+// Notificación de cumpleaños de OTROS usuarios del club (asignarla y configurarla).
+router.get('/birthdays/assignments', requireFunction(FUNCTIONS.MANAGE_BIRTHDAY_NOTIFICATIONS), controller.birthdayAssignments);
+router.put(
+  '/birthdays/assignments/:userId',
+  requireFunction(FUNCTIONS.MANAGE_BIRTHDAY_NOTIFICATIONS),
+  sanitizeBody,
+  validation.birthdayAssignment,
+  handleValidation,
+  controller.updateBirthdayAssignment
+);
 // Plantilla general (por club y formato) usada para generar la imagen de cada socio — ver
 // solo (VIEW_MEMBERS/_SCOPED, la usa cualquiera que pueda generar la imagen de un socio),
 // editar (MANAGE_BIRTHDAY_TEMPLATE, solo quien administra el diseño).
@@ -44,6 +56,8 @@ router.post(
   controller.uploadBirthdayTemplateImage
 );
 router.use('/fields', require('./memberFields.routes'));
+// Fichas: selecciones de campos que se piden a cada tipo de miembro (ver memberForms.service.js).
+router.use('/forms', require('./memberForms.routes'));
 
 // Columnas que muestra el listado (tarjetas y tabla): las elige quien configura la ficha.
 router.get('/list-settings', requireFunction(FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED, FUNCTIONS.VIEW_MEMBER_FIELDS), controller.listSettings);
@@ -65,7 +79,7 @@ router.post('/import', requireFunction(FUNCTIONS.CREATE_MEMBERS), xlsxUpload.sin
 // que el formulario público de inscripción esté activo.
 router.get('/me/form', applicationsController.invitationForm);
 
-// Autoservicio de ficha (ver members.service.js#createSelf) — deliberadamente SIN
+// Autoservicio de ficha (ver memberApplications.service.js#submitForAccount) — deliberadamente SIN
 // requireFunction: es la única acción permitida mientras la membresía tenga
 // `requires_profile_completion` (permission.middleware.js#assertProfileNotPending bloquea todo
 // lo demás). El propio service valida que el actor realmente tenga una ficha pendiente.
@@ -135,11 +149,14 @@ router.put(
   controller.linkUser
 );
 
-// Apoderados de la ficha (cuentas del club que la ven en "Mi club"; ver selfService.service.js).
+// Apoderados de la ficha: otros MIEMBROS del club vinculados a este (con o sin cuenta; si tienen
+// cuenta, la ven en "Mi club"; ver selfService.service.js). Vincular miembros es editarlos.
 const guardians = require('../controllers/guardians.controller');
 const meValidation = require('../validations/me.validation');
+const GUARDIAN_EDITORS = [FUNCTIONS.EDIT_MEMBERS, FUNCTIONS.LINK_MEMBER_USER];
 router.get('/:id/guardians', requireFunction(FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED), meValidation.guardianParams, handleValidation, guardians.list);
-router.post('/:id/guardians', requireFunction(FUNCTIONS.LINK_MEMBER_USER), sanitizeBody, meValidation.addGuardian, handleValidation, guardians.add);
-router.delete('/:id/guardians/:userId', requireFunction(FUNCTIONS.LINK_MEMBER_USER), meValidation.removeGuardian, handleValidation, guardians.remove);
+router.get('/:id/wards', requireFunction(FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED), meValidation.guardianParams, handleValidation, guardians.wards);
+router.post('/:id/guardians', requireFunction(...GUARDIAN_EDITORS), sanitizeBody, meValidation.addGuardian, handleValidation, guardians.add);
+router.delete('/:id/guardians/:guardianId', requireFunction(...GUARDIAN_EDITORS), meValidation.removeGuardian, handleValidation, guardians.remove);
 
 module.exports = router;

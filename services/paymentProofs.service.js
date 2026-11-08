@@ -5,21 +5,23 @@ const clubsRepository = require('../repositories/clubs.repository');
 const settingsRepository = require('../repositories/settings.repository');
 const auditRepository = require('../repositories/audit.repository');
 const paymentsService = require('./payments.service');
-const receiptsService = require('./receipts.service');
+const paymentNoticesService = require('./paymentNotices.service');
 const treasuryAccountsService = require('./treasuryAccounts.service');
 const chargesRepository = require('../repositories/charges.repository');
 const treasuryAccountsRepository = require('../repositories/treasuryAccounts.repository');
 const AppError = require('../helpers/AppError');
 const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const { deletePrivateFile, resolvePrivatePath } = require('../middlewares/privateUpload.middleware');
-const { CLUB_STATUS } = require('../config/constants');
+const { CLUB_STATUS, FUNCTIONS } = require('../config/constants');
 const memberFieldsRepository = require('../repositories/memberFields.repository');
 const { normalizeIdentifier } = require('../helpers/memberFieldTypes');
 const { parseAccount, treasuryAccountToDto } = require('../helpers/paymentAccount');
 const { withTransaction } = require('../config/database');
 const { randomUUID } = require('crypto');
-const memberGuardiansRepository = require('../repositories/memberGuardians.repository');
 const notificationsService = require('./notifications.service');
+const permissionService = require('./permission.service');
+const membersRepository = require('../repositories/members.repository');
+const memberApplicationsRepository = require('../repositories/memberApplications.repository');
 const logger = require('../helpers/logger');
 
 const MAX_PENDING_PER_INSTANCE = 3;
@@ -334,11 +336,43 @@ class PaymentProofsService {
           periods: entries.map((e) => e.instance.period_label),
         },
       });
+      this._notifyNewProof(member, entries, submittedBy);
       return { id: proofIds[0], batchUuid, count: proofIds.length };
     } catch (error) {
       discard();
       throw error;
     }
+  }
+
+  /**
+   * Aviso (app, push y correo — notificationsService.notifyUser) de un comprobante nuevo a todos los
+   * que pueden ver comprobantes (mismos permisos que la lista: VIEW_PAYMENTS, o VIEW_PAYMENTS_SCOPED
+   * si ese miembro está en su alcance). Uno por comprobante, aunque cubra varios períodos. No se
+   * avisa a quien lo subió. Mejor esfuerzo: nunca hace fallar el envío.
+   */
+  _notifyNewProof(member, entries, submittedBy) {
+    (async () => {
+      const clubId = member.club_id;
+      const full = await membersRepository.findActiveById(member.id);
+      const name = [full?.first_name, full?.last_name].filter(Boolean).join(' ') || `Miembro #${member.id}`;
+      const total = entries.reduce((sum, e) => sum + e.value, 0);
+      const periods = entries.map((e) => periodText(e.instance.period_label)).join(', ');
+      const where = submittedBy ? 'desde "Mi club"' : 'desde la página pública de pagos';
+      const message = `${name} envió un comprobante por $${Math.round(total).toLocaleString('es-CL')} (${periods}) ${where}. Revísalo para aprobarlo o rechazarlo.`;
+
+      const candidates = new Set([
+        ...(await memberApplicationsRepository.findReviewerUserIds(clubId, FUNCTIONS.VIEW_PAYMENTS)),
+        ...(await memberApplicationsRepository.findReviewerUserIds(clubId, FUNCTIONS.VIEW_PAYMENTS_SCOPED)),
+      ]);
+      for (const userId of candidates) {
+        if (userId === submittedBy) continue;
+        // Con alcance acotado, solo si ese miembro está en él (lo mismo que vería en la lista).
+        const authContext = await permissionService.buildAuthorizationContext(userId, clubId);
+        const access = await paymentsService.resolveAccessForController(authContext, userId, clubId);
+        if (!access.full && !access.memberIds.includes(member.id)) continue;
+        await notificationsService.notifyUser({ userId, clubId, type: 'info', category: 'payments', title: 'Nuevo comprobante de pago', message, link: '/treasury/proofs', ctaText: 'Revisar comprobante' });
+      }
+    })().catch((error) => logger.error(`[paymentProofs] aviso de comprobante nuevo: ${error.message}`));
   }
 
   // ------------------------------------------------------------------ administración
@@ -474,9 +508,8 @@ class PaymentProofsService {
       await auditRepository.logAction({ userId: actorId, clubId, action: 'PAYMENT_PROOF_APPROVED', entityType: 'payment_proof', entityId: p.id, changes: { paymentId: payment.id, batchUuid: p.batch_uuid } });
       paymentIds.push(payment.id);
     }
-    // El recibo le llega al miembro por correo (si tiene uno en su ficha).
-    if (paymentIds.length) receiptsService.emailToMember(clubId, paymentIds);
-    this._notifyReviewed(clubId, proof.member_id, batch, 'approved');
+    // Un solo correo por persona ("Registramos tu pago" con el recibo adjunto) + app y push.
+    if (paymentIds.length) paymentNoticesService.notifyReviewed({ clubId, memberId: proof.member_id, batch, status: 'approved', paymentIds });
     return { paymentId: paymentIds[0], paymentIds };
   }
 
@@ -488,28 +521,8 @@ class PaymentProofsService {
       await paymentProofsRepository.markReviewed(p.id, { status: 'rejected', reviewedBy: actorId, reviewNote });
       await auditRepository.logAction({ userId: actorId, clubId, action: 'PAYMENT_PROOF_REJECTED', entityType: 'payment_proof', entityId: p.id, changes: { batchUuid: p.batch_uuid, ...(reason ? { reason } : {}) } });
     }
-    this._notifyReviewed(clubId, proof.member_id, batch, 'rejected', reviewNote);
-  }
-
-  /** Aviso a la cuenta titular y a los apoderados de la ficha (mejor esfuerzo, sin await). */
-  _notifyReviewed(clubId, memberId, batch, status, reason = null) {
-    (async () => {
-      const userIds = await memberGuardiansRepository.findUserIdsForMember(memberId);
-      if (!userIds.length) return;
-      const total = batch.reduce((s, p) => s + Number(p.amount), 0);
-      const amount = `$${Math.round(total).toLocaleString('es-CL')}`;
-      const periods = batch.map((p) => periodText(p.period_label)).join(', ');
-      for (const userId of userIds) {
-        await notificationsService.notifyUser({
-          userId,
-          clubId,
-          type: status === 'approved' ? 'success' : 'warning',
-          title: status === 'approved' ? `Comprobante aprobado (${amount})` : 'Comprobante rechazado',
-          message: status === 'approved' ? `Se registró el pago de ${periods}.` : `El comprobante de ${periods} fue rechazado${reason ? `: ${reason}` : '.'}`,
-          link: `/my/payments?member=${memberId}`,
-        });
-      }
-    })().catch((error) => logger.error(`[proofs] aviso de revisión: ${error.message}`));
+    // Correo con el motivo (también a quien no tiene cuenta) + app y push.
+    paymentNoticesService.notifyReviewed({ clubId, memberId: proof.member_id, batch, status: 'rejected', reason: reviewNote });
   }
 
   async getFile(clubId, proofId, actorId, authContext) {

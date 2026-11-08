@@ -8,20 +8,24 @@ class NotificationsRepository extends BaseRepository {
 
   async createNotification(data, conn = pool) {
     const [result] = await conn.query(
-      `INSERT INTO notifications (user_id, club_id, type, title, message, link, image_url)
-       VALUES (:userId, :clubId, :type, :title, :message, :link, :imageUrl)`,
-      { imageUrl: null, ...data }
+      `INSERT INTO notifications (user_id, club_id, type, category, title, message, link, image_url)
+       VALUES (:userId, :clubId, :type, :category, :title, :message, :link, :imageUrl)`,
+      { imageUrl: null, category: 'general', ...data }
     );
     return result.insertId;
   }
 
-  async paginateByUser(userId, { limit, offset, sortBy = 'created_at', sortOrder = 'DESC', unreadOnly, clubId }) {
+  async paginateByUser(userId, { limit, offset, sortBy = 'created_at', sortOrder = 'DESC', unreadOnly, clubId, categories = [] }) {
     const params = [userId];
     const where = ['user_id = ?'];
     if (unreadOnly) where.push('is_read = 0');
     if (clubId) {
       where.push('club_id = ?');
       params.push(clubId);
+    }
+    if (categories.length) {
+      where.push('category IN (?)');
+      params.push(categories);
     }
     const whereSql = where.join(' AND ');
     const [rows] = await pool.query(

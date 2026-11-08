@@ -13,11 +13,73 @@ class InvitationsRepository extends BaseRepository {
 
   async createInvitation(data, conn = pool) {
     const [result] = await conn.query(
-      `INSERT INTO invitations (uuid, club_id, code, created_by, max_uses, expires_at, status, default_role_id, requires_member_profile, note)
-       VALUES (UUID(), :clubId, :code, :createdBy, :maxUses, :expiresAt, :status, :defaultRoleId, :requiresMemberProfile, :note)`,
-      data
+      `INSERT INTO invitations (uuid, club_id, code, created_by, max_uses, expires_at, status, default_role_id, requires_account, requires_member_profile, note)
+       VALUES (UUID(), :clubId, :code, :createdBy, :maxUses, :expiresAt, :status, :defaultRoleId, :requiresAccount, :requiresMemberProfile, :note)`,
+      { requiresAccount: 1, ...data }
     );
     return result.insertId;
+  }
+
+  // ------------------------------------------------------------------ fichas que pide (sql/072)
+
+  /** Ids de las fichas que pide la invitación, en el orden de las fichas. */
+  async findFormIds(invitationId, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT f.id FROM invitation_forms i INNER JOIN member_forms f ON f.id = i.form_id
+       WHERE i.invitation_id = ? ORDER BY f.sort_order ASC, f.id ASC`,
+      [invitationId]
+    );
+    return rows.map((r) => r.id);
+  }
+
+  /** `{ invitationId: [{ id, name }] }`. */
+  async findFormsFor(invitationIds, conn = pool) {
+    if (!invitationIds.length) return {};
+    const [rows] = await conn.query(
+      `SELECT i.invitation_id, f.id, f.name FROM invitation_forms i INNER JOIN member_forms f ON f.id = i.form_id
+       WHERE i.invitation_id IN (?) ORDER BY f.sort_order ASC, f.id ASC`,
+      [invitationIds]
+    );
+    const map = {};
+    for (const r of rows) (map[r.invitation_id] = map[r.invitation_id] || []).push({ id: r.id, name: r.name });
+    return map;
+  }
+
+  async setForms(invitationId, formIds, conn = pool) {
+    await conn.query('DELETE FROM invitation_forms WHERE invitation_id = ?', [invitationId]);
+    if (formIds.length) await conn.query('INSERT INTO invitation_forms (invitation_id, form_id) VALUES ?', [formIds.map((id) => [invitationId, id])]);
+  }
+
+  /** Última invitación (id) con la que esa cuenta entró al club. */
+  async findLatestUseFor(userId, clubId, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT iu.invitation_id FROM invitation_uses iu INNER JOIN invitations i ON i.id = iu.invitation_id
+       WHERE iu.user_id = ? AND i.club_id = ? ORDER BY iu.used_at DESC, iu.id DESC LIMIT 1`,
+      [userId, clubId]
+    );
+    return rows[0]?.invitation_id ?? null;
+  }
+
+  /** Cuentas que entraron con esta invitación y siguen con fichas pendientes: pasan a tener
+   * pendientes `formIds` (sin fichas = ya no tienen nada pendiente). */
+  async syncPendingForms(invitationId, clubId, formIds, conn = pool) {
+    await conn.query(
+      `UPDATE user_clubs uc
+       INNER JOIN invitation_uses iu ON iu.user_id = uc.user_id AND iu.invitation_id = ?
+       SET uc.requires_profile_completion = ?, uc.pending_form_ids = ?
+       WHERE uc.club_id = ? AND uc.requires_profile_completion = 1`,
+      [invitationId, formIds.length ? 1 : 0, formIds.length ? JSON.stringify(formIds) : null, clubId]
+    );
+  }
+
+  /** ¿El club tiene alguna invitación activa que pida fichas? (para mostrar Solicitudes). */
+  async clubHasFormInvitations(clubId, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT 1 FROM invitations i WHERE i.club_id = ? AND i.status = 'active'
+       AND EXISTS (SELECT 1 FROM invitation_forms f WHERE f.invitation_id = i.id) LIMIT 1`,
+      [clubId]
+    );
+    return rows.length > 0;
   }
 
   async paginateByClub(clubId, { limit, offset, sortBy, sortOrder, status }) {
@@ -38,12 +100,12 @@ class InvitationsRepository extends BaseRepository {
     return { rows, total: countRows[0].total };
   }
 
-  async updateFields(invitationId, { maxUses, expiresAt, defaultRoleId, requiresMemberProfile, note, status }, conn = pool) {
+  async updateFields(invitationId, { maxUses, expiresAt, defaultRoleId, requiresAccount, requiresMemberProfile, note, status }, conn = pool) {
     await conn.query(
       `UPDATE invitations
-       SET max_uses = ?, expires_at = ?, default_role_id = ?, requires_member_profile = ?, note = ?, status = ?
+       SET max_uses = ?, expires_at = ?, default_role_id = ?, requires_account = ?, requires_member_profile = ?, note = ?, status = ?
        WHERE id = ?`,
-      [maxUses, expiresAt, defaultRoleId, requiresMemberProfile, note, status, invitationId]
+      [maxUses, expiresAt, defaultRoleId, requiresAccount, requiresMemberProfile, note, status, invitationId]
     );
   }
 
@@ -78,10 +140,12 @@ class InvitationsRepository extends BaseRepository {
     await conn.query('UPDATE invitations SET status = ? WHERE id = ?', [status, invitationId]);
   }
 
-  async recordUse({ invitationId, userId }, conn = pool) {
-    await conn.query('INSERT INTO invitation_uses (invitation_id, user_id, used_at) VALUES (?, ?, NOW())', [
+  /** Un uso: una cuenta que entró al club (`userId`) o una solicitud enviada sin cuenta (`applicationId`). */
+  async recordUse({ invitationId, userId = null, applicationId = null }, conn = pool) {
+    await conn.query('INSERT INTO invitation_uses (invitation_id, user_id, application_id, used_at) VALUES (?, ?, ?, NOW())', [
       invitationId,
       userId,
+      applicationId,
     ]);
   }
 

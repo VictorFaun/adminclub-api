@@ -23,6 +23,10 @@ const saveEvent = [
   body('startTime').optional({ nullable: true, checkFalsy: true }).matches(TIME).withMessage('Hora de inicio inválida.'),
   body('endTime').optional({ nullable: true, checkFalsy: true }).matches(TIME).withMessage('Hora de término inválida.'),
   body('reminderMinutes').optional({ nullable: true }).isInt({ min: 0, max: MAX_REMINDER_MINUTES }).withMessage('El recordatorio debe ser entre 0 minutos y 1 año antes.').toInt(),
+  // Varios avisos: [{ minutes, remindAt }] (reemplaza a reminderMinutes/remindAt, que se siguen aceptando).
+  body('reminders').optional().isArray({ max: 6 }).withMessage('Puedes poner hasta 6 avisos por evento.'),
+  body('reminders.*.minutes').isInt({ min: 0, max: MAX_REMINDER_MINUTES }).withMessage('Cada aviso debe ser entre 0 minutos y 1 año antes.').toInt(),
+  body('reminders.*.remindAt').isISO8601().withMessage('Recordatorio inválido.'),
   body('groupId').optional({ nullable: true, checkFalsy: true }).isInt({ min: 1 }).withMessage('Grupo inválido.'),
   body('remindAt').optional({ nullable: true, checkFalsy: true }).isISO8601().withMessage('Recordatorio inválido.'),
   body('participantIds').optional().isArray({ max: 200 }).withMessage('participantIds debe ser un arreglo.'),

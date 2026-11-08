@@ -154,6 +154,16 @@ class UsersRepository extends BaseRepository {
     return byUser;
   }
 
+  /** Cuentas activas del club (id, nombre, correo, avatar), por nombre. */
+  async findActiveClubUsers(clubId, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT u.id, u.username, u.email, u.avatar_url FROM user_clubs uc INNER JOIN users u ON u.id = uc.user_id
+       WHERE uc.club_id = ? AND uc.status = 'active' ORDER BY u.username ASC`,
+      [clubId]
+    );
+    return rows;
+  }
+
   async findMembership(userId, clubId, conn = pool) {
     const [rows] = await conn.query('SELECT * FROM user_clubs WHERE user_id = ? AND club_id = ? LIMIT 1', [
       userId,
@@ -224,8 +234,19 @@ class UsersRepository extends BaseRepository {
   /** Ver clubs.service.js#joinByCode (se marca al unirse con una invitación que exige ficha) y
    * members.service.js#createSelf (se limpia al completarla). */
   async setRequiresProfileCompletion(userId, clubId, value, conn = pool) {
-    await conn.query('UPDATE user_clubs SET requires_profile_completion = ? WHERE user_id = ? AND club_id = ?', [
-      value ? 1 : 0,
+    // Al limpiarla también se olvidan las fichas pendientes (ver setPendingForms).
+    await conn.query(
+      `UPDATE user_clubs SET requires_profile_completion = ?, pending_form_ids = IF(? = 1, pending_form_ids, NULL)
+       WHERE user_id = ? AND club_id = ?`,
+      [value ? 1 : 0, value ? 1 : 0, userId, clubId]
+    );
+  }
+
+  /** Fichas que pide la invitación con la que entró la cuenta (sql/072). Vacío = ninguna. */
+  async setPendingForms(userId, clubId, formIds, conn = pool) {
+    await conn.query('UPDATE user_clubs SET requires_profile_completion = ?, pending_form_ids = ? WHERE user_id = ? AND club_id = ?', [
+      formIds.length ? 1 : 0,
+      formIds.length ? JSON.stringify(formIds) : null,
       userId,
       clubId,
     ]);

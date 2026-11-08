@@ -35,7 +35,23 @@ function renderHeader({ brandName, brandColor, logoUrl }) {
  * `eyebrow` (etiqueta chica sobre el título, p.ej. "Notificación") y `preheader` (texto que el
  * cliente de correo muestra como vista previa junto al asunto) son opcionales. Con botón, debajo
  * va también el enlace en texto, por si el cliente de correo no muestra el botón. */
-function renderLayout({ brandName, brandColor, logoUrl, title, bodyHtml, ctaText, ctaUrl, eyebrow, preheader, viaPlatform }) {
+/** Caracteres invisibles (espacio de ancho cero + no separable) que llenan la vista previa. */
+const PREHEADER_FILL = '&#847;&zwnj;&nbsp;'.repeat(100);
+
+/** `ignoreNote: false` quita el pie "Si no esperabas este correo…" (avisos que la persona sí espera). */
+const ignoreRows = `
+          <tr>
+            <td style="padding:24px 28px 0;">
+              <div style="border-top:1px solid #ededf2; font-size:0; line-height:0;">&nbsp;</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px 28px 26px; font-size:12.5px; line-height:1.5; color:#9a9aa5;">
+              Si no esperabas este correo, puedes ignorarlo con confianza.
+            </td>
+          </tr>`;
+
+function renderLayout({ brandName, brandColor, logoUrl, title, bodyHtml, ctaText, ctaUrl, eyebrow, preheader, viaPlatform, ignoreNote = true }) {
   const contrastColor = getContrastColor(brandColor);
   // Tono oscurecido de la marca para texto sobre fondo claro (un dorado/amarillo tal cual no se lee).
   const accentText = shadeColor(brandColor, 0.4);
@@ -66,8 +82,10 @@ function renderLayout({ brandName, brandColor, logoUrl, title, bodyHtml, ctaText
           </tr>`
       : '';
 
+  // Tras el texto, relleno invisible: si no, la app de correo completa la vista previa con lo
+  // primero visible del cuerpo (nombre del club, etiqueta, título) y se ve repetido.
   const preheaderHtml = preheader
-    ? `<div style="display:none; max-height:0; overflow:hidden; opacity:0; color:transparent;">${escapeHtml(preheader)}</div>`
+    ? `<div style="display:none; max-height:0; overflow:hidden; opacity:0; color:transparent;">${escapeHtml(preheader)}${PREHEADER_FILL}</div>`
     : '';
 
   const sentBy = viaPlatform
@@ -107,17 +125,7 @@ function renderLayout({ brandName, brandColor, logoUrl, title, bodyHtml, ctaText
               <h1 style="margin:0 0 14px; font-size:23px; line-height:1.3; font-weight:800; letter-spacing:-0.015em; color:#16151f;">${escapeHtml(title)}</h1>
               <div style="font-size:15px; line-height:1.65; color:#3f3f4a;">${bodyHtml}</div>
             </td>
-          </tr>${ctaRow}
-          <tr>
-            <td style="padding:24px 28px 0;">
-              <div style="border-top:1px solid #ededf2; font-size:0; line-height:0;">&nbsp;</div>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:16px 28px 26px; font-size:12.5px; line-height:1.5; color:#9a9aa5;">
-              Si no esperabas este correo, puedes ignorarlo con confianza.
-            </td>
-          </tr>
+          </tr>${ctaRow}${ignoreNote ? ignoreRows : '\n          <tr><td style="padding:0 0 26px;"></td></tr>'}
         </table>
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;">
           <tr>
@@ -210,7 +218,9 @@ function renderPlatformEmail({ title, bodyHtml, ctaText, ctaUrl, eyebrow, prehea
 /** Branding del club (logo + color primario) — para correos ligados a un club específico
  * (invitaciones, recibos). `club` es el DTO ya resuelto por clubs.service.js#toDto
  * (`logoUrl` ya absoluto, ver helpers/mediaUrl.js). */
-function renderClubEmail({ club, title, bodyHtml, ctaText, ctaUrl, eyebrow, preheader }) {
+// Sin "Si no esperabas este correo…" por defecto: los correos de un club los espera quien es parte
+// de él (avisos, pagos, inscripciones). Los de la plataforma (cuenta, contraseña) sí lo llevan.
+function renderClubEmail({ club, title, bodyHtml, ctaText, ctaUrl, eyebrow, preheader, ignoreNote = false }) {
   return renderLayout({
     brandName: club.name,
     brandColor: club.primaryColor || PLATFORM_COLOR,
@@ -222,6 +232,7 @@ function renderClubEmail({ club, title, bodyHtml, ctaText, ctaUrl, eyebrow, preh
     eyebrow,
     preheader,
     viaPlatform: true,
+    ignoreNote,
   });
 }
 

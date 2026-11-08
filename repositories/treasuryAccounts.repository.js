@@ -1,5 +1,6 @@
 const { pool } = require('../config/database');
 const BaseRepository = require('./BaseRepository');
+const { shortNameSql } = require('../helpers/memberProfileSql');
 
 /** Suma `rows` ({account_id, total}) en `map` (clave = id de cuenta o `null`) con el signo dado. */
 function accumulate(map, rows, sign) {
@@ -111,6 +112,78 @@ class TreasuryAccountsRepository extends BaseRepository {
     accumulate(map, transfersIn, 1);
     accumulate(map, transfersOut, -1);
     return map;
+  }
+
+  /**
+   * Movimientos de dinero de Tesorería, del más reciente al más antiguo — los mismos que suma
+   * `balances` (mismo criterio: sin cobros ni gastos eliminados): pagos directos, entregas de
+   * responsables, pagos de gastos y transferencias. `accountId`: solo esa cuenta (una
+   * transferencia sale como entrada o salida según el lado); `null` = todas (cada transferencia
+   * una sola vez, de una cuenta a otra). Cada fila:
+   * { kind, ref_id, account_id, amount (con signo), happened_at, created_at, label, detail, from_name, to_name }.
+   */
+  async movements(clubId, { accountId = null, limit = 20 } = {}, conn = pool) {
+    const params = [];
+    // Arma los placeholders en el mismo orden en que aparecen en el SQL.
+    const club = () => {
+      params.push(clubId);
+      return '?';
+    };
+    const account = (col) => {
+      if (accountId === null) return '';
+      params.push(Number(accountId));
+      return `AND ${col} = ?`;
+    };
+    // Función (no valor): sus placeholders deben empujarse cuando le toca en el SQL, al final.
+    const transfers = () =>
+      accountId === null
+        ? `SELECT 'transfer', t.id, t.to_account_id, t.amount, t.transferred_at, t.created_at, NULL, t.note, COALESCE(fa.name, 'Sin cuenta asignada'), ta.name
+           FROM treasury_account_transfers t
+           LEFT JOIN treasury_accounts fa ON fa.id = t.from_account_id
+           INNER JOIN treasury_accounts ta ON ta.id = t.to_account_id
+           WHERE t.club_id = ${club()}`
+        : `SELECT 'transfer_in', t.id, t.to_account_id, t.amount, t.transferred_at, t.created_at, NULL, t.note, COALESCE(fa.name, 'Sin cuenta asignada'), ta.name
+           FROM treasury_account_transfers t
+           LEFT JOIN treasury_accounts fa ON fa.id = t.from_account_id
+           INNER JOIN treasury_accounts ta ON ta.id = t.to_account_id
+           WHERE t.club_id = ${club()} ${account('t.to_account_id')}
+           UNION ALL
+           SELECT 'transfer_out', t.id, t.from_account_id, -t.amount, t.transferred_at, t.created_at, NULL, t.note, COALESCE(fa.name, 'Sin cuenta asignada'), ta.name
+           FROM treasury_account_transfers t
+           LEFT JOIN treasury_accounts fa ON fa.id = t.from_account_id
+           INNER JOIN treasury_accounts ta ON ta.id = t.to_account_id
+           WHERE t.club_id = ${club()} ${account('t.from_account_id')}`;
+    const sql = `SELECT * FROM (
+         SELECT 'payment' AS kind, p.id AS ref_id, p.treasury_account_id AS account_id, SUM(pa.amount) AS amount,
+                p.paid_at AS happened_at, p.created_at, GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ', ') AS label,
+                ${shortNameSql('mp')} AS detail, NULL AS from_name, NULL AS to_name
+         FROM payments p
+         INNER JOIN payment_allocations pa ON pa.payment_id = p.id
+         INNER JOIN charge_instances ci ON ci.id = pa.charge_instance_id
+         INNER JOIN charges c ON c.id = ci.charge_id AND c.deleted_at IS NULL
+         LEFT JOIN member_profiles mp ON mp.member_id = p.member_id
+         WHERE p.club_id = ${club()} AND p.paid_to_member_id IS NULL ${account('p.treasury_account_id')}
+         GROUP BY p.id
+         UNION ALL
+         SELECT 'settlement', cs.id, cs.treasury_account_id, cs.amount, cs.transferred_at, cs.created_at, c.name, ${shortNameSql('mp')}, NULL, NULL
+         FROM charge_settlements cs
+         INNER JOIN charges c ON c.id = cs.charge_id AND c.deleted_at IS NULL AND c.purpose = 'treasury'
+         LEFT JOIN member_profiles mp ON mp.member_id = cs.responsible_member_id
+         WHERE c.club_id = ${club()} ${account('cs.treasury_account_id')}
+         UNION ALL
+         SELECT 'expense', ep.id, ep.treasury_account_id, -ep.amount, ep.paid_at, ep.created_at, e.name, ei.period_label, NULL, NULL
+         FROM expense_payments ep
+         INNER JOIN expense_instances ei ON ei.id = ep.expense_instance_id
+         INNER JOIN expenses e ON e.id = ei.expense_id AND e.deleted_at IS NULL
+         WHERE ep.club_id = ${club()} ${account('ep.treasury_account_id')}
+         UNION ALL
+         ${transfers()}
+       ) mv
+       ORDER BY mv.happened_at DESC, mv.created_at DESC
+       LIMIT ?`;
+    params.push(Number(limit));
+    const [rows] = await conn.query(sql, params);
+    return rows;
   }
 
   // --- Transferencias entre cuentas ---

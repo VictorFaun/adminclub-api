@@ -12,8 +12,12 @@ const resendClient = env.email.resendApiKey ? new Resend(env.email.resendApiKey)
  * si no, se comporta como siempre (queda logueado en consola, útil en desarrollo sin proveedor).
  */
 class EmailService {
-  /** `attachments`: [{ filename, content: Buffer }] (ej. el recibo de un pago en PDF). */
-  async send({ to, subject, html, attachments = [] }) {
+  /** `attachments`: [{ filename, content: Buffer }] (ej. el recibo de un pago en PDF).
+   * `fromName`: nombre visible del remitente — en los correos de un club, el nombre del club (así
+   * el asunto no necesita repetirlo); la dirección es siempre la configurada. */
+  async send({ to, subject, html, attachments = [], fromName = null }) {
+    // Sin comillas, <> ni saltos de línea: rompen el encabezado "From".
+    const name = String(fromName || env.email.fromName).replace(/["<>\r\n]/g, '').trim().slice(0, 80) || env.email.fromName;
     if (!resendClient) {
       // `html` puede traer un token de un solo uso en claro (reset de contraseña, verificación
       // de email) o un código de invitación — logger.info() persiste TODO lo que se le pase a
@@ -23,14 +27,14 @@ class EmailService {
       // conocer la contraseña. Se imprime en consola (para poder probar el flujo en desarrollo
       // sin un proveedor de correo real) pero NO se persiste a disco.
       // eslint-disable-next-line no-console
-      console.log(`[email] -> ${to} | ${subject}\n${html}`);
-      logger.info(`[email] -> ${to} | ${subject}${attachments.length ? ` | adjuntos: ${attachments.map((a) => a.filename).join(', ')}` : ''}`);
+      console.log(`[email] -> ${to} | ${subject}\n[email] de: ${name}\n${html}`);
+      logger.info(`[email] -> ${to} | ${subject} | de: ${name}${attachments.length ? ` | adjuntos: ${attachments.map((a) => a.filename).join(', ')}` : ''}`);
       return true;
     }
 
     try {
       await resendClient.emails.send({
-        from: `${env.email.fromName} <${env.email.fromAddress}>`,
+        from: `"${name}" <${env.email.fromAddress}>`,
         to,
         subject,
         html,
@@ -91,7 +95,8 @@ class EmailService {
   async sendInvitationEmail(toEmail, club, code) {
     return this.send({
       to: toEmail,
-      subject: `Invitación para unirte a ${club.name}`,
+      fromName: club.name,
+      subject: 'Te invitamos a unirte al club',
       html: renderClubEmail({
         club,
         title: `Te invitaron a unirte a ${club.name}`,

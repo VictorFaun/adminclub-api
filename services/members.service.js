@@ -1,5 +1,7 @@
 const membersRepository = require('../repositories/members.repository');
 const memberFieldsRepository = require('../repositories/memberFields.repository');
+const memberFormsRepository = require('../repositories/memberForms.repository');
+const memberFormsService = require('./memberForms.service');
 const memberGroupsRepository = require('../repositories/memberGroups.repository');
 const chargeInstancesRepository = require('../repositories/chargeInstances.repository');
 const memberMembershipsRepository = require('../repositories/memberMemberships.repository');
@@ -21,7 +23,7 @@ const { diffValue, buildDiff } = require('../helpers/auditDiff');
 const { FUNCTIONS, USER_CLUB_STATUS } = require('../config/constants');
 const { toAbsoluteMediaUrl, deleteUploadedFile } = require('../helpers/mediaUrl');
 const { resolvePrivatePath, deletePrivateFile } = require('../middlewares/privateUpload.middleware');
-const { collectUploads, assertDocuments, discard, moveToPublic, moveToPrivate } = require('../helpers/memberUploads');
+const { assertDocuments, moveToPublic, moveToPrivate } = require('../helpers/memberUploads');
 const { parseSettings, maxFilesOf, imageList } = require('../helpers/memberFieldTypes');
 
 const SORTABLE = ['created_at', 'first_name', 'last_name', 'status'];
@@ -66,7 +68,7 @@ class MembersService {
     return membersRepository.upsertFieldValues(memberId, { [field.id]: parseSettings(field).multiple ? JSON.stringify(urls) : urls[0] });
   }
 
-  toDto(member, { groups = [], fieldValues = [], fieldsCatalog = [], linkedUsername = null, memberships = undefined } = {}) {
+  toDto(member, { groups = [], fieldValues = [], fieldsCatalog = [], linkedUsername = null, memberships = undefined, formIds = undefined } = {}) {
     // Todos los datos del miembro son campos de su ficha: `fields` = { código: valor }. Los de
     // "archivos" no van acá (se listan aparte, ver listDocuments).
     const valueByField = new Map(fieldValues.map((v) => [v.field_id, v.value]));
@@ -102,6 +104,8 @@ class MembersService {
       linkedUsername,
       groups: groups.map((g) => ({ id: g.id, name: g.name, color: g.color })),
       fields,
+      // Fichas que debe responder (solo en el detalle): definen qué campos se le piden.
+      ...(formIds !== undefined ? { formIds } : {}),
       createdAt: member.created_at,
     };
   }
@@ -280,20 +284,29 @@ class MembersService {
    * del club. Devuelve qué guardar y qué borrar. `requireAll`: exige todos los obligatorios
    * (alta); en una edición solo se exige que un obligatorio que VIENE no quede vacío. Revisa que
    * el identificador no lo tenga otro miembro del club.
+   *
+   * `formIds`: fichas que responde el miembro — solo se aceptan (y exigen) los campos de esas
+   * fichas; lo que llegue de un campo del club que no está en ellas se ignora. `null` = todo el
+   * catálogo (como antes de que hubiera varias fichas).
    */
-  async _prepareFieldValues(clubId, fields, { requireAll, memberId = null, publicOnly = false, allowSensitive = true } = {}) {
-    // `publicOnly`: formulario público — solo se aceptan (y exigen) los campos marcados para él.
-    const catalog = (await memberFieldsRepository.findByClub(clubId)).filter((f) => !publicOnly || f.in_public_form);
-    const byCode = new Map(catalog.map((f) => [f.code, f]));
-    const input = fields && typeof fields === 'object' ? fields : {};
+  async _prepareFieldValues(clubId, fields, { requireAll, memberId = null, publicOnly = false, allowSensitive = true, formIds = null } = {}) {
+    const full = await memberFieldsRepository.findByClub(clubId);
+    const fullCodes = new Set(full.map((f) => f.code));
+    const input = fields && typeof fields === 'object' ? { ...fields } : {};
 
-    const unknown = Object.keys(input).filter((code) => !byCode.has(code));
+    const unknown = Object.keys(input).filter((code) => !fullCodes.has(code));
     if (unknown.length) throw AppError.badRequest(`Campos inválidos: ${unknown.join(', ')}.`);
+
+    // `publicOnly`: formulario público — solo se aceptan (y exigen) los campos marcados para él.
+    const scoped = formIds === null ? full : await memberFormsService.fieldsOf(clubId, formIds);
+    const catalog = scoped.filter((f) => !publicOnly || f.in_public_form);
+    const byCode = new Map(catalog.map((f) => [f.code, f]));
+    for (const code of Object.keys(input)) if (!byCode.has(code)) delete input[code];
     // Sin permiso para datos sensibles: esos campos ni se leen ni se exigen (quedan como estaban).
     const isSensitive = (f) => !!parseSettings(f).sensitive;
     // Visibilidad condicional (ej. "Apoderado" solo para menores): un campo oculto no se exige.
     // Se evalúa con lo enviado + lo que el miembro ya tenía guardado.
-    const current = memberId ? Object.fromEntries((await membersRepository.getFieldValues(memberId)).map((v) => [catalog.find((f) => f.id === v.field_id)?.code, v.value])) : {};
+    const current = memberId ? Object.fromEntries((await membersRepository.getFieldValues(memberId)).map((v) => [full.find((f) => f.id === v.field_id)?.code, v.value])) : {};
     const merged = { ...current, ...input };
     const sectionOf = sectionConditions(catalog);
 
@@ -303,7 +316,7 @@ class MembersService {
     for (const field of catalog) {
       if (UPLOAD_TYPES.includes(field.field_type) || LAYOUT_TYPES.includes(field.field_type)) continue;
       if (!allowSensitive && isSensitive(field)) continue;
-      const visible = isFieldVisible(field, merged, catalog, sectionOf.get(field.id));
+      const visible = isFieldVisible(field, merged, full, sectionOf.get(field.id));
       const provided = Object.prototype.hasOwnProperty.call(input, field.code);
       if (!provided) {
         if (requireAll && field.is_required && visible) missing.push(field.label);
@@ -326,20 +339,55 @@ class MembersService {
     return { set, clear };
   }
 
-  /** Comprobación del formulario público / autoregistro (mismas reglas, sin guardar). */
-  async validateFields(clubId, fields, { publicOnly = false } = {}) {
-    return this._prepareFieldValues(clubId, fields, { requireAll: true, publicOnly });
+  /** Comprobación del formulario público / autoregistro (mismas reglas, sin guardar). `formIds`:
+   * fichas que se están respondiendo. `memberId`: registro existente al que se sumarán (su propio
+   * identificador no cuenta como repetido). */
+  async validateFields(clubId, fields, { publicOnly = false, formIds = null, memberId = null } = {}) {
+    return this._prepareFieldValues(clubId, fields, { requireAll: true, publicOnly, formIds, memberId });
+  }
+
+  /** Miembro (no eliminado) del club cuyo identificador coincide con el de `fields`, o null. Así
+   * una ficha enviada por alguien que ya es miembro se suma a su registro en vez de duplicarlo. */
+  async findByIdentifier(clubId, fields) {
+    const field = await memberFieldsRepository.findByRole(clubId, 'identifier');
+    const raw = field && fields ? fields[field.code] : null;
+    const value = raw ? normalizeIdentifier(field, raw) : null;
+    if (!value) return null;
+    const id = await memberFieldsRepository.findMemberIdByIdentifier(clubId, field.id, String(value).toUpperCase());
+    return id ? membersRepository.findActiveById(id) : null;
+  }
+
+  /** Fichas del miembro: las indicadas (validadas) o, si no se indican, las por defecto del club. */
+  async _resolveFormIds(clubId, formIds) {
+    const resolved = await memberFormsService.resolveIds(clubId, formIds);
+    return resolved ?? memberFormsService.defaultIds(clubId);
+  }
+
+  /**
+   * Suma a un miembro existente lo que respondió en una o varias fichas (solicitud aceptada de
+   * alguien que ya era miembro): guarda los campos enviados (sin borrar los que no vinieron) y le
+   * asigna esas fichas. Sin revisar acceso: lo decide quien llama (la revisión de la solicitud).
+   */
+  async applySubmission(clubId, memberId, fields, formIds, actorId, { publicOnly = false } = {}) {
+    const values = await this._prepareFieldValues(clubId, fields, { requireAll: false, memberId, publicOnly, formIds });
+    await withTransaction(async (conn) => {
+      if (Object.keys(values.set).length) await membersRepository.upsertFieldValues(memberId, values.set, conn);
+      await memberFormsRepository.addMemberForms(memberId, formIds, conn);
+    });
+    await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_UPDATED', entityType: 'member', entityId: memberId, changes: { fields: { from: null, to: `${Object.keys(values.set).length} campo(s)` } } });
+    return this._buildDto(await membersRepository.findActiveById(memberId));
   }
 
   async _buildDto(member) {
-    const [groups, fieldValues, fieldsCatalog, linkedUser, memberships] = await Promise.all([
+    const [groups, fieldValues, fieldsCatalog, linkedUser, memberships, formIds] = await Promise.all([
       membersRepository.getGroupsForMember(member.id),
       membersRepository.getFieldValues(member.id),
       memberFieldsRepository.findByClub(member.club_id),
       member.user_id ? usersRepository.findById(member.user_id) : null,
       memberMembershipsRepository.findByMember(member.id),
+      memberFormsRepository.formIdsForMember(member.id),
     ]);
-    return this.toDto(member, { groups, fieldValues, fieldsCatalog, linkedUsername: linkedUser?.username ?? null, memberships });
+    return this.toDto(member, { groups, fieldValues, fieldsCatalog, linkedUsername: linkedUser?.username ?? null, memberships, formIds });
   }
 
 /**
@@ -407,6 +455,7 @@ class MembersService {
       search: query.search,
       status: query.status,
       groupId: query.groupId ? Number(query.groupId) : null,
+      formId: query.formId ? Number(query.formId) : null,
       linked: query.linked,
       memberIds: access.full ? null : access.memberIds,
       ...(await this._listFilters(clubId, query, authContext)),
@@ -461,8 +510,10 @@ class MembersService {
       groupIds = data.groupIds;
     }
 
+    // Fichas que responde (sin indicar: las por defecto del club). Solo se piden sus campos.
+    const formIds = await this._resolveFormIds(clubId, data.formIds);
     // Se valida siempre (no solo "si vino fields"): un obligatorio omitido también se rechaza.
-    const values = await this._prepareFieldValues(clubId, data.fields || {}, { requireAll: true, publicOnly, allowSensitive });
+    const values = await this._prepareFieldValues(clubId, data.fields || {}, { requireAll: true, publicOnly, allowSensitive, formIds });
 
     const memberId = await withTransaction(async (conn) => {
       const id = await membersRepository.createMember(
@@ -474,6 +525,7 @@ class MembersService {
         },
         conn
       );
+      await memberFormsRepository.setMemberForms(id, formIds, conn);
       if (groupIds.length) await membersRepository.setGroups(id, groupIds, conn);
       if (Object.keys(values.set).length) await membersRepository.upsertFieldValues(id, values.set, conn);
       // Historial de pertenencia: activo desde su fecha de ingreso (sin fecha = desde siempre).
@@ -502,57 +554,6 @@ class MembersService {
     return this._buildDto(created);
   }
 
-  /** Autoservicio (POST /members/me) — única forma de crear un member SIN requireFunction (ver
-   * middlewares/permission.middleware.js#assertProfileNotPending y api/CLAUDE.md). Solo
-   * utilizable por alguien cuya membresía quedó marcada `requires_profile_completion` al unirse
-   * con una invitación configurada así (`clubs.service.js#joinByCode`) — cualquier otro usuario
-   * activo normal no tiene nada que "completar" acá. */
-  async createSelf(clubId, userId, data, files = []) {
-    const membership = await usersRepository.findMembership(userId, clubId);
-    if (!membership?.requires_profile_completion) {
-      discard(files);
-      throw AppError.conflict('No tienes una ficha pendiente por completar.');
-    }
-
-    // Reintentable: si un envío anterior ya creó el member pero se cortó antes de limpiar el
-    // flag (o el cliente reintenta tras un corte de red), no se debe fallar con "ya vinculado" —
-    // se reusa lo que ya exista y solo se limpia el flag.
-    let member = await membersRepository.findByUserId(userId, clubId);
-    if (!member) {
-      // Whitelist explícita (no un simple `...data`): `status`/`groupIds` son
-      // administrativos — `validations/members.validation.js#createMemberSelf` ya no los
-      // define, pero acá es la fuente de verdad real (mismo criterio que
-      // invitations.service.js#create con `defaultRoleId`: nunca confiar en que el body no
-      // los traiga solo porque el frontend no los muestra).
-      const safeData = {
-        fields: data.fields,
-        userId,
-        // Entra al club hoy (al completar su ficha desde una invitación).
-        joinedOn: toDateOnly(new Date()),
-      };
-      // Imágenes y archivos: mismas reglas que el resto (obligatorios incluidos).
-      const uploads = collectUploads(await memberFieldsRepository.findByClub(clubId), files, { requireAll: true });
-      try {
-        await this.create(clubId, safeData, userId);
-      } catch (error) {
-        discard(files);
-        if (error.statusCode === 409 && /Ya existe un miembro/.test(error.message)) {
-          throw AppError.conflict(`${error.message.replace(/\.$/, '')}: probablemente ya tienes una ficha. Pide a la directiva que la vincule a tu cuenta (desde tu ficha, en «Cuenta vinculada»).`);
-        }
-        throw error;
-      }
-      member = await membersRepository.findByUserId(userId, clubId);
-      await this.attachUploads(clubId, member.id, uploads, userId);
-      // Se relee: la respuesta debe traer ya la foto de perfil / cumpleaños recién adjuntada.
-      member = await membersRepository.findByUserId(userId, clubId);
-    } else {
-      discard(files);
-    }
-
-    await usersRepository.setRequiresProfileCompletion(userId, clubId, false);
-    return this._buildDto(member);
-  }
-
   async update(clubId, memberId, data, actorId, authContext) {
     const member = await membersRepository.findActiveById(memberId);
     if (!member || member.club_id !== clubId) throw AppError.notFound('Miembro no encontrado.');
@@ -571,9 +572,13 @@ class MembersService {
 
     // Sin permiso para datos sensibles, esos campos no se tocan aunque vengan en el body.
     const allowSensitive = canSeeSensitive(authContext);
-    const values = data.fields !== undefined ? await this._prepareFieldValues(clubId, data.fields, { requireAll: false, memberId, allowSensitive }) : null;
+    // Fichas: las nuevas si vienen; si no, las que ya tenía. Los campos se validan contra ellas.
+    const newFormIds = data.formIds !== undefined ? await memberFormsService.resolveIds(clubId, data.formIds) : null;
+    const formIds = newFormIds ?? (await memberFormsRepository.formIdsForMember(memberId));
+    const values = data.fields !== undefined ? await this._prepareFieldValues(clubId, data.fields, { requireAll: false, memberId, allowSensitive, formIds }) : null;
 
     await withTransaction(async (conn) => {
+      if (newFormIds) await memberFormsRepository.setMemberForms(memberId, newFormIds, conn);
       if (data.status !== undefined || data.statusDate) await this.applyStatus(member, data.status ?? member.status, actorId, conn, data.statusDate || null);
       if (data.joinedOn !== undefined) await this.setJoinedOn(memberId, data.joinedOn, actorId, conn);
       if (groupIds !== null) await membersRepository.setGroups(memberId, groupIds, conn);
@@ -590,6 +595,7 @@ class MembersService {
       fullName: diffValue(this._fullName(member), this._fullName(updated)),
       status: data.status !== undefined ? diffValue(member.status, data.status) : undefined,
       fields: values ? diffValue(null, `${Object.keys(values.set).length + values.clear.length} campo(s)`) : undefined,
+      forms: newFormIds ? diffValue(null, `${newFormIds.length} ficha(s)`) : undefined,
     });
     if (changes) {
       await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_UPDATED', entityType: 'member', entityId: memberId, changes });
@@ -796,6 +802,38 @@ class MembersService {
     return { absolutePath, name: doc.name, mimeType: doc.mime_type };
   }
 
+  /**
+   * Registro de miembro de una cuenta en el club: el que ya tiene (vinculado a la cuenta) o, si no
+   * tiene, uno nuevo con el nombre y correo de la cuenta. Lo usan los apoderados con cuenta: ser
+   * apoderado es ser un miembro vinculado a otro, y la cuenta se vincula a ese registro (nunca se
+   * crea un segundo). Queda sin fichas asignadas: el club le asigna la que corresponda (ej. "Ficha
+   * de apoderado"). Sin validar la ficha (no se le pidió nada todavía).
+   */
+  async ensureForAccount(clubId, userId, actorId, conn) {
+    const existing = await membersRepository.findByUserId(userId, clubId, conn);
+    if (existing) return existing;
+    const user = await usersRepository.findById(userId, conn);
+    if (!user) throw AppError.notFound('Cuenta no encontrada.');
+    const catalog = await memberFieldsRepository.findByClub(clubId, conn);
+    const fieldOf = (role) => catalog.find((f) => f.role === role);
+    const name = String(user.username || '').trim();
+    const [first, ...rest] = name.split(/\s+/);
+    const values = {};
+    if (fieldOf('first_name') && first) values[fieldOf('first_name').id] = first;
+    if (fieldOf('last_name') && rest.length) values[fieldOf('last_name').id] = rest.join(' ');
+    if (fieldOf('email') && user.email) values[fieldOf('email').id] = user.email;
+
+    const run = async (c) => {
+      const id = await membersRepository.createMember({ clubId, userId, status: 'active', createdBy: actorId ?? userId }, c);
+      if (Object.keys(values).length) await membersRepository.upsertFieldValues(id, values, c);
+      await memberMembershipsRepository.create(id, null, c);
+      return id;
+    };
+    const id = conn ? await run(conn) : await withTransaction(run);
+    await auditRepository.logAction({ userId: actorId ?? userId, clubId, action: 'MEMBER_CREATED', entityType: 'member', entityId: id, changes: { fullName: name || `Miembro #${id}`, fromAccount: true } });
+    return membersRepository.findActiveById(id, conn);
+  }
+
   async linkUser(clubId, memberId, targetUserId, actorId, authContext) {
     const member = await membersRepository.findActiveById(memberId);
     if (!member || member.club_id !== clubId) throw AppError.notFound('Miembro no encontrado.');
@@ -807,7 +845,7 @@ class MembersService {
     }
 
     await membersRepository.updateById(memberId, { user_id: targetUserId || null });
-    // Ya tiene ficha: no se le vuelve a pedir que la complete (ver createSelf).
+    // Ya tiene ficha: no se le vuelve a pedir que la complete (ver memberApplications.service.js#submitForAccount).
     if (targetUserId) await usersRepository.setRequiresProfileCompletion(targetUserId, clubId, false);
     await auditRepository.logAction({
       userId: actorId,

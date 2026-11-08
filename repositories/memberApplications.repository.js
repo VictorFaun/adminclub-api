@@ -7,14 +7,22 @@ class MemberApplicationsRepository extends BaseRepository {
     super('member_applications', 'id');
   }
 
-  async create({ clubId, fields, message, groupId = null }, conn = pool) {
-    const [result] = await conn.query('INSERT INTO member_applications (uuid, club_id, fields, group_id, message) VALUES (UUID(), ?, ?, ?, ?)', [
-      clubId,
-      JSON.stringify(fields || {}),
-      groupId,
-      message,
-    ]);
+  /** `userId`: ficha enviada por una cuenta (código de invitación que exige ficha); null = formulario
+   * público. `invitationId`: invitación de la que viene; `formIds`: fichas que responde;
+   * `targetMemberId`: miembro existente (mismo identificador) al que se suma al aceptarla. */
+  async create({ clubId, fields, message, groupId = null, userId = null, invitationId = null, formIds = [], targetMemberId = null }, conn = pool) {
+    const [result] = await conn.query(
+      `INSERT INTO member_applications (uuid, club_id, user_id, invitation_id, fields, form_ids, group_id, message, target_member_id)
+       VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [clubId, userId, invitationId, JSON.stringify(fields || {}), JSON.stringify(formIds || []), groupId, message, targetMemberId]
+    );
     return result.insertId;
+  }
+
+  /** Última ficha que envió esa cuenta en el club (para saber si está en revisión o rechazada). */
+  async findLatestForUser(clubId, userId, conn = pool) {
+    const [rows] = await conn.query('SELECT * FROM member_applications WHERE club_id = ? AND user_id = ? ORDER BY id DESC LIMIT 1', [clubId, userId]);
+    return rows[0] || null;
   }
 
   async findInClub(clubId, id, conn = pool) {
@@ -30,9 +38,13 @@ class MemberApplicationsRepository extends BaseRepository {
       params.push(status);
     }
     const [rows] = await conn.query(
-      `SELECT ma.*, u.username AS reviewed_by_username, g.name AS group_name
+      `SELECT ma.*, u.username AS reviewed_by_username, g.name AS group_name,
+              au.username AS account_username, au.email AS account_email, au.avatar_url AS account_avatar_url,
+              inv.code AS invitation_code, inv.note AS invitation_note
        FROM member_applications ma LEFT JOIN users u ON u.id = ma.reviewed_by
+       LEFT JOIN users au ON au.id = ma.user_id
        LEFT JOIN member_groups g ON g.id = ma.group_id
+       LEFT JOIN invitations inv ON inv.id = ma.invitation_id
        WHERE ${where}
        ORDER BY (ma.status = 'pending') DESC, ma.created_at DESC LIMIT 300`,
       params
@@ -78,6 +90,20 @@ class MemberApplicationsRepository extends BaseRepository {
 
   async deleteFiles(applicationId, conn = pool) {
     await conn.query('DELETE FROM member_application_files WHERE application_id = ?', [applicationId]);
+  }
+
+  /** Pasa a otra solicitud los archivos de una anterior (reenvío tras un rechazo), salvo los de
+   * los campos en que se subió algo nuevo. Devuelve las filas que NO se pasaron (para borrar sus
+   * archivos del disco). */
+  async moveFiles(fromApplicationId, toApplicationId, exceptFieldIds = [], conn = pool) {
+    await conn.query('UPDATE member_application_files SET application_id = ? WHERE application_id = ? AND field_id NOT IN (?)', [
+      toApplicationId,
+      fromApplicationId,
+      exceptFieldIds.length ? exceptFieldIds : [0],
+    ]);
+    const [rest] = await conn.query('SELECT * FROM member_application_files WHERE application_id = ?', [fromApplicationId]);
+    await this.deleteFiles(fromApplicationId, conn);
+    return rest;
   }
 
   /** Usuarios activos del club que pueden aceptar solicitudes (tienen CREATE_MEMBERS). */

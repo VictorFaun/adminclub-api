@@ -6,7 +6,10 @@ const membersRepository = require('../repositories/members.repository');
 const rolesRepository = require('../repositories/roles.repository');
 const settingsRepository = require('../repositories/settings.repository');
 const joinRequestsRepository = require('../repositories/joinRequests.repository');
+const memberApplicationsRepository = require('../repositories/memberApplications.repository');
+const logger = require('../helpers/logger');
 const invitationsRepository = require('../repositories/invitations.repository');
+const invitationsService = require('./invitations.service');
 const auditRepository = require('../repositories/audit.repository');
 const rolesService = require('./roles.service');
 const AppError = require('../helpers/AppError');
@@ -288,15 +291,12 @@ class ClubsService {
     const code = rawCode.trim().toUpperCase();
     const invitation = await invitationsRepository.findByCode(code);
     if (!invitation) throw AppError.notFound('Código de invitación inválido.');
-    if (invitation.status !== 'active') throw AppError.badRequest('Esta invitación ya no está activa.');
-    if (invitation.expires_at && new Date(invitation.expires_at) < new Date()) {
-      await invitationsRepository.setStatus(invitation.id, 'expired');
-      throw AppError.badRequest('Esta invitación ha expirado.');
+    // Solo las invitaciones que exigen cuenta sirven para ingresar al club. Las públicas (solo
+    // fichas, sin cuenta) se usan exclusivamente desde su enlace — ver memberApplications.service.js#submit.
+    if (!invitation.requires_account) {
+      throw AppError.badRequest('Este código no sirve para unirse al club: es un formulario público. Ábrelo desde el enlace que te compartió el club.');
     }
-    if (invitation.max_uses && invitation.uses_count >= invitation.max_uses) {
-      await invitationsRepository.setStatus(invitation.id, 'exhausted');
-      throw AppError.badRequest('Esta invitación ya alcanzó su límite de usos.');
-    }
+    await invitationsService.assertUsable(invitation);
 
     const club = await clubsRepository.findActiveById(invitation.club_id);
     if (!club) throw AppError.notFound('Código de invitación inválido.');
@@ -323,7 +323,7 @@ class ClubsService {
         userId,
         clubId: club.id,
         roleIds: invitation.default_role_id ? [invitation.default_role_id] : [],
-        requiresProfile: !!invitation.requires_member_profile,
+        formIds: await invitationsRepository.findFormIds(invitation.id, conn),
         actorId: invitation.created_by ?? null,
       });
       await invitationsRepository.recordUse({ invitationId: invitation.id, userId }, conn);
@@ -350,7 +350,27 @@ class ClubsService {
 
     const id = await joinRequestsRepository.createRequest({ userId, clubId, message });
     await auditRepository.logActivity({ userId, clubId, description: 'Solicitó acceso al club' });
+    this._notifyAccessReviewers(clubId, userId, message);
     return { id };
+  }
+
+  /** Aviso (app, push y correo) a quienes pueden aprobar solicitudes de acceso. Mejor esfuerzo. */
+  _notifyAccessReviewers(clubId, userId, message) {
+    const notificationsService = require('./notifications.service');
+    (async () => {
+      const [user, reviewers] = await Promise.all([usersRepository.findById(userId), memberApplicationsRepository.findReviewerUserIds(clubId, FUNCTIONS.MANAGE_JOIN_REQUESTS)]);
+      for (const reviewerId of reviewers) {
+        await notificationsService.notifyUser({
+          userId: reviewerId,
+          clubId,
+          type: 'info',
+          category: 'members',
+          title: 'Nueva solicitud de acceso',
+          message: `${user?.username ?? 'Alguien'} pidió entrar al club${message ? `: «${String(message).slice(0, 200)}»` : '.'}`,
+          link: '/requests?kind=access',
+        });
+      }
+    })().catch((error) => logger.error(`[clubs] aviso de solicitud de acceso: ${error.message}`));
   }
 
   async listJoinRequests(clubId, query) {

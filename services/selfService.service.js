@@ -1,6 +1,8 @@
 const memberGuardiansRepository = require('../repositories/memberGuardians.repository');
 const membersRepository = require('../repositories/members.repository');
 const memberFieldsRepository = require('../repositories/memberFields.repository');
+const memberFormsRepository = require('../repositories/memberForms.repository');
+const memberFormsService = require('./memberForms.service');
 const settingsRepository = require('../repositories/settings.repository');
 const paymentsRepository = require('../repositories/payments.repository');
 const paymentProofsRepository = require('../repositories/paymentProofs.repository');
@@ -258,8 +260,10 @@ class SelfServiceService {
 
   // ------------------------------------------------------------------ mi ficha
 
-  async _fieldCatalog(clubId) {
-    return (await memberFieldsRepository.findByClub(clubId)).filter((f) => !parseSettings(f).sensitive);
+  /** Campos de las fichas del miembro (sin los sensibles), en el orden de sus fichas. */
+  async _fieldCatalog(clubId, memberId) {
+    const formIds = await memberFormsRepository.formIdsForMember(memberId);
+    return (await memberFormsService.fieldsOf(clubId, formIds)).filter((f) => !parseSettings(f).sensitive);
   }
 
   _editable(field, settings) {
@@ -268,7 +272,7 @@ class SelfServiceService {
 
   async profile(clubId, userId, memberId) {
     const { member, settings } = await this._own(clubId, userId, memberId);
-    const catalog = await this._fieldCatalog(clubId);
+    const catalog = await this._fieldCatalog(clubId, member.id);
     const dto = await membersService._buildDto(member);
     const visible = new Set(catalog.map((f) => f.code));
     const fields = Object.fromEntries(Object.entries(dto.fields).filter(([code]) => visible.has(code)));
@@ -287,11 +291,11 @@ class SelfServiceService {
 
   async updateProfile(clubId, userId, memberId, { fields }) {
     const { member, settings } = await this._own(clubId, userId, memberId, 'profileEdit');
-    const editable = new Map((await this._fieldCatalog(clubId)).filter((f) => this._editable(f, settings) && !UPLOAD_TYPES.includes(f.field_type)).map((f) => [f.code, f]));
+    const editable = new Map((await this._fieldCatalog(clubId, member.id)).filter((f) => this._editable(f, settings) && !UPLOAD_TYPES.includes(f.field_type)).map((f) => [f.code, f]));
     // Whitelist en el servidor: lo que no es editable se ignora aunque venga en el body.
     const input = Object.fromEntries(Object.entries(fields && typeof fields === 'object' ? fields : {}).filter(([code]) => editable.has(code)));
     if (!Object.keys(input).length) throw AppError.badRequest('No hay campos editables para guardar.');
-    const values = await membersService._prepareFieldValues(clubId, input, { requireAll: false, memberId: member.id, allowSensitive: false });
+    const values = await membersService._prepareFieldValues(clubId, input, { requireAll: false, memberId: member.id, allowSensitive: false, formIds: await memberFormsRepository.formIdsForMember(member.id) });
     await withTransaction(async (conn) => {
       if (Object.keys(values.set).length) await membersRepository.upsertFieldValues(member.id, values.set, conn);
       await membersRepository.deleteFieldValues(member.id, values.clear, conn);
@@ -307,8 +311,8 @@ class SelfServiceService {
     return this.profile(clubId, userId, member.id);
   }
 
-  async _editableImageField(clubId, settings, fieldId) {
-    const field = (await this._fieldCatalog(clubId)).find((f) => f.id === Number(fieldId) && f.field_type === 'image');
+  async _editableImageField(clubId, settings, fieldId, memberId) {
+    const field = (await this._fieldCatalog(clubId, memberId)).find((f) => f.id === Number(fieldId) && f.field_type === 'image');
     if (!field || !this._editable(field, settings)) throw AppError.forbidden('Este campo no lo puedes modificar.');
     return field;
   }
@@ -316,7 +320,7 @@ class SelfServiceService {
   async setImage(clubId, userId, memberId, fieldId, file) {
     try {
       const { member, settings } = await this._own(clubId, userId, memberId, 'profileEdit');
-      const field = await this._editableImageField(clubId, settings, fieldId);
+      const field = await this._editableImageField(clubId, settings, fieldId, member.id);
       return await membersService.storeImage(clubId, member.id, field, file, userId, 'MEMBER_SELF_UPDATED');
     } catch (error) {
       if (file) deleteUploadedFile(`/uploads/member-photos/${file.filename}`);
@@ -326,13 +330,13 @@ class SelfServiceService {
 
   async removeImage(clubId, userId, memberId, fieldId, url) {
     const { member, settings } = await this._own(clubId, userId, memberId, 'profileEdit');
-    const field = await this._editableImageField(clubId, settings, fieldId);
+    const field = await this._editableImageField(clubId, settings, fieldId, member.id);
     await membersService.dropImage(member.id, field, url || null);
   }
 
   /** Campo de archivos de su ficha que la persona puede modificar (`editable`) o solo ver. */
-  async _fileField(clubId, settings, fieldId, { editable }) {
-    const field = (await this._fieldCatalog(clubId)).find((f) => f.id === Number(fieldId) && f.field_type === 'file');
+  async _fileField(clubId, settings, fieldId, { editable }, memberId) {
+    const field = (await this._fieldCatalog(clubId, memberId)).find((f) => f.id === Number(fieldId) && f.field_type === 'file');
     if (!field || (editable && !this._editable(field, settings))) throw AppError.forbidden('Este campo no lo puedes modificar.');
     return field;
   }
@@ -340,7 +344,7 @@ class SelfServiceService {
   async addDocument(clubId, userId, memberId, fieldId, file) {
     try {
       const { member, settings } = await this._own(clubId, userId, memberId, 'profileEdit');
-      await this._fileField(clubId, settings, fieldId, { editable: true });
+      await this._fileField(clubId, settings, fieldId, { editable: true }, member.id);
       return await membersService.storeDocument(clubId, member.id, Number(fieldId), file, null, userId, 'MEMBER_SELF_UPDATED');
     } catch (error) {
       if (file) deletePrivateFile(`member-documents/${file.filename}`);
@@ -357,7 +361,7 @@ class SelfServiceService {
   async removeDocument(clubId, userId, memberId, documentId) {
     const { member, settings } = await this._own(clubId, userId, memberId, 'profileEdit');
     const doc = await this._ownDocument(member, documentId);
-    await this._fileField(clubId, settings, doc.field_id, { editable: true });
+    await this._fileField(clubId, settings, doc.field_id, { editable: true }, member.id);
     await membersRepository.deleteDocument(doc.id);
     deletePrivateFile(doc.file_path);
     await auditRepository.logAction({ userId, clubId, action: 'MEMBER_SELF_UPDATED', entityType: 'member', entityId: member.id, changes: { document: { from: doc.name, to: null } } });
@@ -366,7 +370,7 @@ class SelfServiceService {
   async documentFile(clubId, userId, memberId, documentId) {
     const { member, settings } = await this._own(clubId, userId, memberId);
     const doc = await this._ownDocument(member, documentId);
-    await this._fileField(clubId, settings, doc.field_id, { editable: false });
+    await this._fileField(clubId, settings, doc.field_id, { editable: false }, member.id);
     const absolutePath = resolvePrivatePath(doc.file_path);
     if (!absolutePath) throw AppError.notFound('Documento no encontrado.');
     return { absolutePath, name: doc.name, mimeType: doc.mime_type };
@@ -374,8 +378,21 @@ class SelfServiceService {
 
   // ------------------------------------------------------------------ apoderados
 
+  /** Un apoderado es un miembro: su nombre/foto salen de su ficha; la cuenta (si tiene) es aparte. */
   _guardianDto(r) {
-    return { userId: r.user_id, username: r.username, email: r.email, avatarUrl: r.avatar_url ? toAbsoluteMediaUrl(r.avatar_url) : null, relation: r.relation ?? null, createdAt: r.created_at };
+    const avatar = r.avatar_url || r.user_avatar_url;
+    return {
+      memberId: r.guardian_member_id,
+      fullName: membersService._fullName({ ...r, id: r.guardian_member_id }),
+      avatarUrl: avatar ? toAbsoluteMediaUrl(avatar) : null,
+      relation: r.relation ?? null,
+      status: r.guardian_status ?? null,
+      // Cuenta vinculada al registro del apoderado (opcional): con ella ve la ficha en "Mi club".
+      userId: r.username ? r.user_id : null,
+      username: r.username ?? null,
+      email: r.user_email ?? r.email ?? null,
+      createdAt: r.created_at,
+    };
   }
 
   async _clubMember(clubId, memberId) {
@@ -390,20 +407,47 @@ class SelfServiceService {
     return (await memberGuardiansRepository.findByMember(member.id)).map((r) => this._guardianDto(r));
   }
 
-  async addGuardian(clubId, memberId, { userId, relation }, actorId) {
+  /** Directiva: fichas de las que es apoderado un miembro. */
+  async listWards(clubId, guardianMemberId) {
+    const member = await this._clubMember(clubId, guardianMemberId);
+    return (await memberGuardiansRepository.findWards(member.id)).map((r) => ({
+      memberId: r.member_id,
+      fullName: membersService._fullName({ ...r, id: r.member_id }),
+      avatarUrl: r.avatar_url ? toAbsoluteMediaUrl(r.avatar_url) : null,
+      relation: r.relation ?? null,
+      status: r.status,
+      createdAt: r.created_at,
+    }));
+  }
+
+  /**
+   * Vincula a un miembro como apoderado de otro. `guardianMemberId`: un miembro del club (con o
+   * sin cuenta). `userId` (compatibilidad / atajo): una cuenta del club — se usa su registro de
+   * miembro y, si no tiene, se le crea uno vinculado a la cuenta (nunca un segundo registro).
+   */
+  async addGuardian(clubId, memberId, { guardianMemberId, userId, relation }, actorId) {
     const member = await this._clubMember(clubId, memberId);
-    const membership = await usersRepository.findMembership(Number(userId), clubId);
-    if (!membership || membership.status !== USER_CLUB_STATUS.ACTIVE) throw AppError.badRequest('La cuenta debe pertenecer al club (activa).');
-    if (member.user_id === Number(userId)) throw AppError.badRequest('Esa cuenta ya es la titular de esta ficha.');
-    await memberGuardiansRepository.add({ memberId: member.id, userId: Number(userId), relation: relation?.trim() || null, createdBy: actorId });
-    await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_GUARDIAN_ADDED', entityType: 'member', entityId: member.id, changes: { userId: Number(userId), relation: relation || null } });
+    let guardian;
+    if (guardianMemberId) {
+      guardian = await this._clubMember(clubId, guardianMemberId);
+    } else if (userId) {
+      const membership = await usersRepository.findMembership(Number(userId), clubId);
+      if (!membership || membership.status !== USER_CLUB_STATUS.ACTIVE) throw AppError.badRequest('La cuenta debe pertenecer al club (activa).');
+      guardian = await membersService.ensureForAccount(clubId, Number(userId), actorId);
+    } else {
+      throw AppError.badRequest('Indica el miembro que será apoderado.');
+    }
+    if (guardian.id === member.id) throw AppError.badRequest('Un miembro no puede ser su propio apoderado.');
+    const cleanRelation = relation ? String(relation).trim().slice(0, 40) || null : null;
+    await memberGuardiansRepository.add({ memberId: member.id, guardianMemberId: guardian.id, relation: cleanRelation, createdBy: actorId });
+    await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_GUARDIAN_ADDED', entityType: 'member', entityId: member.id, changes: { guardianMemberId: guardian.id, relation: cleanRelation } });
     return this.listGuardians(clubId, member.id);
   }
 
-  async removeGuardian(clubId, memberId, guardianUserId, actorId) {
+  async removeGuardian(clubId, memberId, guardianMemberId, actorId) {
     const member = await this._clubMember(clubId, memberId);
-    if (!(await memberGuardiansRepository.remove(member.id, Number(guardianUserId)))) throw AppError.notFound('Apoderado no encontrado.');
-    await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_GUARDIAN_REMOVED', entityType: 'member', entityId: member.id, changes: { userId: Number(guardianUserId) } });
+    if (!(await memberGuardiansRepository.remove(member.id, Number(guardianMemberId)))) throw AppError.notFound('Apoderado no encontrado.');
+    await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_GUARDIAN_REMOVED', entityType: 'member', entityId: member.id, changes: { guardianMemberId: Number(guardianMemberId) } });
     return this.listGuardians(clubId, member.id);
   }
 
@@ -427,8 +471,11 @@ class SelfServiceService {
     const cleanRelation = relation ? String(relation).trim().slice(0, 40) : null;
     const membership = await usersRepository.findMembership(target.id, clubId);
     if (membership?.status === USER_CLUB_STATUS.ACTIVE) {
-      await memberGuardiansRepository.add({ memberId: member.id, userId: target.id, relation: cleanRelation, createdBy: userId });
-      await auditRepository.logAction({ userId, clubId, action: 'MEMBER_GUARDIAN_ADDED', entityType: 'member', entityId: member.id, changes: { userId: target.id, relation: cleanRelation } });
+      // Su registro de miembro (o uno nuevo vinculado a su cuenta) queda como apoderado.
+      const guardian = await membersService.ensureForAccount(clubId, target.id, userId);
+      if (guardian.id === member.id) throw AppError.badRequest('Esa cuenta ya tiene acceso a esta ficha.');
+      await memberGuardiansRepository.add({ memberId: member.id, guardianMemberId: guardian.id, relation: cleanRelation, createdBy: userId });
+      await auditRepository.logAction({ userId, clubId, action: 'MEMBER_GUARDIAN_ADDED', entityType: 'member', entityId: member.id, changes: { guardianMemberId: guardian.id, relation: cleanRelation } });
       return { added: true, invited: false };
     }
     if (membership && membership.status !== USER_CLUB_STATUS.WITHDRAWN) throw AppError.conflict('Esa cuenta no puede recibir invitaciones de este club ahora.');

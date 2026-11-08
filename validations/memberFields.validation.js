@@ -18,6 +18,7 @@ const createField = [
   body('code').optional({ nullable: true }).trim().isLength({ max: 60 }),
   body('label').trim().notEmpty().withMessage('El nombre del campo es obligatorio.').isLength({ max: 120 }),
   body('fieldType').isIn(FIELD_TYPES).withMessage('Tipo de campo inválido.'),
+  body('formId').optional({ nullable: true }).isInt({ min: 1 }).withMessage('Ficha inválida.').toInt(),
   ...common,
 ];
 

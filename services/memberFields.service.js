@@ -1,4 +1,5 @@
 const memberFieldsRepository = require('../repositories/memberFields.repository');
+const memberFormsService = require('./memberForms.service');
 const auditRepository = require('../repositories/audit.repository');
 const AppError = require('../helpers/AppError');
 const slugify = require('../utils/slugify');
@@ -70,7 +71,8 @@ class MemberFieldsService {
     return s ? JSON.stringify(s) : null;
   }
 
-  async create(clubId, { code, label, fieldType, role, options, settings, helpText, isRequired, inPublicForm, sortOrder }, actorId, conn) {
+  /** `formId`: ficha a la que se agrega el campo (al final); sin indicarla, a las fichas por defecto. */
+  async create(clubId, { code, label, fieldType, role, options, settings, helpText, isRequired, inPublicForm, sortOrder, formId }, actorId, conn) {
     if (!FIELD_TYPES.includes(fieldType)) throw AppError.badRequest('Tipo de campo inválido.');
     const normalizedCode = slugify(code || label);
     if (!normalizedCode) throw AppError.badRequest('No se pudo generar un código válido para este campo.');
@@ -93,6 +95,7 @@ class MemberFieldsService {
       },
       conn
     );
+    await memberFormsService.attachField(clubId, id, formId ? Number(formId) : null, conn);
     if (actorId !== undefined) {
       await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_FIELD_CREATED', entityType: 'member_field', entityId: id, changes: { label, fieldType } });
     }
@@ -165,10 +168,12 @@ class MemberFieldsService {
     const codes = new Set(existing.map((f) => f.code));
     const roles = new Set(existing.map((f) => f.role).filter(Boolean));
     let added = 0;
+    // Los sugeridos van a la ficha por defecto (la crea si el club todavía no tiene ninguna).
+    const formId = await memberFormsService.ensureDefault(clubId, conn);
     for (const s of SUGGESTED_FIELDS) {
       if (codes.has(s.code) || (s.role && roles.has(s.role))) continue;
       // eslint-disable-next-line no-await-in-loop
-      await memberFieldsRepository.createField(
+      const fieldId = await memberFieldsRepository.createField(
         {
           clubId,
           code: s.code,
@@ -185,6 +190,8 @@ class MemberFieldsService {
         },
         conn
       );
+      // eslint-disable-next-line no-await-in-loop
+      await memberFormsService.attachField(clubId, fieldId, formId, conn);
       added += 1;
     }
     if (added && actorId) {

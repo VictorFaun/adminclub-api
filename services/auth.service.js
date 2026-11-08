@@ -8,7 +8,6 @@ const membersRepository = require('../repositories/members.repository');
 const chargesRepository = require('../repositories/charges.repository');
 const trainingsRepository = require('../repositories/trainings.repository');
 const platformSettingsRepository = require('../repositories/platformSettings.repository');
-const settingsRepository = require('../repositories/settings.repository');
 const pushSubscriptionsRepository = require('../repositories/pushSubscriptions.repository');
 const { describeUserAgent, displayIp } = require('../helpers/userAgent');
 const { emitToSession } = require('../sockets');
@@ -28,8 +27,7 @@ const clubsService = require('./clubs.service');
 const env = require('../config/env');
 const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const { USER_STATUS, TOKEN_TYPE, GLOBAL_ROLES } = require('../config/constants');
-/** Misma clave que memberApplications.service.js#PUBLIC_FORM_KEY (club_settings). */
-const PUBLIC_MEMBER_FORM_KEY = 'public_member_form_enabled';
+const invitationsRepository = require('../repositories/invitations.repository');
 /** Margen para aceptar un refresh token recién rotado (ver sessions.repository.js#findRecentlyRotatedByHash). */
 const REFRESH_GRACE_SECONDS = 30;
 const { OAuth2Client } = require('google-auth-library');
@@ -242,14 +240,13 @@ class AuthService {
     return email.split('@')[0].toLowerCase().replace(/[^a-z0-9._-]/g, '') || 'usuario';
   }
 
-  /** Club activo + datos del club que la UI necesita sin pedir otro permiso: si el formulario
-   * público de inscripción está activo (sin él no llegan solicitudes, así que la vista
+  /** Club activo + datos del club que la UI necesita sin pedir otro permiso: si recibe fichas
+   * (alguna invitación activa las pide; sin eso no llegan solicitudes, así que la vista
    * Miembros → Solicitudes se oculta — ver side-menu.component.ts). */
   async _selectedClubDto(row, userId = null) {
     const dto = toClubContextDto(row);
     if (!dto) return null;
-    const settings = await settingsRepository.findAllByClub(row.id);
-    return { ...dto, publicMemberFormEnabled: settings[PUBLIC_MEMBER_FORM_KEY] === '1', myClub: await this._myClubDto(row, userId) };
+    return { ...dto, publicMemberFormEnabled: await invitationsRepository.clubHasFormInvitations(row.id), myClub: await this._myClubDto(row, userId) };
   }
 
   /** "Mi club" del club activo: interruptores + cuántas fichas tiene la cuenta (propia + a cargo).

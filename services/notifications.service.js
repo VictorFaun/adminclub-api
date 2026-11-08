@@ -24,6 +24,19 @@ const EMAIL_EYEBROW = {
   invitation: 'Invitación',
 };
 
+/** De qué trata cada notificación (filtro de la pestaña Notificaciones; ver sql/070). Mismos ids
+ * que app/src/app/core/models/notification.model.ts#NOTIFICATION_CATEGORIES. */
+const CATEGORIES = ['birthday', 'event', 'members', 'payments', 'trainings', 'invitation', 'general'];
+
+/** Categoría por defecto cuando quien notifica no la indica. */
+function defaultCategory(type, link) {
+  if (type === 'birthday') return 'birthday';
+  if (type === 'invitation') return 'invitation';
+  if (link?.startsWith('/calendar')) return 'event';
+  if (link?.startsWith('/trainings')) return 'trainings';
+  return 'general';
+}
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -41,6 +54,11 @@ class NotificationsService {
       sortOrder,
       unreadOnly: query.unreadOnly === 'true',
       clubId: query.clubId ? Number(query.clubId) : null,
+      // `categories`: "birthday,payments" — solo esas; vacío = todas.
+      categories: String(query.categories || '')
+        .split(',')
+        .map((c) => c.trim())
+        .filter((c) => CATEGORIES.includes(c)),
     });
     return {
       items: rows.map(Notification.fromRow),
@@ -68,11 +86,22 @@ class NotificationsService {
    * notificación llegue también por correo). `imageUrl` es opcional (p.ej. la plantilla de
    * cumpleaños compuesta en el servidor, ver birthdays.service.js). `email` (opcional):
    * `{ subject, html }` ya armado para usar en vez del correo genérico (ej. el recordatorio de
-   * pago, con la tabla de lo que se debe). */
-  async notifyUser({ userId, clubId, type, title, message, link, imageUrl = null, email = null }) {
-    const id = await notificationsRepository.createNotification({ userId, clubId, type, title, message, link, imageUrl });
+   * pago, con la tabla de lo que se debe). `sendEmail: false`: solo en la app y push (quien llama
+   * manda su propio correo, ej. paymentNotices.service.js, para no enviar dos por lo mismo).
+   * `ctaText`: texto del botón del correo (por defecto "Ver más"). */
+  async notifyUser({ userId, clubId, type, category = null, title, message, link, imageUrl = null, email = null, sendEmail = true, ctaText = null }) {
+    const id = await notificationsRepository.createNotification({
+      userId,
+      clubId,
+      type,
+      category: CATEGORIES.includes(category) ? category : defaultCategory(type, link),
+      title,
+      message,
+      link,
+      imageUrl,
+    });
     try {
-      emitToUser(userId, 'notification:new', { id, userId, clubId, type, title, message, link, imageUrl });
+      emitToUser(userId, 'notification:new', { id, userId, clubId, type, category, title, message, link, imageUrl });
     } catch {
       // Socket.IO puede no estar inicializado (p.ej. en scripts/tests) — no es crítico.
     }
@@ -82,7 +111,8 @@ class NotificationsService {
     // Sin await: un correo lento/fallido no debe demorar ni tumbar la creación de la
     // notificación (que ya quedó persistida y empujada por socket) — mismo espíritu "mejor
     // esfuerzo" que el resto de email.service.js.
-    this._emailForNotification({ userId, clubId, type, title, message, link, imageUrl, email }).catch((error) => {
+    if (!sendEmail) return id;
+    this._emailForNotification({ userId, clubId, type, title, message, link, imageUrl, email, ctaText }).catch((error) => {
       logger.error('[notifications] Error enviando correo de notificación', { userId, notificationId: id, error: error.message });
     });
     return id;
@@ -90,11 +120,14 @@ class NotificationsService {
 
   /** Correo con el mismo contenido de la notificación — branding del club si tiene uno
    * asociado, genérico si no (p.ej. una notificación a nivel de plataforma). */
-  async _emailForNotification({ userId, clubId, type, title, message, link, imageUrl, email }) {
+  async _emailForNotification({ userId, clubId, type, title, message, link, imageUrl, email, ctaText = null }) {
     const user = await usersRepository.findById(userId);
     if (!user?.email) return;
+    // Remitente: el club (si la notificación es de uno); si no, el nombre de la plataforma.
+    const club = clubId ? await clubsRepository.findActiveById(clubId) : null;
+    const fromName = club?.name ?? null;
     if (email?.html) {
-      await emailService.send({ to: user.email, subject: email.subject || title, html: email.html });
+      await emailService.send({ to: user.email, subject: email.subject || title, html: email.html, fromName });
       return;
     }
 
@@ -106,20 +139,19 @@ class NotificationsService {
     const eyebrow = EMAIL_EYEBROW[type] || EMAIL_EYEBROW.info;
     const preheader = String(message ?? '').replace(/\s+/g, ' ').trim().slice(0, 140);
 
-    const club = clubId ? await clubsRepository.findActiveById(clubId) : null;
     const html = club
       ? renderClubEmail({
           club: { name: club.name, primaryColor: club.primary_color, logoUrl: toAbsoluteMediaUrl(club.logo_url) },
           title,
           bodyHtml,
-          ctaText: ctaUrl ? 'Ver más' : undefined,
+          ctaText: ctaUrl ? ctaText || 'Ver más' : undefined,
           ctaUrl,
           eyebrow,
           preheader,
         })
-      : renderPlatformEmail({ title, bodyHtml, ctaText: ctaUrl ? 'Ver más' : undefined, ctaUrl, eyebrow, preheader });
+      : renderPlatformEmail({ title, bodyHtml, ctaText: ctaUrl ? ctaText || 'Ver más' : undefined, ctaUrl, eyebrow, preheader });
 
-    await emailService.send({ to: user.email, subject: title, html });
+    await emailService.send({ to: user.email, subject: title, html, fromName });
   }
 
   /**
@@ -130,10 +162,11 @@ class NotificationsService {
    * Siempre acotado a miembros ACTIVOS de ese club — incluye al remitente si él mismo
    * queda dentro de los criterios elegidos (ej. está en el rol seleccionado).
    */
-  async broadcastToClub(clubId, { type = 'info', title, message, link, targetAll, roleIds, userIds }) {
+  async broadcastToClub(clubId, { type, title, message, link, targetAll, roleIds, userIds }) {
     const userIdsToNotify = await this._resolveBroadcastRecipients(clubId, { targetAll, roleIds, userIds });
+    // `type` null/'' (no solo ausente) también cae a 'info': la columna es NOT NULL.
     await Promise.all(
-      userIdsToNotify.map((id) => this.notifyUser({ userId: id, clubId, type, title, message, link }))
+      userIdsToNotify.map((id) => this.notifyUser({ userId: id, clubId, type: type || 'info', title, message, link: link || null }))
     );
     return userIdsToNotify.length;
   }

@@ -7,6 +7,7 @@ const membersRepository = require('../repositories/members.repository');
 const ApiResponse = require('../helpers/ApiResponse');
 const membersService = require('../services/members.service');
 const birthdaysService = require('../services/birthdays.service');
+const memberApplicationsService = require('../services/memberApplications.service');
 const paymentsService = require('../services/payments.service');
 const permissionService = require('../services/permission.service');
 const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
@@ -31,14 +32,18 @@ const exportMembers = asyncHandler(async (req, res) => {
 });
 
 const importTemplate = asyncHandler(async (req, res) => {
-  const sheets = await memberSpreadsheetService.templateSheets(req.club.id, req.authContext);
+  // `formIds` (opcional, '1,2'): planilla para esas fichas (sus campos y obligatorios).
+  const formIds = String(req.query.formIds || '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  const sheets = await memberSpreadsheetService.templateSheets(req.club.id, req.authContext, formIds);
   return sendWorkbook(res, 'planilla-miembros.xlsx', sheets);
 });
 
 const importMembers = asyncHandler(async (req, res) => {
   if (!req.file) throw AppError.badRequest('Debes adjuntar la planilla (.xlsx).');
   const dryRun = String(req.body.dryRun ?? 'true') !== 'false';
-  const data = await memberSpreadsheetService.importFile(req.club.id, req.file.buffer, { dryRun }, req.user.id, req.authContext);
+  // `formIds` ('1,2'): fichas que responden las personas de la planilla.
+  const formIds = String(req.body.formIds || '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  const data = await memberSpreadsheetService.importFile(req.club.id, req.file.buffer, { dryRun, formIds }, req.user.id, req.authContext);
   return ApiResponse.ok(res, data, dryRun ? 'Planilla revisada.' : `Se importaron ${data.results.filter((r) => r.ok).length} miembros.`);
 });
 
@@ -88,6 +93,16 @@ const updateBirthdaySettings = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, data, 'Ajustes de cumpleaños actualizados correctamente.');
 });
 
+const birthdayAssignments = asyncHandler(async (req, res) => {
+  const data = await birthdaysService.listAssignments(req.club.id);
+  return ApiResponse.ok(res, data, 'Notificaciones de cumpleaños obtenidas correctamente.');
+});
+
+const updateBirthdayAssignment = asyncHandler(async (req, res) => {
+  const data = await birthdaysService.updateForUser(req.club.id, Number(req.params.userId), req.body, req.user.id);
+  return ApiResponse.ok(res, data, 'Notificación de cumpleaños actualizada correctamente.');
+});
+
 const sendBirthdaysToMe = asyncHandler(async (req, res) => {
   const data = await birthdaysService.sendMeNow(req.user.id, req.club.id, req.body?.days);
   return ApiResponse.ok(res, data, 'Te enviamos el correo de cumpleaños.');
@@ -127,9 +142,10 @@ const create = asyncHandler(async (req, res) => {
   return ApiResponse.created(res, member, 'Miembro creado correctamente.');
 });
 
+/** La ficha que exige el código de invitación queda en revisión (ver memberApplications.service.js#submitForAccount). */
 const createSelf = asyncHandler(async (req, res) => {
-  const member = await membersService.createSelf(req.club.id, req.user.id, req.body, req.files);
-  return ApiResponse.created(res, member, 'Ficha completada correctamente.');
+  const data = await memberApplicationsService.submitForAccount(req.club.id, req.user.id, req.body, req.files);
+  return ApiResponse.created(res, data, data.status === 'pending' ? 'Ficha enviada: el club la revisará.' : 'Ficha completada correctamente.');
 });
 
 const update = asyncHandler(async (req, res) => {
@@ -193,6 +209,8 @@ module.exports = {
   birthdaySettings,
   updateBirthdaySettings,
   sendBirthdaysToMe,
+  birthdayAssignments,
+  updateBirthdayAssignment,
   getBirthdayTemplate,
   saveBirthdayTemplate,
   uploadBirthdayTemplateImage,

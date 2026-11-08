@@ -34,7 +34,7 @@ const pendingCount = asyncHandler(async (req, res) => {
 
 const approve = asyncHandler(async (req, res) => {
   const data = await service.approve(req.club.id, Number(req.params.id), req.body, req.user.id);
-  return ApiResponse.ok(res, data, 'Solicitud aceptada: se creó la ficha del miembro.');
+  return ApiResponse.ok(res, data, data.merged ? 'Solicitud aceptada: las respuestas se sumaron a la ficha del miembro existente.' : 'Solicitud aceptada: se creó la ficha del miembro.');
 });
 
 const reject = asyncHandler(async (req, res) => {

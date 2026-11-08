@@ -15,6 +15,8 @@ const { FUNCTIONS } = require('../config/constants');
 
 /** Rango máximo que se puede pedir de una vez (la vista anual pide un año completo). */
 const MAX_RANGE_DAYS = 400;
+/** Avisos por evento (p. ej. 1 semana, 1 día y 1 hora antes). */
+const MAX_REMINDERS = 6;
 const MONTHS = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -84,7 +86,7 @@ class CalendarService {
 
   // ------------------------------------------------------------------ eventos
 
-  _eventDto(row, participants, userId) {
+  _eventDto(row, participants, userId, reminders = []) {
     return {
       id: row.id,
       title: row.title,
@@ -97,7 +99,9 @@ class CalendarService {
       endDate: dateOnly(row.end_date),
       startTime: hhmm(row.start_time),
       endTime: hhmm(row.end_time),
-      reminderMinutes: row.reminder_minutes,
+      // Avisos del evento (minutos antes del inicio), del más anticipado al último.
+      reminders: reminders.map((r) => r.minutes_before),
+      reminderMinutes: reminders[0]?.minutes_before ?? null,
       isOwner: row.created_by === userId,
       owner: { id: row.created_by, username: row.creator_username ?? null, avatarUrl: toAbsoluteMediaUrl(row.creator_avatar_url) },
       participants: participants.map((p) => ({ id: p.id, username: p.username, avatarUrl: toAbsoluteMediaUrl(p.avatar_url) })),
@@ -106,12 +110,14 @@ class CalendarService {
 
   async _events(clubId, userId, from, to) {
     const rows = await calendarEventsRepository.findVisibleInRange(clubId, userId, from, to);
-    const participants = await calendarEventsRepository.findParticipants(rows.map((r) => r.id));
+    const ids = rows.map((r) => r.id);
+    const [participants, reminders] = await Promise.all([calendarEventsRepository.findParticipants(ids), calendarEventsRepository.findReminders(ids)]);
     return rows.map((r) =>
       this._eventDto(
         r,
         participants.filter((p) => p.event_id === r.id),
-        userId
+        userId,
+        reminders.filter((x) => x.event_id === r.id)
       )
     );
   }
@@ -121,8 +127,8 @@ class CalendarService {
     if (!row || row.club_id !== clubId) throw AppError.notFound('Evento no encontrado.');
     if (row.created_by !== userId && !(await calendarEventsRepository.isParticipant(eventId, userId))) throw AppError.notFound('Evento no encontrado.');
     const creator = await usersRepository.findById(row.created_by);
-    const participants = await calendarEventsRepository.findParticipants([row.id]);
-    return this._eventDto({ ...row, creator_username: creator?.username, creator_avatar_url: creator?.avatar_url }, participants, userId);
+    const [participants, reminders] = await Promise.all([calendarEventsRepository.findParticipants([row.id]), calendarEventsRepository.findReminders([row.id])]);
+    return this._eventDto({ ...row, creator_username: creator?.username, creator_avatar_url: creator?.avatar_url }, participants, userId, reminders);
   }
 
   /** Solo usuarios ACTIVOS del club (nunca quien crea, que ya lo ve). */
@@ -142,10 +148,22 @@ class CalendarService {
     let endTime = allDay ? null : data.endTime || null;
     if (!allDay && !startTime) throw AppError.badRequest('Indica la hora de inicio, o marca el evento como de todo el día.');
     if (!allDay && endTime && startDate === endDate && endTime <= startTime) throw AppError.badRequest('La hora de término debe ser posterior a la de inicio.');
-    const reminderMinutes = data.reminderMinutes === null || data.reminderMinutes === undefined || data.reminderMinutes === '' ? null : Number(data.reminderMinutes);
-    // El instante del aviso lo calcula el cliente (conoce la zona horaria de quien lo eligió).
-    const remindAt = reminderMinutes !== null && data.remindAt ? new Date(data.remindAt) : null;
-    if (remindAt && Number.isNaN(remindAt.getTime())) throw AppError.badRequest('Recordatorio inválido.');
+    // Avisos: `reminders` = [{ minutes, remindAt }] (o el formato viejo, uno solo con
+    // reminderMinutes/remindAt). El instante de cada uno lo calcula el cliente (conoce la zona
+    // horaria de quien lo eligió). Sin repetidos.
+    const list = Array.isArray(data.reminders)
+      ? data.reminders
+      : data.reminderMinutes !== null && data.reminderMinutes !== undefined && data.reminderMinutes !== '' && data.remindAt
+        ? [{ minutes: data.reminderMinutes, remindAt: data.remindAt }]
+        : [];
+    const reminders = new Map();
+    for (const r of list) {
+      const minutes = Number(r?.minutes);
+      const remindAt = new Date(r?.remindAt);
+      if (!Number.isInteger(minutes) || minutes < 0 || Number.isNaN(remindAt.getTime())) throw AppError.badRequest('Recordatorio inválido.');
+      reminders.set(minutes, { minutes, remindAt });
+    }
+    if (reminders.size > MAX_REMINDERS) throw AppError.badRequest(`Puedes poner hasta ${MAX_REMINDERS} avisos por evento.`);
     if (!allDay && endTime === '') endTime = null;
     return {
       title: String(data.title).trim(),
@@ -156,8 +174,7 @@ class CalendarService {
       endDate,
       startTime,
       endTime,
-      reminderMinutes: remindAt ? reminderMinutes : null,
-      remindAt,
+      reminders: [...reminders.values()].sort((a, b) => b.minutes - a.minutes),
     };
   }
 
@@ -203,7 +220,10 @@ class CalendarService {
     const participantIds = await this._validParticipantIds(clubId, userId, data.participantIds);
     let added = [];
     const id = await withTransaction(async (conn) => {
-      const eventId = await calendarEventsRepository.create({ clubId, createdBy: userId, ...fields }, conn);
+      const { reminders, ...eventFields } = fields;
+      // reminder_minutes/remind_at quedaron de cuando había un solo aviso: ahora van en calendar_event_reminders.
+      const eventId = await calendarEventsRepository.create({ clubId, createdBy: userId, ...eventFields, reminderMinutes: null, remindAt: null }, conn);
+      await calendarEventsRepository.setReminders(eventId, reminders, conn);
       added = await calendarEventsRepository.setParticipants(eventId, participantIds, conn);
       return eventId;
     });
@@ -220,12 +240,10 @@ class CalendarService {
   }
 
   async update(clubId, userId, eventId, data) {
-    const row = await this._ownEvent(clubId, userId, eventId);
+    await this._ownEvent(clubId, userId, eventId);
     const fields = this._normalize(data);
     fields.groupId = await this._validGroupId(clubId, userId, data.groupId);
     const participantIds = await this._validParticipantIds(clubId, userId, data.participantIds);
-    const remindBefore = row.remind_at ? new Date(row.remind_at).getTime() : null;
-    const remindChanged = remindBefore !== (fields.remindAt ? fields.remindAt.getTime() : null);
     let added = [];
     await withTransaction(async (conn) => {
       await calendarEventsRepository.updateById(
@@ -240,13 +258,13 @@ class CalendarService {
           end_date: fields.endDate,
           start_time: fields.startTime,
           end_time: fields.endTime,
-          reminder_minutes: fields.reminderMinutes,
-          remind_at: fields.remindAt,
-          // Si cambió cuándo avisar, el aviso vuelve a estar pendiente.
-          ...(remindChanged ? { reminder_sent_at: null } : {}),
+          reminder_minutes: null,
+          remind_at: null,
         },
         conn
       );
+      // Si cambió cuándo avisar, ese aviso vuelve a estar pendiente (ver setReminders).
+      await calendarEventsRepository.setReminders(eventId, fields.reminders, conn);
       added = await calendarEventsRepository.setParticipants(eventId, participantIds, conn);
     });
     this._notifyShared(clubId, userId, eventId, fields, added);
@@ -305,7 +323,7 @@ class CalendarService {
     let sent = 0;
     for (const row of due) {
       // eslint-disable-next-line no-await-in-loop
-      if (!(await calendarEventsRepository.claimReminder(row.id))) continue;
+      if (!(await calendarEventsRepository.claimReminder(row.reminder_id))) continue;
       const fields = {
         title: row.title,
         allDay: !!row.all_day,

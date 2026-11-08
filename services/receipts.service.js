@@ -5,11 +5,7 @@ const env = require('../config/env');
 const paymentsRepository = require('../repositories/payments.repository');
 const clubsRepository = require('../repositories/clubs.repository');
 const membersRepository = require('../repositories/members.repository');
-const emailService = require('./email.service');
-const logger = require('../helpers/logger');
 const AppError = require('../helpers/AppError');
-const { renderClubEmail } = require('../helpers/emailTemplate');
-const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 
 const UPLOAD_ROOT = path.join(__dirname, '..', env.upload.dir);
 const MONTHS = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
@@ -117,25 +113,6 @@ class ReceiptsService {
     doc.font('Helvetica').fontSize(7.5).fillColor('#9CA3AF').text(`Emitido el ${day(new Date())} · ${club.name}`, 36, doc.page.height - 50, { width, align: 'center' });
     doc.end();
     return { buffer: await done, filename: `recibo-${number.replace(/, /g, '-')}.pdf`, club, member, total };
-  }
-
-  /** Envía el recibo al correo del miembro (campo con uso "correo"), si tiene. Mejor esfuerzo. */
-  emailToMember(clubId, paymentIds) {
-    (async () => {
-      const { buffer, filename, club, member, total } = await this.buildPdf(clubId, paymentIds);
-      const to = String(member?.email || '').trim();
-      if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return;
-      await emailService.send({
-        to,
-        subject: `Recibo de tu pago en ${club.name}`,
-        html: renderClubEmail({
-          club: { name: club.name, primaryColor: club.primary_color, logoUrl: toAbsoluteMediaUrl(club.logo_url) },
-          title: 'Recibimos tu pago',
-          bodyHtml: `<p>Hola${member.first_name ? ` ${String(member.first_name).replace(/[<>&]/g, '')}` : ''},</p><p>Registramos tu pago por <strong>${clp(total)}</strong>. Te adjuntamos el recibo.</p>`,
-        }),
-        attachments: [{ filename, content: buffer }],
-      });
-    })().catch((error) => logger.error(`[receipts] correo de recibo: ${error.message}`));
   }
 }
 

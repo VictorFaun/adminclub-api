@@ -71,8 +71,9 @@ class PaymentProofsRepository extends BaseRepository {
   /** Todas las filas de un lote (un envío = un archivo, uno o varios períodos). */
   async findByBatch(batchUuid, conn = pool) {
     const [rows] = await conn.query(
-      `SELECT pp.*, ci.period_label FROM payment_proofs pp
+      `SELECT pp.*, ci.period_label, c.name AS charge_name FROM payment_proofs pp
        INNER JOIN charge_instances ci ON ci.id = pp.charge_instance_id
+       INNER JOIN charges c ON c.id = ci.charge_id
        WHERE pp.batch_uuid = ? ORDER BY ci.due_date ASC, pp.id ASC`,
       [batchUuid]
     );

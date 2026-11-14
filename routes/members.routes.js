@@ -63,7 +63,8 @@ router.use('/forms', require('./memberForms.routes'));
 
 // Columnas que muestra el listado (tarjetas y tabla): las elige quien configura la ficha.
 router.get('/list-settings', requireFunction(FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED, FUNCTIONS.VIEW_MEMBER_FIELDS), controller.listSettings);
-router.put('/list-settings', requireFunction(FUNCTIONS.EDIT_MEMBER_FIELDS), sanitizeBody, [body('columns').isArray({ max: 12 }), body('columns.*').isString(), body('fullName').optional().isBoolean()], handleValidation, controller.updateListSettings);
+// Cada usuario elige sus propias columnas (user_settings): basta con poder ver el listado.
+router.put('/list-settings', requireFunction(FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED, FUNCTIONS.VIEW_MEMBER_FIELDS), sanitizeBody, [body('columns').isArray({ max: 12 }), body('columns.*').isString(), body('fullName').optional().isBoolean()], handleValidation, controller.updateListSettings);
 
 // Excel: exportar la lista (con los mismos filtros del listado) e importar miembros desde una planilla.
 const xlsxUpload = multer({

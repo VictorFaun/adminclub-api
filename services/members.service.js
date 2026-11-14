@@ -10,6 +10,7 @@ const trainingAttendancesRepository = require('../repositories/trainingAttendanc
 const { COVERAGE_REASONS, LEGACY_INACTIVE_REASON, chargePeriodReason, proratedAmount, dateReason, toDateOnly } = require('../helpers/membership');
 const clubPolicyService = require('./clubPolicy.service');
 const settingsRepository = require('../repositories/settings.repository');
+const userSettingsRepository = require('../repositories/userSettings.repository');
 const { canSeeSensitive, hiddenFieldsOf } = require('../helpers/sensitiveFields');
 const chargesRepository = require('../repositories/charges.repository');
 const { regeneratePeriods } = require('../helpers/regeneratePeriods');
@@ -442,13 +443,18 @@ class MembersService {
   }
 
   // ---------------------------------------------------------------- columnas del listado
-  /** Campos que muestra el listado de miembros (tarjetas y tabla), elegidos por el club. */
-  async getListSettings(clubId) {
+  /**
+   * Campos que muestra el listado de miembros (tarjetas y tabla) y si va el nombre completo: lo
+   * elige cada usuario para sí (user_settings, por club). Si todavía no eligió, lo que había
+   * configurado el club (antes era un ajuste del club) y, si no, lo de siempre.
+   */
+  async getListSettings(clubId, userId) {
     const catalog = await memberFieldsRepository.findByClub(clubId);
-    const settings = await settingsRepository.findAllByClub(clubId);
+    const [club, mine] = await Promise.all([settingsRepository.findAllByClub(clubId), userId ? userSettingsRepository.findAllForUser(userId, clubId) : {}]);
+    const pick = (key) => (mine[key] !== undefined && mine[key] !== null ? mine[key] : club[key]);
     let columns = null;
     try {
-      columns = JSON.parse(settings[LIST_COLUMNS_KEY] || 'null');
+      columns = JSON.parse(pick(LIST_COLUMNS_KEY) || 'null');
     } catch {
       columns = null;
     }
@@ -457,17 +463,17 @@ class MembersService {
       // Por defecto: lo de siempre (identificador, correo, teléfono, nacimiento).
       columns = ['identifier', 'email', 'phone', 'birth_date'].map((role) => catalog.find((f) => f.role === role)?.code).filter(Boolean);
     }
-    return { columns: columns.filter(valid), fullName: settings[LIST_FULL_NAME_KEY] === '1' };
+    return { columns: columns.filter(valid), fullName: pick(LIST_FULL_NAME_KEY) === '1' };
   }
 
+  /** Guarda las columnas (y el nombre completo) del usuario, solo para él en este club. */
   async updateListSettings(clubId, { columns, fullName }, actorId) {
     const catalog = await memberFieldsRepository.findByClub(clubId);
     const clean = [...new Set((columns || []).map(String))].filter((code) => catalog.some((f) => f.code === code && !LAYOUT_TYPES.includes(f.field_type) && f.field_type !== 'file')).slice(0, 12);
     const values = { [LIST_COLUMNS_KEY]: JSON.stringify(clean) };
     if (fullName !== undefined) values[LIST_FULL_NAME_KEY] = fullName ? '1' : '0';
-    await settingsRepository.upsertMany(clubId, values);
-    await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_LIST_COLUMNS_UPDATED', entityType: 'club', entityId: clubId, changes: { columns: clean, ...(fullName !== undefined ? { fullName: !!fullName } : {}) } });
-    return this.getListSettings(clubId);
+    await userSettingsRepository.upsertMany(actorId, clubId, values);
+    return this.getListSettings(clubId, actorId);
   }
 
   async listForClub(clubId, query, authContext, actorId) {

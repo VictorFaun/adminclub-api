@@ -78,7 +78,7 @@ const importMembers = asyncHandler(async (req, res) => {
 });
 
 const listSettings = asyncHandler(async (req, res) => {
-  const data = await membersService.getListSettings(req.club.id);
+  const data = await membersService.getListSettings(req.club.id, req.user.id);
   return ApiResponse.ok(res, data, 'Columnas del listado obtenidas correctamente.');
 });
 

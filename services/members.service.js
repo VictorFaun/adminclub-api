@@ -31,6 +31,8 @@ const SORTABLE = ['created_at', 'first_name', 'last_name', 'status'];
 
 /** club_settings: códigos de los campos que muestra el listado de miembros. */
 const LIST_COLUMNS_KEY = 'member_list_columns';
+// Listado: nombre completo ('1') o solo primer nombre + primer apellido (por defecto).
+const LIST_FULL_NAME_KEY = 'member_list_full_name';
 
 class MembersService {
   /** Nombre a mostrar: los campos con uso Nombre/Apellido (ver helpers/memberFieldTypes.js#ROLES);
@@ -455,14 +457,16 @@ class MembersService {
       // Por defecto: lo de siempre (identificador, correo, teléfono, nacimiento).
       columns = ['identifier', 'email', 'phone', 'birth_date'].map((role) => catalog.find((f) => f.role === role)?.code).filter(Boolean);
     }
-    return { columns: columns.filter(valid) };
+    return { columns: columns.filter(valid), fullName: settings[LIST_FULL_NAME_KEY] === '1' };
   }
 
-  async updateListSettings(clubId, { columns }, actorId) {
+  async updateListSettings(clubId, { columns, fullName }, actorId) {
     const catalog = await memberFieldsRepository.findByClub(clubId);
     const clean = [...new Set((columns || []).map(String))].filter((code) => catalog.some((f) => f.code === code && !LAYOUT_TYPES.includes(f.field_type) && f.field_type !== 'file')).slice(0, 12);
-    await settingsRepository.upsertMany(clubId, { [LIST_COLUMNS_KEY]: JSON.stringify(clean) });
-    await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_LIST_COLUMNS_UPDATED', entityType: 'club', entityId: clubId, changes: { columns: clean } });
+    const values = { [LIST_COLUMNS_KEY]: JSON.stringify(clean) };
+    if (fullName !== undefined) values[LIST_FULL_NAME_KEY] = fullName ? '1' : '0';
+    await settingsRepository.upsertMany(clubId, values);
+    await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_LIST_COLUMNS_UPDATED', entityType: 'club', entityId: clubId, changes: { columns: clean, ...(fullName !== undefined ? { fullName: !!fullName } : {}) } });
     return this.getListSettings(clubId);
   }
 

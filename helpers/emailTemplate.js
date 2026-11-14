@@ -1,6 +1,6 @@
 const { getContrastColor, tintColor, shadeColor } = require('./emailBrand');
 
-const PLATFORM_NAME = 'Admin Club';
+const PLATFORM_NAME = 'Mi Club';
 const PLATFORM_COLOR = '#4F46E5'; // mismo default que clubs.service.js#create usa para clubes nuevos
 const FONT_STACK = "-apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
 
@@ -197,7 +197,7 @@ function renderNote(text, color = PLATFORM_COLOR, label = null) {
 </table>`;
 }
 
-/** Branding genérico de Admin Club — para correos a nivel de USUARIO (verificar correo,
+/** Branding genérico de Mi Club — para correos a nivel de USUARIO (verificar correo,
  * recuperar contraseña, bienvenida), ya que un usuario puede pertenecer a varios clubes y no hay
  * un club único al que atribuirle el envío. */
 function renderPlatformEmail({ title, bodyHtml, ctaText, ctaUrl, eyebrow, preheader }) {
@@ -220,7 +220,9 @@ function renderPlatformEmail({ title, bodyHtml, ctaText, ctaUrl, eyebrow, prehea
  * (`logoUrl` ya absoluto, ver helpers/mediaUrl.js). */
 // Sin "Si no esperabas este correo…" por defecto: los correos de un club los espera quien es parte
 // de él (avisos, pagos, inscripciones). Los de la plataforma (cuenta, contraseña) sí lo llevan.
-function renderClubEmail({ club, title, bodyHtml, ctaText, ctaUrl, eyebrow, preheader, ignoreNote = false }) {
+/** Sin etiqueta (eyebrow) sobre el título: en la notificación del celular, la app de correo muestra
+ * el asunto, la vista previa y el comienzo del cuerpo, y la etiqueta solo repetía el asunto. */
+function renderClubEmail({ club, title, bodyHtml, ctaText, ctaUrl, preheader, ignoreNote = false }) {
   return renderLayout({
     brandName: club.name,
     brandColor: club.primaryColor || PLATFORM_COLOR,
@@ -229,7 +231,6 @@ function renderClubEmail({ club, title, bodyHtml, ctaText, ctaUrl, eyebrow, preh
     bodyHtml,
     ctaText,
     ctaUrl,
-    eyebrow,
     preheader,
     viaPlatform: true,
     ignoreNote,

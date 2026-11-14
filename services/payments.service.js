@@ -1347,6 +1347,9 @@ class PaymentsService {
     let incomeTotal = null;
     let overdueMembersCount = null;
     let pendingFromResponsibles = null;
+    // Detalle por responsable (para el widget "En manos de responsables", que puede mostrar uno).
+    // Solo con acceso completo a pagos: con acceso acotado el total ya es parcial.
+    let pendingByResponsible = null;
     let incomeByMonth = null;
     let accountBalances = null;
 
@@ -1378,6 +1381,7 @@ class PaymentsService {
       // Saldo por cuenta de Tesorería: solo con acceso COMPLETO a pagos y a gastos — es un saldo
       // real (entradas − gastos ± transferencias), y a medias no cuadraría con el total.
       if (access.full && hasExpenseAccess) accountBalances = await treasuryAccountsService.balances(clubId);
+      if (access.full) pendingByResponsible = await this._pendingByResponsible(clubId);
     }
 
     // El gráfico se arma si el actor ve AL MENOS una de las dos series — el lado sin acceso
@@ -1387,7 +1391,20 @@ class PaymentsService {
         ? this._buildMonthlySeries(incomeByMonth ?? {}, expensesByMonth, DASHBOARD_CHART_MONTHS)
         : null;
 
-    return { activeChargesCount, activeExpensesCount, treasuryTotal, incomeTotal, expensesTotal, overdueMembersCount, pendingFromResponsibles, monthlyTreasury, accountBalances };
+    return { activeChargesCount, activeExpensesCount, treasuryTotal, incomeTotal, expensesTotal, overdueMembersCount, pendingFromResponsibles, pendingByResponsible, monthlyTreasury, accountBalances };
+  }
+
+  /** `[{memberId, memberName, amount}]`: cuánto tiene cada responsable sin entregar (cobrado −
+   * entregado). Incluye a quienes hoy tienen 0 si alguna vez cobraron (para poder elegirlos). */
+  async _pendingByResponsible(clubId) {
+    const [held, settled] = await Promise.all([paymentsRepository.sumHeldByEachResponsible(clubId), chargeSettlementsRepository.sumByEachResponsible(clubId)]);
+    const ids = [...held.keys()];
+    if (!ids.length) return [];
+    const rows = await membersRepository.findNamesByIds(ids, clubId, undefined, { includeDeleted: true });
+    const names = new Map(rows.map((r) => [r.id, [r.first_name, r.last_name].filter(Boolean).join(' ')]));
+    return ids
+      .map((id) => ({ memberId: id, memberName: names.get(id) || `Miembro #${id}`, amount: Math.max(0, (held.get(id) ?? 0) - (settled.get(id) ?? 0)) }))
+      .sort((a, b) => b.amount - a.amount || a.memberName.localeCompare(b.memberName, 'es'));
   }
 
   /** Suma dos mapas `{ 'YYYY-MM': total }` en uno solo — usado para combinar pagos directos +

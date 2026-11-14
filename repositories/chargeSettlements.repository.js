@@ -61,6 +61,19 @@ class ChargeSettlementsRepository extends BaseRepository {
    * deben tratar un cobro eliminado de la misma forma (fuera de los totales), si no la resta
    * `heldByResponsibles - settledAllTime` queda inconsistente (dinero de un cobro ya eliminado
    * restando contra un total que ya no lo incluye). */
+  /** Lo que cada responsable ya entregó (cualquier destino), todo el historial: `Map(memberId → total)`. */
+  async sumByEachResponsible(clubId, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT cs.responsible_member_id AS member_id, COALESCE(SUM(cs.amount), 0) AS total
+       FROM charge_settlements cs
+       INNER JOIN charges c ON c.id = cs.charge_id
+       WHERE c.club_id = ? AND c.deleted_at IS NULL
+       GROUP BY cs.responsible_member_id`,
+      [clubId]
+    );
+    return new Map(rows.map((r) => [r.member_id, Number(r.total)]));
+  }
+
   async sumAllTime(clubId, memberIds, conn = pool) {
     const params = [clubId];
     let memberFilter = '';

@@ -88,7 +88,7 @@ const env = {
   email: {
     resendApiKey: process.env.RESEND_API_KEY,
     fromAddress: process.env.EMAIL_FROM || 'no-reply@adminclub.dev',
-    fromName: process.env.EMAIL_FROM_NAME || 'Admin Club',
+    fromName: process.env.EMAIL_FROM_NAME || 'Mi Club',
   },
 
   // Notificaciones push (Web Push, ver push.service.js). Sin las dos claves el push queda

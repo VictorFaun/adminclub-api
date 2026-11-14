@@ -8,19 +8,22 @@ const { withTransaction } = require('../config/database');
 
 /**
  * Fichas del club (sql/072): un club puede pedir información distinta según el tipo de miembro
- * ("Ficha de jugador", "Ficha de apoderado"…). Los campos son el catálogo del club
- * (memberFields.service.js) y cada ficha es una selección ordenada de ellos: un campo compartido
- * (ej. Nombre) guarda un solo valor por miembro aunque esté en varias fichas. Cada miembro tiene
+ * ("Ficha de jugador", "Ficha de apoderado"…). Cada ficha tiene sus propios campos (sql/079: un
+ * campo pertenece a una sola ficha, member_form_fields.field_id es único); dos fichas pueden tener
+ * un campo con el mismo nombre y son independientes. Los usos especiales (nombre, identificador…)
+ * siguen siendo únicos en el club, así que cada uno está en una sola ficha. Cada miembro tiene
  * asignadas las fichas que debe responder; las marcadas "por defecto" se asignan solas al crear
  * un miembro sin indicar otras.
  */
 class MemberFormsService {
-  toDto(form, fieldIds = []) {
+  toDto(form, fieldIds = [], identifierFieldId = null) {
     return {
       id: form.id,
       name: form.name,
       description: form.description ?? null,
       isDefault: !!form.is_default,
+      // Tiene el campo Identificador: va siempre que se pidan fichas (ver withIdentifierForm).
+      hasIdentifier: identifierFieldId !== null && fieldIds.includes(identifierFieldId),
       sortOrder: form.sort_order,
       fieldIds,
       memberCount: form.member_count !== undefined ? Number(form.member_count) : undefined,
@@ -28,8 +31,28 @@ class MemberFormsService {
   }
 
   async list(clubId) {
-    const [forms, fieldIds] = await Promise.all([memberFormsRepository.findByClub(clubId), memberFormsRepository.fieldIdsByForm(clubId)]);
-    return forms.map((f) => this.toDto(f, fieldIds[f.id] || []));
+    const [forms, fieldIds, identifier] = await Promise.all([memberFormsRepository.findByClub(clubId), memberFormsRepository.fieldIdsByForm(clubId), memberFieldsRepository.findByRole(clubId, 'identifier')]);
+    return forms.map((f) => this.toDto(f, fieldIds[f.id] || [], identifier?.id ?? null));
+  }
+
+  /** Ficha que tiene el campo Identificador (RUT…), o null si el club no tiene identificador. */
+  async identifierFormId(clubId, conn) {
+    const field = await memberFieldsRepository.findByRole(clubId, 'identifier', conn);
+    if (!field) return null;
+    const byForm = await memberFormsRepository.fieldIdsByForm(clubId, conn);
+    const entry = Object.entries(byForm).find(([, ids]) => ids.includes(field.id));
+    return entry ? Number(entry[0]) : null;
+  }
+
+  /**
+   * La ficha con el Identificador va siempre que se pidan fichas: es con lo que se reconoce a cada
+   * persona (no duplicarla, sumar sus respuestas, la página pública). Si se eligieron fichas y
+   * ninguna lo tiene, se agrega (primero). Sin fichas (`[]`/null) no se toca.
+   */
+  async withIdentifierForm(clubId, formIds, conn) {
+    if (!Array.isArray(formIds) || !formIds.length) return formIds;
+    const id = await this.identifierFormId(clubId, conn);
+    return id && !formIds.includes(id) ? [id, ...formIds] : formIds;
   }
 
   async _get(clubId, formId) {
@@ -51,7 +74,22 @@ class MemberFormsService {
     const ids = [...new Set((Array.isArray(formIds) ? formIds : []).map(Number).filter(Boolean))];
     const found = await memberFormsRepository.findByIds(clubId, ids);
     if (found.length !== ids.length) throw AppError.badRequest('Una o más fichas no pertenecen a este club.');
-    return found.map((f) => f.id);
+    return this.withIdentifierForm(clubId, found.map((f) => f.id));
+  }
+
+  /** Ficha a la que iría un campo nuevo (la indicada o la primera por defecto). */
+  async targetFormId(clubId, formId, conn) {
+    if (formId) return Number(formId);
+    const ids = await memberFormsRepository.findDefaultIds(clubId, conn);
+    return ids[0] ?? (await memberFormsRepository.findByClub(clubId, conn))[0]?.id ?? null;
+  }
+
+  /** Ficha de cada campo (id de campo → ficha). */
+  async formOfFields(clubId, conn) {
+    const [forms, byForm] = await Promise.all([memberFormsRepository.findByClub(clubId, conn), memberFormsRepository.fieldIdsByForm(clubId, conn)]);
+    const out = new Map();
+    for (const form of forms) for (const id of byForm[form.id] || []) out.set(id, form);
+    return out;
   }
 
   async defaultIds(clubId, conn) {
@@ -93,8 +131,10 @@ class MemberFormsService {
 
   async create(clubId, { name, description, isDefault, fieldIds }, actorId) {
     const clean = await this._assertName(clubId, name);
+    // Solo campos que todavía no son de ninguna ficha (cada campo es de una sola).
     const catalog = await memberFieldsRepository.findByClub(clubId);
-    const own = new Set(catalog.map((f) => f.id));
+    const taken = new Set(Object.values(await memberFormsRepository.fieldIdsByForm(clubId)).flat());
+    const own = new Set(catalog.map((f) => f.id).filter((id) => !taken.has(id)));
     const fields = [...new Set((fieldIds || []).map(Number))].filter((id) => own.has(id));
     const id = await withTransaction(async (conn) => {
       const formId = await memberFormsRepository.createForm(
@@ -143,14 +183,21 @@ class MemberFormsService {
   }
 
   /**
-   * Campos de la ficha y su orden (`fieldIds` = lista final). Quitar un campo que no está en
-   * ninguna otra ficha se rechaza: para eso está eliminar el campo (se pierden sus valores).
+   * Orden de los campos de la ficha (`fieldIds` = lista final). Cada campo es de una sola ficha:
+   * no se puede agregar el de otra, y quitar uno es eliminarlo (se pierden sus valores).
    */
   async setFields(clubId, formId, fieldIds, actorId) {
     const form = await this._get(clubId, formId);
-    const own = new Set((await memberFieldsRepository.findByClub(clubId)).map((f) => f.id));
+    const catalog = await memberFieldsRepository.findByClub(clubId);
+    const own = new Set(catalog.map((f) => f.id));
     const next = [...new Set((fieldIds || []).map(Number))].filter((id) => own.has(id));
-    const current = (await memberFormsRepository.fieldIdsByForm(clubId))[form.id] || [];
+    const byForm = await memberFormsRepository.fieldIdsByForm(clubId);
+    const current = byForm[form.id] || [];
+    const foreign = next.filter((id) => !current.includes(id) && Object.entries(byForm).some(([fid, ids]) => Number(fid) !== form.id && ids.includes(id)));
+    if (foreign.length) {
+      const label = catalog.find((f) => f.id === foreign[0])?.label ?? 'Ese campo';
+      throw AppError.conflict(`"${label}" es de otra ficha: cada ficha tiene sus propios campos. Crea uno nuevo en esta.`);
+    }
     const removed = current.filter((id) => !next.includes(id));
     const orphans = await memberFormsRepository.fieldsOnlyIn(removed, form.id);
     if (orphans.length) {
@@ -161,14 +208,16 @@ class MemberFormsService {
     return this._dto(clubId, form.id);
   }
 
-  /** Agrega un campo (recién creado) al final de la ficha indicada o, si no se indica, de las por defecto. */
+  /** Agrega un campo (recién creado) al final de la ficha indicada o, si no se indica, de la
+   * primera por defecto (un campo es de una sola ficha). */
   async attachField(clubId, fieldId, formId, conn) {
     // Con `conn`: puede correr dentro de la transacción que creó la ficha (alta de un club).
     const form = formId ? await memberFormsRepository.findInClub(clubId, Number(formId), conn) : null;
     if (formId && !form) throw AppError.notFound('Ficha no encontrada.');
     let ids = form ? [form.id] : await memberFormsRepository.findDefaultIds(clubId, conn);
     if (!ids.length) ids = (await memberFormsRepository.findByClub(clubId, conn)).slice(0, 1).map((f) => f.id);
-    for (const id of ids) await memberFormsRepository.appendField(id, fieldId, conn);
+    if (ids.length) await memberFormsRepository.appendField(ids[0], fieldId, conn);
+    return ids[0] ?? null;
   }
 
   // ------------------------------------------------------------------ asignación
@@ -201,13 +250,25 @@ class MemberFormsService {
       }
       if (memberIds.length) ids.push(...(await membersRepository.findByIds(memberIds.map(Number), clubId)).map((m) => m.id));
     }
-    const added = await memberFormsRepository.assign(form.id, [...new Set(ids)]);
+    const targets = [...new Set(ids)];
+    const added = await memberFormsRepository.assign(form.id, targets);
+    // La ficha con el Identificador va siempre: quien no la tenía, la recibe también.
+    const identifierForm = await this.identifierFormId(clubId);
+    if (identifierForm && identifierForm !== form.id) await memberFormsRepository.assign(identifierForm, targets);
     await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_FORM_ASSIGNED', entityType: 'member_form', entityId: form.id, changes: { added } });
     return { added };
   }
 
   async unassign(clubId, formId, { memberIds = [] } = {}, actorId) {
     const form = await this._get(clubId, formId);
+    // La ficha con el Identificador no se le quita a quien responde otras (va siempre con ellas).
+    if (form.id === (await this.identifierFormId(clubId))) {
+      const byMember = await memberFormsRepository.formIdsByMembers(memberIds.map(Number));
+      const blocked = memberIds.map(Number).filter((id) => (byMember[id] || []).some((f) => f !== form.id));
+      if (blocked.length) {
+        throw AppError.conflict(`«${form.name}» tiene el identificador y va siempre con las otras fichas: ${blocked.length === 1 ? 'ese miembro responde' : `${blocked.length} de esos miembros responden`} otras. Quítales primero las otras fichas.`);
+      }
+    }
     const removed = await memberFormsRepository.unassign(form.id, memberIds.map(Number));
     await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_FORM_UNASSIGNED', entityType: 'member_form', entityId: form.id, changes: { removed } });
     return { removed };

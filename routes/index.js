@@ -17,6 +17,7 @@ router.use('/charges', require('./charges.routes'));
 router.use('/payments', require('./payments.routes'));
 router.use('/payment-proofs', require('./paymentProofs.routes'));
 router.use('/public/pay', require('./publicPayments.routes'));
+router.use('/public-page', require('./publicPage.routes'));
 router.use('/public/join', require('./publicMemberForm.routes'));
 router.use('/member-applications', require('./memberApplications.routes'));
 router.use('/treasury-settings', require('./treasurySettings.routes'));

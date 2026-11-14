@@ -13,7 +13,7 @@ const GROUP_COLORS = ['FFDBEAFE', 'FFDCFCE7', 'FFFEF3C7', 'FFFCE7F3', 'FFE0E7FF'
  */
 async function buildWorkbook(sheets) {
   const wb = new ExcelJS.Workbook();
-  wb.creator = 'Admin Club';
+  wb.creator = 'Mi Club';
   wb.created = new Date();
   for (const sheet of sheets) {
     const ws = wb.addWorksheet(String(sheet.name || 'Hoja').slice(0, 31).replace(/[\\/?*[\]:]/g, ' '));
@@ -96,6 +96,11 @@ async function readFirstSheet(buffer, { isHeaderRow = null } = {}) {
   let headerRow = 1;
   if (isHeaderRow && !isHeaderRow(rowTexts(1)) && isHeaderRow(rowTexts(2))) headerRow = 2;
   const headers = rowTexts(headerRow);
+  // Fila de grupos (fichas) sobre el encabezado: las celdas combinadas repiten el texto de la primera.
+  const groupRow = headerRow === 2 ? headers.map((_, i) => {
+    const cell = ws.getRow(1).getCell(i + 1);
+    return String(cellValue(cell.isMerged ? cell.master.value : cell.value) ?? '').trim();
+  }) : null;
   const rows = [];
   ws.eachRow({ includeEmpty: false }, (row, rowNumber) => {
     if (rowNumber <= headerRow) return;
@@ -103,7 +108,7 @@ async function readFirstSheet(buffer, { isHeaderRow = null } = {}) {
     if (values.every((v) => v === null || String(v).trim() === '')) return;
     rows.push({ rowNumber, values });
   });
-  return { headers, rows };
+  return { headers, rows, groupRow };
 }
 
 module.exports = { buildWorkbook, sendWorkbook, readFirstSheet };

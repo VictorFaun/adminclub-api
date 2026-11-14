@@ -43,7 +43,22 @@ router.post(
 router.get('/consents/:consentId/files/:fileId', requireFunction(FUNCTIONS.VIEW_MEMBER_FIELDS), [...consentId, param('fileId').isInt({ min: 1 })], handleValidation, consentsController.downloadFile);
 router.delete('/consents/:consentId/files/:fileId', requireFunction(FUNCTIONS.EDIT_MEMBER_FIELDS), [...consentId, param('fileId').isInt({ min: 1 })], handleValidation, consentsController.removeFile);
 
-router.get('/', requireFunction(FUNCTIONS.VIEW_MEMBERS), [query('status').optional().isIn(['pending', 'approved', 'rejected'])], handleValidation, controller.list);
+router.get(
+  '/',
+  requireFunction(FUNCTIONS.VIEW_MEMBERS),
+  [query('status').optional().isIn(['pending', 'approved', 'rejected']), query('archived').optional().isIn(['true', 'false', '1', '0'])],
+  handleValidation,
+  controller.list
+);
+// Archivar/desarchivar varias ya revisadas de una vez (quien las revisa).
+router.post(
+  '/archive',
+  requireFunction(FUNCTIONS.CREATE_MEMBERS),
+  sanitizeBody,
+  [body('ids').isArray({ min: 1, max: 500 }), body('ids.*').isInt({ min: 1 }), body('archived').optional().isBoolean().toBoolean()],
+  handleValidation,
+  controller.archive
+);
 router.get(
   '/:id/files/:fileId',
   requireFunction(FUNCTIONS.VIEW_MEMBERS),

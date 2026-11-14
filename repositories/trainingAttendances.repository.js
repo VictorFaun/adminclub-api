@@ -79,13 +79,14 @@ class TrainingAttendancesRepository extends BaseRepository {
     return result.affectedRows;
   }
 
-  /** Asistencias de un miembro que dependen de su historial de pertenencia (sin marcar, o marcadas
-   * "no aplica — Retirado"). Ver members.service.js#syncCoverage. */
-  async findCoverageCandidates(memberId, reasons, conn = pool) {
+  /** Todas las asistencias de un miembro, para alinearlas con su historial de pertenencia (a
+   * diferencia de los cobros, aquí no hay nada pagado que proteger: un día en que no estaba en el
+   * club queda "no aplica" aunque tuviera una marca, que ya no se podría corregir). Ver
+   * members.service.js#syncCoverage. */
+  async findCoverageCandidates(memberId, conn = pool) {
     const [rows] = await conn.query(
-      `SELECT id, session_date, status, exempt_reason FROM training_attendances
-       WHERE member_id = ? AND (status = 'pending' OR (status = 'exempt' AND exempt_reason IN (?)))`,
-      [memberId, reasons]
+      'SELECT id, session_date, status, exempt_type, exempt_reason, marked_by FROM training_attendances WHERE member_id = ?',
+      [memberId]
     );
     return rows;
   }
@@ -94,7 +95,7 @@ class TrainingAttendancesRepository extends BaseRepository {
     if (!ids.length) return;
     await conn.query(
       `UPDATE training_attendances SET status = 'exempt', exempt_type = 'not_applicable', exempt_reason = ?, marked_by = ?, marked_at = NOW()
-       WHERE id IN (?) AND status IN ('pending', 'exempt')`,
+       WHERE id IN (?)`,
       [reason, actorId || null, ids]
     );
   }

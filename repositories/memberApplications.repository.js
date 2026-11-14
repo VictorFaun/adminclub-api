@@ -9,12 +9,13 @@ class MemberApplicationsRepository extends BaseRepository {
 
   /** `userId`: ficha enviada por una cuenta (código de invitación que exige ficha); null = formulario
    * público. `invitationId`: invitación de la que viene; `formIds`: fichas que responde;
-   * `targetMemberId`: miembro existente (mismo identificador) al que se suma al aceptarla. */
-  async create({ clubId, fields, message, groupId = null, userId = null, invitationId = null, formIds = [], targetMemberId = null }, conn = pool) {
+   * `targetMemberId`: miembro existente (mismo identificador) al que se suma al aceptarla.
+   * `guardianOfId`: es la del apoderado de esa otra solicitud (sql/082), con su parentesco. */
+  async create({ clubId, fields, message, groupId = null, userId = null, invitationId = null, formIds = [], targetMemberId = null, guardianOfId = null, guardianRelation = null }, conn = pool) {
     const [result] = await conn.query(
-      `INSERT INTO member_applications (uuid, club_id, user_id, invitation_id, fields, form_ids, group_id, message, target_member_id)
-       VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [clubId, userId, invitationId, JSON.stringify(fields || {}), JSON.stringify(formIds || []), groupId, message, targetMemberId]
+      `INSERT INTO member_applications (uuid, club_id, user_id, invitation_id, fields, form_ids, group_id, message, target_member_id, guardian_of_id, guardian_relation)
+       VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [clubId, userId, invitationId, JSON.stringify(fields || {}), JSON.stringify(formIds || []), groupId, message, targetMemberId, guardianOfId, guardianRelation]
     );
     return result.insertId;
   }
@@ -30,9 +31,12 @@ class MemberApplicationsRepository extends BaseRepository {
     return rows[0] || null;
   }
 
-  async listByClub(clubId, status, conn = pool) {
+  /** `archived`: true = solo las archivadas (de cualquier estado); si no, solo las no archivadas.
+   * Las del apoderado (sql/082) no salen solas: van dentro de la suya (ver findGuardiansOf);
+   * `includeGuardians`: también ellas (para revisar identificadores repetidos). */
+  async listByClub(clubId, status, { archived = false, includeGuardians = false } = {}, conn = pool) {
     const params = [clubId];
-    let where = 'ma.club_id = ?';
+    let where = `ma.club_id = ? AND ma.archived_at IS ${archived ? 'NOT NULL' : 'NULL'}${includeGuardians ? '' : ' AND ma.guardian_of_id IS NULL'}`;
     if (status) {
       where += ' AND ma.status = ?';
       params.push(status);
@@ -52,8 +56,36 @@ class MemberApplicationsRepository extends BaseRepository {
     return rows;
   }
 
+  /** Solicitudes de los apoderados de esas solicitudes (sql/082), con los mismos datos que listByClub. */
+  async findGuardiansOf(ids, conn = pool) {
+    if (!ids.length) return [];
+    const [rows] = await conn.query(
+      `SELECT ma.*, inv.code AS invitation_code, inv.note AS invitation_note
+       FROM member_applications ma LEFT JOIN invitations inv ON inv.id = ma.invitation_id
+       WHERE ma.guardian_of_id IN (?) ORDER BY ma.id`,
+      [ids]
+    );
+    return rows;
+  }
+
+  /** Archiva/desarchiva (solo lo ya revisado de ese club), junto con la del apoderado. Devuelve
+   * cuántas de las pedidas cambiaron. */
+  async setArchived(clubId, ids, archived, actorId, conn = pool) {
+    if (!ids.length) return 0;
+    const [result] = await conn.query(
+      `UPDATE member_applications SET archived_at = ${archived ? 'NOW()' : 'NULL'}, archived_by = ?
+       WHERE club_id = ? AND id IN (?) AND status <> 'pending' AND archived_at IS ${archived ? 'NULL' : 'NOT NULL'}`,
+      [archived ? actorId : null, clubId, ids]
+    );
+    await conn.query(
+      `UPDATE member_applications SET archived_at = ${archived ? 'NOW()' : 'NULL'}, archived_by = ? WHERE club_id = ? AND guardian_of_id IN (?)`,
+      [archived ? actorId : null, clubId, ids]
+    );
+    return result.affectedRows;
+  }
+
   async countPending(clubId, conn = pool) {
-    const [rows] = await conn.query("SELECT COUNT(*) AS total FROM member_applications WHERE club_id = ? AND status = 'pending'", [clubId]);
+    const [rows] = await conn.query("SELECT COUNT(*) AS total FROM member_applications WHERE club_id = ? AND status = 'pending' AND guardian_of_id IS NULL", [clubId]);
     return rows[0].total;
   }
 

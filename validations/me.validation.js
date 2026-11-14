@@ -4,7 +4,7 @@ const memberId = [param('memberId').isInt({ min: 1 }).withMessage('Identificador
 const paymentId = [param('paymentId').isInt({ min: 1 }).withMessage('Identificador de pago inválido.')];
 const fieldId = [param('fieldId').isInt({ min: 1 }).withMessage('Identificador de campo inválido.')];
 
-const updateProfile = [...memberId, body('fields').isObject().withMessage('fields debe ser un objeto.')];
+const updateProfile = [...memberId, body('fields').isObject().withMessage('fields debe ser un objeto.'), body('newVersion').optional().isBoolean()];
 
 const inviteGuardian = [
   ...memberId,

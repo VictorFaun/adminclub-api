@@ -2,6 +2,7 @@ const membersRepository = require('../repositories/members.repository');
 const memberFieldsRepository = require('../repositories/memberFields.repository');
 const memberFormsRepository = require('../repositories/memberForms.repository');
 const memberFormsService = require('./memberForms.service');
+const memberFormVersionsService = require('./memberFormVersions.service');
 const memberGroupsRepository = require('../repositories/memberGroups.repository');
 const chargeInstancesRepository = require('../repositories/chargeInstances.repository');
 const memberMembershipsRepository = require('../repositories/memberMemberships.repository');
@@ -9,7 +10,7 @@ const trainingAttendancesRepository = require('../repositories/trainingAttendanc
 const { COVERAGE_REASONS, LEGACY_INACTIVE_REASON, chargePeriodReason, proratedAmount, dateReason, toDateOnly } = require('../helpers/membership');
 const clubPolicyService = require('./clubPolicy.service');
 const settingsRepository = require('../repositories/settings.repository');
-const { canSeeSensitive } = require('../helpers/sensitiveFields');
+const { canSeeSensitive, hiddenFieldsOf } = require('../helpers/sensitiveFields');
 const chargesRepository = require('../repositories/charges.repository');
 const { regeneratePeriods } = require('../helpers/regeneratePeriods');
 const { UPLOAD_TYPES, LAYOUT_TYPES, normalizeValue, normalizeIdentifier, isFieldVisible, sectionConditions } = require('../helpers/memberFieldTypes');
@@ -255,14 +256,18 @@ class MembersService {
     }
     await chargeInstancesRepository.unmarkRetired(toRestore, conn);
 
-    const attendances = await trainingAttendancesRepository.findCoverageCandidates(memberId, COVERAGE_REASONS, conn);
+    // Asistencias: todo día fuera de su pertenencia queda "no aplica" con el motivo, cualquiera sea
+    // su marca (incluida la falta automática de un día pasado: ej. se fija una fecha de retiro
+    // anterior a sesiones ya cerradas). Lo marcado así que ahora sí le corresponde vuelve a sin
+    // marcar (y si el día ya pasó, closePastSessions lo deja como falta automática).
+    const attendances = await trainingAttendancesRepository.findCoverageCandidates(memberId, conn);
     const attMark = byReason();
     const attRestore = [];
     for (const a of attendances) {
       const reason = dateReason(intervals, a.session_date);
-      if (a.status === 'pending' && reason) attMark.set(reason, [...(attMark.get(reason) || []), a.id]);
-      else if (a.status === 'exempt' && !reason) attRestore.push(a.id);
-      else if (a.status === 'exempt' && reason && reason !== a.exempt_reason) attMark.set(reason, [...(attMark.get(reason) || []), a.id]);
+      const coverageMark = a.status === 'exempt' && COVERAGE_REASONS.includes(a.exempt_reason);
+      if (reason && !(coverageMark && a.exempt_reason === reason)) attMark.set(reason, [...(attMark.get(reason) || []), a.id]);
+      else if (!reason && coverageMark) attRestore.push(a.id);
     }
     for (const [reason, ids] of attMark) await trainingAttendancesRepository.markRetired(ids, reason, actorId, conn);
     await trainingAttendancesRepository.unmarkRetired(attRestore, conn);
@@ -348,19 +353,35 @@ class MembersService {
 
   /** Miembro (no eliminado) del club cuyo identificador coincide con el de `fields`, o null. Así
    * una ficha enviada por alguien que ya es miembro se suma a su registro en vez de duplicarlo. */
-  async findByIdentifier(clubId, fields) {
+  /**
+   * Identificador que trae una respuesta (normalizado, en mayúsculas) o null. El campo con ese uso
+   * está en una sola ficha (sql/079): si se respondió otra, sirve el campo de esa ficha del mismo
+   * tipo y con el mismo nombre (ej. su propio "RUT"; no un "RUT del apoderado").
+   */
+  async identifierFrom(clubId, fields) {
     const field = await memberFieldsRepository.findByRole(clubId, 'identifier');
-    const raw = field && fields ? fields[field.code] : null;
+    if (!field || !fields) return { field, value: null };
+    let raw = fields[field.code];
+    if (!raw && field.field_type !== 'text') {
+      const label = String(field.label).trim().toLowerCase();
+      const sameType = (await memberFieldsRepository.findByClub(clubId)).filter((f) => f.id !== field.id && f.field_type === field.field_type && String(f.label).trim().toLowerCase() === label);
+      raw = sameType.map((f) => fields[f.code]).find((v) => v) ?? null;
+    }
     const value = raw ? normalizeIdentifier(field, raw) : null;
+    return { field, value: value ? String(value).toUpperCase() : null };
+  }
+
+  async findByIdentifier(clubId, fields) {
+    const { field, value } = await this.identifierFrom(clubId, fields);
     if (!value) return null;
-    const id = await memberFieldsRepository.findMemberIdByIdentifier(clubId, field.id, String(value).toUpperCase());
+    const id = await memberFieldsRepository.findMemberIdByIdentifier(clubId, field.id, value);
     return id ? membersRepository.findActiveById(id) : null;
   }
 
   /** Fichas del miembro: las indicadas (validadas) o, si no se indican, las por defecto del club. */
   async _resolveFormIds(clubId, formIds) {
     const resolved = await memberFormsService.resolveIds(clubId, formIds);
-    return resolved ?? memberFormsService.defaultIds(clubId);
+    return resolved ?? memberFormsService.withIdentifierForm(clubId, await memberFormsService.defaultIds(clubId));
   }
 
   /**
@@ -368,9 +389,11 @@ class MembersService {
    * alguien que ya era miembro): guarda los campos enviados (sin borrar los que no vinieron) y le
    * asigna esas fichas. Sin revisar acceso: lo decide quien llama (la revisión de la solicitud).
    */
-  async applySubmission(clubId, memberId, fields, formIds, actorId, { publicOnly = false } = {}) {
+  async applySubmission(clubId, memberId, fields, formIds, actorId, { publicOnly = false, newVersion = false, source = 'application' } = {}) {
     const values = await this._prepareFieldValues(clubId, fields, { requireAll: false, memberId, publicOnly, formIds });
     await withTransaction(async (conn) => {
+      // Es una respuesta nueva de esas fichas: la vigente queda guardada como versión anterior.
+      if (newVersion) await memberFormVersionsService.startNew(clubId, memberId, formIds, { source, actorId }, conn);
       if (Object.keys(values.set).length) await membersRepository.upsertFieldValues(memberId, values.set, conn);
       await memberFormsRepository.addMemberForms(memberId, formIds, conn);
     });
@@ -396,8 +419,8 @@ class MembersService {
    */
   async _listFilters(clubId, query, authContext) {
     const catalog = await memberFieldsRepository.findByClub(clubId);
-    const allowSensitive = canSeeSensitive(authContext);
-    const hiddenFieldIds = allowSensitive ? [] : catalog.filter((f) => parseSettings(f).sensitive).map((f) => f.id);
+    // Sensibles sin permiso y campos de fichas que no puede ver (sql/081): no se busca ni filtra por ellos.
+    const hiddenFieldIds = (await hiddenFieldsOf(clubId, authContext)).map((f) => f.id);
     let raw = {};
     try {
       raw = typeof query.fields === 'string' ? JSON.parse(query.fields) : query.fields && typeof query.fields === 'object' ? query.fields : {};
@@ -491,6 +514,7 @@ class MembersService {
     return rows.map((r) => ({
       id: r.id,
       fullName: this._fullName(r),
+      shortName: this._shortName(r),
       groupIds: r.group_ids ? r.group_ids.split(',').map(Number) : [],
     }));
   }
@@ -577,7 +601,12 @@ class MembersService {
     const formIds = newFormIds ?? (await memberFormsRepository.formIdsForMember(memberId));
     const values = data.fields !== undefined ? await this._prepareFieldValues(clubId, data.fields, { requireAll: false, memberId, allowSensitive, formIds }) : null;
 
+    // "Guardar como nueva versión": las fichas con algún campo modificado guardan su versión
+    // vigente como anterior y la respuesta editada pasa a ser la nueva principal.
+    const versionForms = data.newVersion && values ? await this._formsTouching(clubId, formIds, await this._changedFieldIds(memberId, values)) : [];
+
     await withTransaction(async (conn) => {
+      if (versionForms.length) await memberFormVersionsService.startNew(clubId, memberId, versionForms, { source: 'manual', actorId }, conn);
       if (newFormIds) await memberFormsRepository.setMemberForms(memberId, newFormIds, conn);
       if (data.status !== undefined || data.statusDate) await this.applyStatus(member, data.status ?? member.status, actorId, conn, data.statusDate || null);
       if (data.joinedOn !== undefined) await this.setJoinedOn(memberId, data.joinedOn, actorId, conn);
@@ -596,12 +625,112 @@ class MembersService {
       status: data.status !== undefined ? diffValue(member.status, data.status) : undefined,
       fields: values ? diffValue(null, `${Object.keys(values.set).length + values.clear.length} campo(s)`) : undefined,
       forms: newFormIds ? diffValue(null, `${newFormIds.length} ficha(s)`) : undefined,
+      newVersion: versionForms.length ? diffValue(null, `${versionForms.length} ficha(s)`) : undefined,
     });
     if (changes) {
       await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_UPDATED', entityType: 'member', entityId: memberId, changes });
     }
 
     return this._buildDto(updated);
+  }
+
+  /** Campos que de verdad cambian (la edición manda la ficha completa). Si no cambia ninguno, todos
+   * los enviados: registrar una respuesta igual a la anterior también es válido. */
+  async _changedFieldIds(memberId, values) {
+    const current = new Map((await membersRepository.getFieldValues(memberId)).map((v) => [v.field_id, v.value]));
+    const changed = [
+      ...Object.entries(values.set).filter(([id, value]) => current.get(Number(id)) !== value).map(([id]) => Number(id)),
+      ...values.clear.filter((id) => current.get(Number(id)) != null),
+    ];
+    return changed.length ? changed : [...Object.keys(values.set).map(Number), ...values.clear];
+  }
+
+  /** Fichas (de `formIds`) que incluyen alguno de los campos indicados. */
+  async _formsTouching(clubId, formIds, fieldIds) {
+    if (!fieldIds.length) return [];
+    const byForm = await memberFormsRepository.fieldIdsByForm(clubId);
+    const touched = new Set(fieldIds.map(Number));
+    return formIds.filter((id) => (byForm[id] || []).some((f) => touched.has(Number(f))));
+  }
+
+  // ------------------------------------------------------------------ editar fichas / campos específicos (sql/080)
+
+  /**
+   * Qué datos de la ficha puede editar el actor: `all: true` con "Editar miembros"; si no, las
+   * fichas y campos de sus roles con "Editar fichas específicas" / "Editar campos específicos".
+   * `fieldIds` = todos los campos editables (los de esas fichas + los sueltos).
+   */
+  async editScope(clubId, actorId, authContext) {
+    if (permissionService.hasFunction(authContext, FUNCTIONS.EDIT_MEMBERS)) return { all: true, formIds: [], fieldIds: [] };
+    const canForms = permissionService.hasFunction(authContext, FUNCTIONS.EDIT_MEMBER_FORMS_SCOPED);
+    const canFields = permissionService.hasFunction(authContext, FUNCTIONS.EDIT_MEMBER_FIELD_VALUES_SCOPED);
+    if (!canForms && !canFields) return { all: false, formIds: [], fieldIds: [] };
+    const scope = await membersRepository.findEditScope(actorId, clubId);
+    const formIds = canForms ? scope.formIds : [];
+    const byForm = await memberFormsRepository.fieldIdsByForm(clubId);
+    const fieldIds = new Set([...formIds.flatMap((id) => byForm[id] || []), ...(canFields ? scope.fieldIds : [])]);
+    return { all: false, formIds, fieldIds: [...fieldIds] };
+  }
+
+  /**
+   * Edita datos de la ficha de un miembro con "Editar miembros" o con fichas/campos específicos:
+   * solo `fields` (nada de estado, grupos, fichas ni cuenta) y solo los campos permitidos.
+   * `newVersion`: guarda lo editado como una respuesta nueva de las fichas modificadas.
+   */
+  async updateFields(clubId, memberId, { fields, newVersion = false }, actorId, authContext) {
+    const member = await this._getAccessibleMember(clubId, memberId, actorId, authContext);
+    const scope = await this.editScope(clubId, actorId, authContext);
+    const input = fields && typeof fields === 'object' ? { ...fields } : {};
+    if (!scope.all) {
+      const catalog = await memberFieldsRepository.findByClub(clubId);
+      const allowed = new Set(scope.fieldIds);
+      const blocked = Object.keys(input)
+        .map((code) => catalog.find((f) => f.code === code))
+        .filter((f) => f && !allowed.has(f.id));
+      if (blocked.length) throw AppError.forbidden(`No tienes permiso para editar: ${blocked.map((f) => f.label).join(', ')}.`);
+    }
+    if (!Object.keys(input).length) throw AppError.badRequest('No hay datos para guardar.');
+    const formIds = await memberFormsRepository.formIdsForMember(memberId);
+    const values = await this._prepareFieldValues(clubId, input, { requireAll: false, memberId, allowSensitive: canSeeSensitive(authContext), formIds });
+    const versionForms = newVersion ? await this._formsTouching(clubId, formIds, await this._changedFieldIds(memberId, values)) : [];
+    await withTransaction(async (conn) => {
+      if (versionForms.length) await memberFormVersionsService.startNew(clubId, memberId, versionForms, { source: 'manual', actorId }, conn);
+      if (Object.keys(values.set).length) await membersRepository.upsertFieldValues(memberId, values.set, conn);
+      await membersRepository.deleteFieldValues(memberId, values.clear, conn);
+    });
+    await auditRepository.logAction({
+      userId: actorId,
+      clubId,
+      action: 'MEMBER_UPDATED',
+      entityType: 'member',
+      entityId: memberId,
+      changes: buildDiff({
+        fields: diffValue(null, `${Object.keys(values.set).length + values.clear.length} campo(s)`),
+        newVersion: versionForms.length ? diffValue(null, `${versionForms.length} ficha(s)`) : undefined,
+      }),
+    });
+    return this._buildDto(await membersRepository.findActiveById(member.id));
+  }
+
+  // ------------------------------------------------------------------ versiones de las fichas
+
+  /** Versiones de cada ficha del miembro (ver memberFormVersions.service.js). */
+  async listFormVersions(clubId, memberId, actorId, authContext) {
+    const member = await this._getAccessibleMember(clubId, memberId, actorId, authContext);
+    return memberFormVersionsService.listForMember(clubId, member, authContext);
+  }
+
+  /** "Usar como principal" (con "Editar miembros" o con esa ficha en "Editar fichas específicas"). */
+  async activateFormVersion(clubId, memberId, versionId, actorId, authContext) {
+    const member = await this._getAccessibleMember(clubId, memberId, actorId, authContext);
+    const scope = await this.editScope(clubId, actorId, authContext);
+    if (!scope.all && !scope.formIds.length) throw AppError.forbidden('No tienes permiso para editar fichas.');
+    return memberFormVersionsService.activate(clubId, member, versionId, actorId, scope.all ? null : scope.formIds);
+  }
+
+  async removeFormVersion(clubId, memberId, versionId, actorId, authContext) {
+    const member = await this._getAccessibleMember(clubId, memberId, actorId, authContext);
+    return memberFormVersionsService.remove(clubId, member, versionId, actorId);
   }
 
   async remove(clubId, memberId, actorId, authContext) {
@@ -639,8 +768,15 @@ class MembersService {
    * con rutas privadas temporales. Imagen → carpeta pública + valor del campo; archivos →
    * documentos privados de la ficha.
    */
-  async attachUploads(clubId, memberId, uploads, actorId) {
+  async attachUploads(clubId, memberId, uploads, actorId, { replaceDocs = false } = {}) {
     for (const { field, files } of uploads || []) {
+      // Respuesta nueva (versión nueva de la ficha): los archivos enviados reemplazan a los
+      // vigentes de ese campo, que quedan en la versión anterior.
+      if (replaceDocs && field.field_type === 'file' && files.length) {
+        for (const old of (await membersRepository.findDocuments(memberId)).filter((d) => d.field_id === field.id)) {
+          await memberFormVersionsService.retireDocument(memberId, old);
+        }
+      }
       if (field.field_type === 'image') {
         const max = maxFilesOf(field);
         const urls = files
@@ -697,7 +833,7 @@ class MembersService {
     } else {
       // Una sola: reemplaza a la anterior.
       await this._saveImages(memberId, field, [url]);
-      for (const old of current) deleteUploadedFile(old);
+      for (const old of current) await memberFormVersionsService.retireImage(memberId, old);
     }
     await auditRepository.logAction({ userId: actorId, clubId, action, entityType: 'member', entityId: memberId, changes: { [field.label]: { from: null, to: 'actualizada' } } });
     return { url: toAbsoluteMediaUrl(url) };
@@ -716,7 +852,7 @@ class MembersService {
     const relative = url ? String(url).replace(/^https?:\/\/[^/]+/, '') : null;
     const removed = relative ? current.filter((u) => u === relative) : current;
     await this._saveImages(memberId, field, current.filter((u) => !removed.includes(u)));
-    for (const old of removed) deleteUploadedFile(old);
+    for (const old of removed) await memberFormVersionsService.retireImage(memberId, old);
   }
 
   _documentDto(d) {
@@ -766,8 +902,7 @@ class MembersService {
     // Campo de un solo documento: el nuevo reemplaza al anterior.
     if (!parseSettings(field).multiple) {
       for (const old of (await membersRepository.findDocuments(memberId)).filter((d) => d.field_id === field.id)) {
-        await membersRepository.deleteDocument(old.id);
-        deletePrivateFile(old.file_path);
+        await memberFormVersionsService.retireDocument(memberId, old);
       }
     }
     const id = await membersRepository.createDocument({
@@ -787,9 +922,9 @@ class MembersService {
   async removeDocument(clubId, memberId, documentId, actorId, authContext) {
     await this._getAccessibleMember(clubId, memberId, actorId, authContext);
     const doc = await membersRepository.findDocument(documentId);
-    if (!doc || doc.member_id !== memberId) throw AppError.notFound('Documento no encontrado.');
-    await membersRepository.deleteDocument(documentId);
-    deletePrivateFile(doc.file_path);
+    if (!doc || doc.member_id !== memberId || doc.archived_at) throw AppError.notFound('Documento no encontrado.');
+    // Si una versión anterior de la ficha lo usa, se archiva en vez de borrarse.
+    await memberFormVersionsService.retireDocument(memberId, doc);
   }
 
   /** Datos para entregar el archivo (ruta absoluta + nombre) tras revalidar el acceso al miembro. */
@@ -815,7 +950,10 @@ class MembersService {
     const user = await usersRepository.findById(userId, conn);
     if (!user) throw AppError.notFound('Cuenta no encontrada.');
     const catalog = await memberFieldsRepository.findByClub(clubId, conn);
-    const fieldOf = (role) => catalog.find((f) => f.role === role);
+    // Correo, teléfono… pueden estar en varias fichas (sql/083): el de la ficha del identificador.
+    const idForm = await memberFormsService.identifierFormId(clubId, conn);
+    const formOf = await memberFormsService.formOfFields(clubId, conn);
+    const fieldOf = (role) => catalog.find((f) => f.role === role && formOf.get(f.id)?.id === idForm) || catalog.find((f) => f.role === role);
     const name = String(user.username || '').trim();
     const [first, ...rest] = name.split(/\s+/);
     const values = {};

@@ -21,8 +21,8 @@ const publicSubmit = asyncHandler(async (req, res) => {
 
 // --- Administración ---
 const list = asyncHandler(async (req, res) => {
-  const { status, groupId, chargeId, search, from, to } = req.query;
-  const data = await paymentProofsService.list(req.club.id, { status, groupId, chargeId, search, from, to }, req.user.id, req.authContext);
+  const { status, groupId, chargeId, search, from, to, archived } = req.query;
+  const data = await paymentProofsService.list(req.club.id, { status, groupId, chargeId, search, from, to, archived }, req.user.id, req.authContext);
   return ApiResponse.ok(res, data, 'Comprobantes obtenidos correctamente.');
 });
 
@@ -66,4 +66,10 @@ const updatePublicPaymentsSetting = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, data, 'Configuración actualizada correctamente.');
 });
 
-module.exports = { publicClub, publicLookup, publicSubmit, list, filterOptions, pendingCount, file, approve, reject, publicPaymentsSetting, updatePublicPaymentsSetting };
+const archive = asyncHandler(async (req, res) => {
+  const archived = req.body.archived !== false;
+  const data = await paymentProofsService.archive(req.club.id, req.body.ids, archived, req.user.id, req.authContext);
+  return ApiResponse.ok(res, data, archived ? 'Comprobantes archivados.' : 'Comprobantes desarchivados.');
+});
+
+module.exports = { archive, publicClub, publicLookup, publicSubmit, list, filterOptions, pendingCount, file, approve, reject, publicPaymentsSetting, updatePublicPaymentsSetting };

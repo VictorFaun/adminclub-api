@@ -63,12 +63,24 @@ async function run() {
 
     const files = fs
       .readdirSync(SQL_DIR)
-      .filter((f) => f.endsWith('.sql'))
+      // .sql (lo normal) o .js para lo que SQL no puede hacer solo (copiar archivos, reescribir
+      // JSON): exporta `async (connection) => {}` y corre con la misma conexión (base ya elegida).
+      .filter((f) => f.endsWith('.sql') || f.endsWith('.js'))
       .sort();
 
     for (const file of files) {
       if (applied.has(file)) {
         console.log(`[migrate] Omitida ${file} (ya aplicada).`);
+        continue; // eslint-disable-line no-continue
+      }
+
+      if (file.endsWith('.js')) {
+        console.log(`[migrate] Ejecutando ${file} ...`);
+        // eslint-disable-next-line global-require, import/no-dynamic-require
+        await require(path.join(SQL_DIR, file))(connection);
+        console.log(`[migrate] OK ${file}`);
+        // eslint-disable-next-line no-await-in-loop
+        await markApplied(connection, file);
         continue; // eslint-disable-line no-continue
       }
 

@@ -35,18 +35,19 @@ const clp = (n) => `$${Math.round(Number(n) || 0).toLocaleString('es-CL')}`;
 const amountOf = (changes) => {
   const v = changes && typeof changes === 'object' ? changes.amount : null;
   const n = v && typeof v === 'object' ? v.to ?? v.value : v;
-  return Number(n) > 0 ? ` de ${clp(n)}` : '';
+  return Number(n) > 0 ? clp(n) : '';
 };
-/** Frase (sin el autor delante) y tipo de cada evento de la actividad del dashboard. */
+/** Texto corto de cada evento de la actividad del dashboard: primero QUÉ pasó y a quién; el autor
+ * va aparte (avatar y segunda línea en la app), así cabe sin cortarse en el celular. */
 const ACTIVITY_TEXT = {
-  PAYMENT_CREATED: (name, ch) => ['payment', `registró un pago${amountOf(ch)}${name ? ` de ${name}` : ''}`],
-  PAYMENT_PROOF_SUBMITTED: () => ['proof', 'Llegó un comprobante de pago por revisar'],
-  PAYMENT_PROOF_APPROVED: () => ['proof', 'aprobó un comprobante de pago'],
-  MEMBER_CREATED: (name) => ['member', `agregó a ${name ?? 'un miembro'}`],
-  MEMBER_APPLICATION_SUBMITTED: (name) => ['application', `Nueva solicitud de inscripción${name ? ` de ${name}` : ''}`],
-  MEMBER_APPLICATION_APPROVED: (name) => ['application', `aceptó la solicitud${name ? ` de ${name}` : ''}`],
-  EXPENSE_PAYMENT_CREATED: (name) => ['expense', `pagó el gasto ${name ?? ''}`.trim()],
-  CHARGE_CREATED: (name) => ['charge', `creó el cobro ${name ?? ''}`.trim()],
+  PAYMENT_CREATED: (name, ch) => ['payment', [amountOf(ch) ? `Pago de ${amountOf(ch)}` : 'Pago', name].filter(Boolean).join(' · ')],
+  PAYMENT_PROOF_SUBMITTED: () => ['proof', 'Comprobante nuevo por revisar'],
+  PAYMENT_PROOF_APPROVED: () => ['proof', 'Comprobante aprobado'],
+  MEMBER_CREATED: (name) => ['member', name ? `Nuevo miembro · ${name}` : 'Nuevo miembro'],
+  MEMBER_APPLICATION_SUBMITTED: (name) => ['application', name ? `Solicitud nueva · ${name}` : 'Solicitud nueva'],
+  MEMBER_APPLICATION_APPROVED: (name) => ['application', name ? `Solicitud aceptada · ${name}` : 'Solicitud aceptada'],
+  EXPENSE_PAYMENT_CREATED: (name) => ['expense', name ? `Gasto pagado · ${name}` : 'Gasto pagado'],
+  CHARGE_CREATED: (name) => ['charge', name ? `Cobro nuevo · ${name}` : 'Cobro nuevo'],
 };
 
 class ClubsService {
@@ -375,11 +376,33 @@ class ClubsService {
 
   async listJoinRequests(clubId, query) {
     const { limit, offset, page } = parsePagination(query, ['created_at']);
-    const { rows, total } = await joinRequestsRepository.paginateByClub(clubId, { limit, offset, status: query.status, search: query.search });
+    const { rows, total } = await joinRequestsRepository.paginateByClub(clubId, {
+      limit,
+      offset,
+      status: query.status,
+      search: query.search,
+      archived: query.archived === 'true' || query.archived === '1',
+    });
     return {
       items: rows.map((r) => ({ ...r, avatar_url: toAbsoluteMediaUrl(r.avatar_url) })),
       meta: buildMeta({ page, limit, total }),
     };
+  }
+
+  /** Archiva (o desarchiva) solicitudes de acceso ya resueltas: salen de Aprobadas/Rechazadas. */
+  async archiveJoinRequests(clubId, ids, archived, actorId) {
+    const changed = await joinRequestsRepository.setArchived(clubId, ids.map(Number), archived, actorId);
+    if (changed) {
+      await auditRepository.logAction({
+        userId: actorId,
+        clubId,
+        action: archived ? 'JOIN_REQUESTS_ARCHIVED' : 'JOIN_REQUESTS_UNARCHIVED',
+        entityType: 'join_request',
+        entityId: null,
+        changes: { ids: ids.map(Number), count: changed },
+      });
+    }
+    return { changed };
   }
 
   async resolveJoinRequest(clubId, requestId, status, actorId) {

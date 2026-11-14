@@ -14,7 +14,7 @@ const logger = require('../helpers/logger');
 const env = require('../config/env');
 
 /** Mismas claves que paymentProofs.service.js / selfService.service.js (club_settings). */
-const PUBLIC_PAYMENTS_KEY = 'public_payments_enabled';
+const publicPageService = require('./publicPage.service');
 const SELF_SERVICE_KEY = 'self_service_enabled';
 /** "Lo que sigue": períodos por pagar que vencen dentro de estos días (o ya vencieron). */
 const UPCOMING_DAYS = 45;
@@ -103,7 +103,7 @@ class PaymentNoticesService {
     const brand = { name: club.name, primaryColor: club.primary_color, logoUrl: toAbsoluteMediaUrl(club.logo_url) };
     const links = {
       myClub: settings[SELF_SERVICE_KEY] === '1' ? `${env.clientUrl}/my/payments?member=${member.id}` : null,
-      publicPay: settings[PUBLIC_PAYMENTS_KEY] === '1' && club.public_code ? `${env.clientUrl}/pay/${club.public_code}` : null,
+      publicPay: publicPageService.treasuryLinkOn(settings) && club.public_code ? `${env.clientUrl}/pay/${club.public_code}` : null,
     };
     const extra = approved ? await this._approvedExtra(clubId, member, paymentIds) : null;
 
@@ -191,7 +191,6 @@ class PaymentNoticesService {
       subject: r.own ? `Pago registrado: ${periods} · ${clp(total)}` : `Pago registrado de ${shortName}: ${periods} · ${clp(total)}`,
       html: renderClubEmail({
         club: brand,
-        eyebrow: 'Pago registrado',
         title: r.own ? 'Registramos tu pago' : `Registramos el pago de ${shortName}`,
         // Lo que el asunto no dice: el recibo y cómo queda la cuenta.
         preheader: `Te adjuntamos el recibo. ${extra.pendingTotal ? `${r.own ? 'Te quedan' : `A ${shortName} le quedan`} ${clp(extra.pendingTotal)} pendientes.` : r.own ? 'Estás al día.' : `${shortName} está al día.`}`,
@@ -217,7 +216,6 @@ ${next}
       subject: r.own ? 'Tu comprobante fue rechazado' : `El comprobante de ${shortName} fue rechazado`,
       html: renderClubEmail({
         club: brand,
-        eyebrow: 'Comprobante rechazado',
         title: 'El comprobante no pudo ser aprobado',
         preheader: reason ? `Motivo: ${reason}` : 'Revisa y envía otro comprobante.',
         bodyHtml: `${hello}${intro}

@@ -74,7 +74,7 @@ class ClubSetupService {
         title: 'Activa la página pública de pagos',
         description: 'Tus miembros ven lo que deben y suben su comprobante, sin cuenta.',
         link: '/treasury/settings',
-        done: settings.public_payments_enabled === '1',
+        done: settings.public_page_enabled === '1' && settings.public_payments_enabled === '1',
       },
     ];
     const completed = items.filter((i) => i.done).length;

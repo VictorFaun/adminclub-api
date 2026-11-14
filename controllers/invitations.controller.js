@@ -1,6 +1,7 @@
 const asyncHandler = require('../helpers/asyncHandler');
 const ApiResponse = require('../helpers/ApiResponse');
 const invitationsService = require('../services/invitations.service');
+const invitationFormSettingsService = require('../services/invitationFormSettings.service');
 
 const list = asyncHandler(async (req, res) => {
   const { items, meta } = await invitationsService.listForClub(req.club.id, req.query);
@@ -32,4 +33,14 @@ const remove = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, null, 'Invitación eliminada correctamente.');
 });
 
-module.exports = { list, create, update, revoke, reactivate, remove };
+/** Categorías y consentimientos para elegir en el modal de la invitación. */
+const getById = asyncHandler(async (req, res) => {
+  const data = await invitationsService.getById(req.club.id, Number(req.params.id));
+  return ApiResponse.ok(res, data, 'Invitación obtenida correctamente.');
+});
+
+const formOptions = asyncHandler(async (req, res) => {
+  return ApiResponse.ok(res, await invitationFormSettingsService.options(req.club.id), 'Opciones obtenidas correctamente.');
+});
+
+module.exports = { getById, formOptions, list, create, update, revoke, reactivate, remove };

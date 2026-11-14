@@ -151,6 +151,21 @@ class PaymentsRepository extends BaseRepository {
    * puede quedar negativa). Igual que sumDirectPayments, se excluyen cobros eliminados.
    * `memberIds` = mismo scope de sumDirectPayments, sobre quién PAGÓ (no sobre el responsable que
    * recibió). */
+  /** Lo cobrado por cada responsable (pagos registrados "a" él), todo el historial: `Map(memberId → total)`. */
+  async sumHeldByEachResponsible(clubId, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT p.paid_to_member_id AS member_id, COALESCE(SUM(pa.amount), 0) AS total
+       FROM payment_allocations pa
+       INNER JOIN payments p ON p.id = pa.payment_id
+       INNER JOIN charge_instances ci ON ci.id = pa.charge_instance_id
+       INNER JOIN charges c ON c.id = ci.charge_id
+       WHERE p.club_id = ? AND p.paid_to_member_id IS NOT NULL AND c.deleted_at IS NULL
+       GROUP BY p.paid_to_member_id`,
+      [clubId]
+    );
+    return new Map(rows.map((r) => [r.member_id, Number(r.total)]));
+  }
+
   async sumHeldByResponsibles(clubId, memberIds, conn = pool) {
     const params = [clubId];
     let memberFilter = '';

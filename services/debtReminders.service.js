@@ -14,7 +14,7 @@ const { CLUB_STATUS } = require('../config/constants');
 
 const SETTINGS_KEY = 'debt_reminders';
 const LAST_SENT_KEY = 'debt_reminders_last_sent';
-const PUBLIC_PAYMENTS_KEY = 'public_payments_enabled';
+const publicPageService = require('./publicPage.service');
 const MONTHS = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
 
 /** "15 mar 2026" */
@@ -114,7 +114,7 @@ class DebtRemindersService {
   async send(clubId, actorId = null, chargeId = null, { memberIds = null, note = null } = {}) {
     const club = await clubsRepository.findById(clubId);
     const settings = await settingsRepository.findAllByClub(clubId);
-    const payBase = settings[PUBLIC_PAYMENTS_KEY] === '1' && club.public_code ? `${env.clientUrl.replace(/\/$/, '')}/pay/${club.public_code}` : null;
+    const payBase = publicPageService.treasuryLinkOn(settings) && club.public_code ? `${env.clientUrl.replace(/\/$/, '')}/pay/${club.public_code}` : null;
     // Con "Mi club" activo, la notificación en la app lleva a "Mis pagos" de esa ficha.
     const myClub = settings.self_service_enabled === '1' && settings.self_service_payments !== '0';
     const all = await this.debtors(clubId, chargeId);
@@ -201,7 +201,6 @@ class DebtRemindersService {
     const oldest = d.items[0]?.dueDate ? shortDate(d.items[0].dueDate) : null;
     return renderClubEmail({
       club: { name: club.name, primaryColor: color, logoUrl: toAbsoluteMediaUrl(club.logo_url) },
-      eyebrow: 'Recordatorio de pago',
       title: own ? `Tienes ${clp(d.total)} pendientes` : `${d.name.split(' ')[0]} tiene ${clp(d.total)} pendientes`,
       preheader: `${oldest ? `${count === 1 ? 'Venció' : 'El más antiguo venció'} el ${oldest}. ` : ''}${link ? (ctaText === 'Ver mis pagos' ? 'Revisa el detalle y paga desde Mi club.' : 'Revisa el detalle y paga desde la página del club.') : 'Para pagar, comunícate con el club.'}`,
       // El monto ya va en el título y en el total de la tabla: el recuadro dice desde cuándo debe.

@@ -5,6 +5,7 @@ const joinRequestsRepository = require('../repositories/joinRequests.repository'
 const membersService = require('./members.service');
 const memberGuardiansRepository = require('../repositories/memberGuardians.repository');
 const memberFormsRepository = require('../repositories/memberForms.repository');
+const memberFormsService = require('./memberForms.service');
 const AppError = require('../helpers/AppError');
 const { USER_CLUB_STATUS, JOIN_REQUEST_STATUS } = require('../config/constants');
 
@@ -77,7 +78,8 @@ class ClubEntryService {
     // que entra lo tiene desde arriba, así que no se le exige ficha propia).
     let pending = [];
     if (!member && (requiresProfile || formIds.length)) {
-      pending = formIds.length ? formIds : await memberFormsRepository.findDefaultIds(clubId, conn);
+      // Con la ficha del Identificador aunque la invitación sea anterior a esa regla (sql/079).
+      pending = await memberFormsService.withIdentifierForm(clubId, formIds.length ? formIds : await memberFormsRepository.findDefaultIds(clubId, conn), conn);
     }
     await usersRepository.setPendingForms(userId, clubId, pending, conn);
 

@@ -22,9 +22,19 @@ router.get(
     query('search').optional().isString().isLength({ max: 100 }),
     query('from').optional().isISO8601({ strict: true }).withMessage('Fecha "desde" inválida.'),
     query('to').optional().isISO8601({ strict: true }).withMessage('Fecha "hasta" inválida.'),
+    query('archived').optional().isIn(['true', 'false', '1', '0']),
   ],
   handleValidation,
   controller.list
+);
+// Archivar/desarchivar varios ya revisados de una vez (quien los revisa).
+router.post(
+  '/archive',
+  requireFunction(FUNCTIONS.CREATE_PAYMENTS),
+  sanitizeBody,
+  [body('ids').isArray({ min: 1, max: 1000 }), body('ids.*').isInt({ min: 1 }), body('archived').optional().isBoolean().toBoolean()],
+  handleValidation,
+  controller.archive
 );
 router.get('/filter-options', requireFunction(...VIEW), controller.filterOptions);
 router.get('/pending-count', requireFunction(...VIEW), controller.pendingCount);

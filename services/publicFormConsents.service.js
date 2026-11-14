@@ -148,15 +148,18 @@ class PublicFormConsentsService {
 
   // ------------------------------------------------------------------ formulario público
 
-  /** Consentimientos activos, tal como se muestran en el formulario. */
-  async listActive(clubId) {
-    return (await this._withFiles(await publicFormConsentsRepository.listByClub(clubId, { activeOnly: true }))).map(({ isActive, ...rest }) => rest);
+  /** Consentimientos activos, tal como se muestran en el formulario. `onlyIds`: los que pide la
+   * invitación (sql/077); sin indicar, todos los activos. */
+  /** `onlyIds`: los que eligió la invitación (se piden aunque estén desactivados: elegirlos es pedirlos). */
+  async listActive(clubId, onlyIds = null) {
+    const rows = (await publicFormConsentsRepository.listByClub(clubId, { activeOnly: !onlyIds })).filter((r) => !onlyIds || onlyIds.includes(r.id));
+    return (await this._withFiles(rows)).map(({ isActive, ...rest }) => rest);
   }
 
   /** Valida lo marcado al enviar y arma la copia que se guarda en la solicitud. */
-  async resolveAcceptance(clubId, acceptedIds, { ipAddress, userAgent } = {}) {
+  async resolveAcceptance(clubId, acceptedIds, { ipAddress, userAgent } = {}, onlyIds = null) {
     const accepted = new Set((Array.isArray(acceptedIds) ? acceptedIds : []).map(Number));
-    const active = await this.listActive(clubId);
+    const active = await this.listActive(clubId, onlyIds);
     const missing = active.filter((c) => c.isRequired && !accepted.has(c.id));
     if (missing.length) {
       throw AppError.badRequest(missing.length === 1 ? `Debes aceptar «${missing[0].title}» para enviar la inscripción.` : 'Debes aceptar los consentimientos obligatorios para enviar la inscripción.');

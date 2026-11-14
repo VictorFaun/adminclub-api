@@ -39,7 +39,7 @@ class MemberFieldsService {
   catalog() {
     return {
       types: FIELD_TYPES,
-      roles: Object.entries(ROLES).map(([key, r]) => ({ key, label: r.label, types: r.types })),
+      roles: Object.entries(ROLES).map(([key, r]) => ({ key, label: r.label, types: r.types, perForm: !!r.perForm })),
       imageAspects: IMAGE_ASPECTS,
       docFormats: Object.entries(DOC_FORMATS).map(([key, f]) => ({ key, label: f.label, mimes: f.mimes })),
     };
@@ -52,18 +52,45 @@ class MemberFieldsService {
     return JSON.stringify(list);
   }
 
-  async _validateRole(clubId, role, fieldType, excludeId = null) {
+  /**
+   * `formId`: ficha del campo. Los nombres y el identificador van una sola vez en el club; los
+   * usos `perForm` (nacimiento, fotos, contacto) una vez por ficha (sql/083).
+   */
+  async _validateRole(clubId, role, fieldType, excludeId = null, formId = null, conn = undefined) {
     if (role === null || role === undefined || role === '') return null;
     const def = ROLES[role];
     if (!def) throw AppError.badRequest('Uso especial inválido.');
     if (!def.types.includes(fieldType)) {
       throw AppError.badRequest(`El uso "${def.label}" no es compatible con este tipo de campo.`);
     }
-    const existing = await memberFieldsRepository.findByRole(clubId, role);
-    if (existing && existing.id !== excludeId) {
-      throw AppError.conflict(`Ya hay otro campo con el uso "${def.label}" ("${existing.label}"). Quítaselo primero.`);
+    const formOf = await memberFormsService.formOfFields(clubId, conn);
+    const others = (await memberFieldsRepository.findByClub(clubId, conn)).filter((f) => f.role === role && f.id !== excludeId);
+    const existing = def.perForm ? others.find((f) => formId && formOf.get(f.id)?.id === formId) : others[0];
+    if (existing) {
+      const form = formOf.get(existing.id);
+      throw AppError.conflict(
+        def.perForm
+          ? `Esta ficha ya tiene el uso "${def.label}" (campo "${existing.label}"). Va una vez por ficha: quítaselo a ese campo para ponerlo en este.`
+          : `El uso "${def.label}" ya está en ${form ? `«${form.name}»` : 'otra ficha'} (campo "${existing.label}"). Va una sola vez en el club: elimínalo o quítale el uso allá para ponerlo acá.`
+      );
     }
     return role;
+  }
+
+  /** Código libre en el club: el del nombre o, si ya lo usa un campo de otra ficha, con sufijo
+   * (cada ficha es independiente: dos pueden tener un "Teléfono"). En la misma ficha, no se repite. */
+  async _freeCode(clubId, base, label, formId, conn) {
+    const formOf = await memberFormsService.formOfFields(clubId, conn);
+    const catalog = await memberFieldsRepository.findByClub(clubId, conn);
+    const norm = (v) => String(v ?? '').trim().toLowerCase();
+    if (formId && catalog.some((f) => formOf.get(f.id)?.id === formId && norm(f.label) === norm(label))) {
+      throw AppError.conflict('Ya existe un campo con ese nombre en esta ficha.');
+    }
+    const codes = new Set(catalog.map((f) => f.code));
+    if (!codes.has(base)) return base;
+    let n = 2;
+    while (codes.has(`${base}-${n}`)) n += 1;
+    return `${base}-${n}`;
   }
 
   _settingsJson(fieldType, settings, role) {
@@ -74,18 +101,17 @@ class MemberFieldsService {
   /** `formId`: ficha a la que se agrega el campo (al final); sin indicarla, a las fichas por defecto. */
   async create(clubId, { code, label, fieldType, role, options, settings, helpText, isRequired, inPublicForm, sortOrder, formId }, actorId, conn) {
     if (!FIELD_TYPES.includes(fieldType)) throw AppError.badRequest('Tipo de campo inválido.');
-    const normalizedCode = slugify(code || label);
-    if (!normalizedCode) throw AppError.badRequest('No se pudo generar un código válido para este campo.');
-    if (await memberFieldsRepository.findByCode(clubId, normalizedCode, conn)) {
-      throw AppError.conflict('Ya existe un campo con ese nombre en la ficha.');
-    }
+    const base = slugify(code || label);
+    if (!base) throw AppError.badRequest('No se pudo generar un código válido para este campo.');
+    const targetFormId = await memberFormsService.targetFormId(clubId, formId, conn);
+    const normalizedCode = await this._freeCode(clubId, base, label, targetFormId, conn);
     const id = await memberFieldsRepository.createField(
       {
         clubId,
         code: normalizedCode,
         label: String(label).trim(),
         fieldType,
-        role: await this._validateRole(clubId, role, fieldType),
+        role: await this._validateRole(clubId, role, fieldType, null, targetFormId, conn),
         options: this._validateOptions(fieldType, options),
         settings: this._settingsJson(fieldType, settings, role),
         helpText: helpText ? String(helpText).trim().slice(0, 255) || null : null,
@@ -95,7 +121,7 @@ class MemberFieldsService {
       },
       conn
     );
-    await memberFormsService.attachField(clubId, id, formId ? Number(formId) : null, conn);
+    await memberFormsService.attachField(clubId, id, targetFormId, conn);
     if (actorId !== undefined) {
       await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_FIELD_CREATED', entityType: 'member_field', entityId: id, changes: { label, fieldType } });
     }
@@ -117,7 +143,8 @@ class MemberFieldsService {
     if (label !== undefined) updates.label = String(label).trim();
     if (fieldType !== undefined) updates.field_type = fieldType;
     if (role !== undefined || fieldType !== undefined) {
-      updates.role = await this._validateRole(clubId, role !== undefined ? role : field.role, resolvedType, fieldId);
+      const formId = (await memberFormsService.formOfFields(clubId)).get(fieldId)?.id ?? null;
+      updates.role = await this._validateRole(clubId, role !== undefined ? role : field.role, resolvedType, fieldId, formId);
     }
     if (options !== undefined || fieldType !== undefined) {
       updates.options = this._validateOptions(resolvedType, options !== undefined ? options : parseOptions(field));
@@ -163,20 +190,27 @@ class MemberFieldsService {
    * en un club nuevo, o desde Configuración para agregar los que falten. No toca los existentes:
    * se salta un sugerido si ya hay un campo con su código o con su uso especial.
    */
-  async addSuggested(clubId, actorId, conn) {
+  async addSuggested(clubId, actorId, conn, targetFormId = null) {
     const existing = await memberFieldsRepository.findByClub(clubId, conn);
-    const codes = new Set(existing.map((f) => f.code));
-    const roles = new Set(existing.map((f) => f.role).filter(Boolean));
     let added = 0;
-    // Los sugeridos van a la ficha por defecto (la crea si el club todavía no tiene ninguna).
-    const formId = await memberFormsService.ensureDefault(clubId, conn);
+    // A la ficha indicada (la que se está editando) o a la por defecto (la crea si no hay ninguna).
+    const formId = targetFormId ? Number(targetFormId) : await memberFormsService.ensureDefault(clubId, conn);
+    // Lo que esa ficha ya tiene (por nombre): no se repite. Los usos especiales tampoco: los de
+    // una vez por ficha si ya están en esta; los demás (nombres, identificador) si están en cualquiera.
+    const formOf = await memberFormsService.formOfFields(clubId, conn);
+    const inForm = new Set(existing.filter((f) => formOf.get(f.id)?.id === formId).map((f) => f.label.trim().toLowerCase()));
+    const roles = new Set(existing.filter((f) => f.role && (!ROLES[f.role]?.perForm || formOf.get(f.id)?.id === formId)).map((f) => f.role));
+    const codes = new Set(existing.map((f) => f.code));
     for (const s of SUGGESTED_FIELDS) {
-      if (codes.has(s.code) || (s.role && roles.has(s.role))) continue;
+      if (inForm.has(s.label.toLowerCase()) || (s.role && roles.has(s.role))) continue;
+      let code = s.code;
+      for (let n = 2; codes.has(code); n += 1) code = `${s.code}-${n}`;
+      codes.add(code);
       // eslint-disable-next-line no-await-in-loop
       const fieldId = await memberFieldsRepository.createField(
         {
           clubId,
-          code: s.code,
+          code,
           label: s.label,
           fieldType: s.fieldType,
           role: s.role,

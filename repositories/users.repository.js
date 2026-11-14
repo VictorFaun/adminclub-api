@@ -9,6 +9,10 @@ class UsersRepository extends BaseRepository {
   // `deleted_at IS NULL` en ambos: una cuenta eliminada (ver #removeGlobal/softDelete) no debe
   // seguir bloqueando su email para siempre — ni aparecer como "existente" al registrarse de
   // nuevo, ni resolverse en login/forgot-password (ya inaccesible igual vía authMiddleware).
+  async setMaxSessions(userId, maxSessions, conn = pool) {
+    await conn.query('UPDATE users SET max_sessions = ? WHERE id = ?', [maxSessions, userId]);
+  }
+
   async findByEmail(email, conn = pool) {
     const [rows] = await conn.query('SELECT * FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1', [email]);
     return rows[0] || null;

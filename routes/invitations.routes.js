@@ -9,7 +9,10 @@ const { FUNCTIONS } = require('../config/constants');
 
 router.use(authMiddleware, clubContextMiddleware);
 
+router.get('/form-options', requireFunction(FUNCTIONS.CREATE_INVITATIONS, FUNCTIONS.EDIT_INVITATIONS), controller.formOptions);
+
 router.get('/', requireFunction(FUNCTIONS.VIEW_INVITATIONS), validation.listInvitations, handleValidation, controller.list);
+router.get('/:id', requireFunction(FUNCTIONS.VIEW_INVITATIONS, FUNCTIONS.EDIT_INVITATIONS), validation.invitationId, handleValidation, controller.getById);
 
 // INVITATION_CREATED se registra en invitations.service.js#create (con el id real), no acá.
 router.post(

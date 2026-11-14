@@ -13,6 +13,15 @@ const createInvitation = [
   body('requiresAccount').optional().isBoolean().withMessage('requiresAccount debe ser booleano.').toBoolean(),
   body('formIds').optional().isArray({ max: 50 }).withMessage('formIds debe ser un arreglo.'),
   body('formIds.*').isInt({ min: 1 }).withMessage('Ficha inválida.').toInt(),
+  // Opciones del formulario público (sql/077): mensaje, categoría y consentimientos.
+  body('formSettings').optional({ nullable: true }).isObject().withMessage('formSettings debe ser un objeto.'),
+  body('formSettings.askMessage').optional().isBoolean().toBoolean(),
+  body('formSettings.groups.mode').optional().isIn(['off', 'optional', 'required']),
+  body('formSettings.groups.groupIds').optional().isArray({ max: 200 }),
+  body('formSettings.consentIds').optional().isArray({ max: 100 }),
+  body('formSettings.guardian').optional().isObject(),
+  body('formSettings.guardian.enabled').optional().isBoolean().toBoolean(),
+  body('formSettings.guardian.formIds').optional().isArray({ max: 50 }),
 ];
 
 const updateInvitation = [...invitationId, ...createInvitation];

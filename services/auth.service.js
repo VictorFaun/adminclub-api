@@ -11,6 +11,10 @@ const platformSettingsRepository = require('../repositories/platformSettings.rep
 const pushSubscriptionsRepository = require('../repositories/pushSubscriptions.repository');
 const { describeUserAgent, displayIp } = require('../helpers/userAgent');
 const { emitToSession } = require('../sockets');
+
+/** Sesiones abiertas a la vez por cuenta: por defecto y tope de lo que se puede elegir. */
+const DEFAULT_MAX_SESSIONS = 10;
+const MAX_SESSIONS_CAP = 50;
 const { withTransaction } = require('../config/database');
 const AppError = require('../helpers/AppError');
 const {
@@ -139,10 +143,13 @@ class AuthService {
     if (user.status === USER_STATUS.SUSPENDED) throw AppError.forbidden('Tu cuenta ha sido suspendida.');
     if (user.status === USER_STATUS.BLOCKED) throw AppError.forbidden('Tu cuenta ha sido bloqueada.');
 
+    let newSessionId = null;
     const { accessToken, refreshToken } = await withTransaction(async (conn) => {
       const sessionId = await sessionsRepository.createSession({ userId: user.id, ipAddress, userAgent }, conn);
+      newSessionId = sessionId;
       return this._issueTokenPair({ userId: user.id, sessionId, ipAddress, userAgent }, conn);
     });
+    await this._enforceSessionLimit(user.id, newSessionId, { ipAddress, userAgent });
 
     await usersRepository.touchLastLogin(user.id);
     await auditRepository.logAction({
@@ -213,10 +220,13 @@ class AuthService {
     if (user.status === USER_STATUS.SUSPENDED) throw AppError.forbidden('Tu cuenta ha sido suspendida.');
     if (user.status === USER_STATUS.BLOCKED) throw AppError.forbidden('Tu cuenta ha sido bloqueada.');
 
+    let newSessionId = null;
     const { accessToken, refreshToken } = await withTransaction(async (conn) => {
       const sessionId = await sessionsRepository.createSession({ userId: user.id, ipAddress, userAgent }, conn);
+      newSessionId = sessionId;
       return this._issueTokenPair({ userId: user.id, sessionId, ipAddress, userAgent }, conn);
     });
+    await this._enforceSessionLimit(user.id, newSessionId, { ipAddress, userAgent });
 
     await usersRepository.touchLastLogin(user.id);
     await auditRepository.logAction({
@@ -437,6 +447,49 @@ class AuthService {
   }
 
   /** Cierra todas las sesiones de la cuenta menos la actual. Devuelve cuántas cerró. */
+  /** Máximo de sesiones abiertas que eligió la cuenta (10 por defecto). */
+  async getSessionLimit(userId) {
+    const user = await usersRepository.findById(userId);
+    return { maxSessions: Number(user?.max_sessions) || DEFAULT_MAX_SESSIONS };
+  }
+
+  /** Cambia el máximo y, si ya hay más sesiones abiertas, cierra las usadas hace más tiempo
+   * (nunca la actual). Devuelve el máximo y cuántas cerró. */
+  async setSessionLimit(userId, maxSessions, currentSessionId, meta = {}) {
+    const value = Math.min(Math.max(Math.round(Number(maxSessions)) || DEFAULT_MAX_SESSIONS, 1), MAX_SESSIONS_CAP);
+    await usersRepository.setMaxSessions(userId, value);
+    const closed = await this._enforceSessionLimit(userId, currentSessionId, meta, value);
+    return { maxSessions: value, closed };
+  }
+
+  /** Deja abiertas como máximo `limit` sesiones de la cuenta: se conserva `keepSessionId` (la que
+   * se acaba de abrir o la que está usando) y, de las demás, las usadas más recientemente. Las
+   * otras se cierran (ese dispositivo sale al instante). Devuelve cuántas cerró. */
+  async _enforceSessionLimit(userId, keepSessionId, { ipAddress, userAgent } = {}, limit = null) {
+    const max = limit ?? (await this.getSessionLimit(userId)).maxSessions;
+    const open = await sessionsRepository.findOpenByUser(userId); // más reciente primero
+    const others = open.filter((s) => s.id !== keepSessionId);
+    const toClose = others.slice(Math.max(0, max - 1));
+    for (const s of toClose) {
+      // eslint-disable-next-line no-await-in-loop
+      await sessionsRepository.deactivate(s.id);
+      emitToSession(s.id, 'session:revoked', { sessionId: s.id });
+    }
+    if (toClose.length) {
+      await auditRepository.logAction({
+        userId,
+        clubId: null,
+        action: 'SESSIONS_LIMIT_CLOSED',
+        entityType: 'session',
+        entityId: keepSessionId,
+        changes: { count: toClose.length, limit: max },
+        ipAddress,
+        userAgent,
+      });
+    }
+    return toClose.length;
+  }
+
   async revokeOtherSessions(userId, currentSessionId, { ipAddress, userAgent } = {}) {
     const ids = await sessionsRepository.findActiveIdsByUser(userId, currentSessionId);
     for (const id of ids) {

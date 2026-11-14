@@ -27,6 +27,8 @@ router.get(
   controller.options
 );
 router.get('/dashboard', requireFunction(FUNCTIONS.VIEW_MEMBERS_DASHBOARD), controller.dashboard);
+// Qué datos de la ficha puede editar el actor (todo, o fichas/campos específicos, sql/080).
+router.get('/edit-scope', requireFunction(FUNCTIONS.EDIT_MEMBERS, FUNCTIONS.EDIT_MEMBER_FORMS_SCOPED, FUNCTIONS.EDIT_MEMBER_FIELD_VALUES_SCOPED), controller.editScope);
 router.get('/birthdays', requireFunction(FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED), controller.birthdays);
 // Preferencias PROPIAS de la notificación de cumpleaños (por usuario y club) y envío de prueba.
 // Sin requireFunction: también las usa quien no ve Miembros pero tiene la notificación asignada
@@ -121,6 +123,8 @@ router.put(
   handleValidation,
   controller.update
 );
+// "En el club" (estado y fecha de ingreso) tiene su propio permiso (sql/081); PUT /:id ya no los cambia sin él.
+router.put('/:id/membership', requireFunction(FUNCTIONS.EDIT_MEMBER_MEMBERSHIP), sanitizeBody, validation.membership, handleValidation, controller.updateMembership);
 
 // Campos de tipo "imagen" (públicas, ej. la foto que usan las plantillas de cumpleaños) y de tipo
 // "archivos" (privados, se suben a un campo con `fieldId`).
@@ -138,6 +142,17 @@ router.post(
 router.get('/:id/documents/:documentId/download', requireFunction(FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED), validation.memberId, handleValidation, controller.downloadDocument);
 router.delete('/:id/documents/:documentId', requireFunction(FUNCTIONS.EDIT_MEMBERS), validation.memberId, handleValidation, controller.removeDocument);
 
+// Editar datos de la ficha con "Editar miembros" o con fichas/campos específicos (sql/080): solo
+// `fields` (+ `newVersion`); el service revisa qué campos puede tocar el actor.
+const FIELD_EDITORS = [FUNCTIONS.EDIT_MEMBERS, FUNCTIONS.EDIT_MEMBER_FORMS_SCOPED, FUNCTIONS.EDIT_MEMBER_FIELD_VALUES_SCOPED];
+router.put('/:id/fields', requireFunction(...FIELD_EDITORS), sanitizeBody, [...validation.memberId, body('fields').isObject(), body('newVersion').optional().isBoolean()], handleValidation, controller.updateFields);
+
+// Versiones de cada ficha (sql/078): verlas es ver al miembro; eliminarlas, un permiso aparte.
+router.get('/:id/form-versions', requireFunction(FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED), validation.memberId, handleValidation, controller.listFormVersions);
+// "Usar como principal": con Editar miembros o con la ficha en Editar fichas específicas (lo revisa el service).
+router.post('/:id/form-versions/:versionId/activate', requireFunction(FUNCTIONS.EDIT_MEMBERS, FUNCTIONS.EDIT_MEMBER_FORMS_SCOPED), validation.formVersion, handleValidation, controller.activateFormVersion);
+router.delete('/:id/form-versions/:versionId', requireFunction(FUNCTIONS.DELETE_MEMBER_FORM_VERSIONS), validation.formVersion, handleValidation, controller.removeFormVersion);
+
 router.delete('/:id', requireFunction(FUNCTIONS.DELETE_MEMBERS), validation.memberId, handleValidation, controller.remove);
 
 router.put(
@@ -150,13 +165,33 @@ router.put(
 );
 
 // Apoderados de la ficha: otros MIEMBROS del club vinculados a este (con o sin cuenta; si tienen
-// cuenta, la ven en "Mi club"; ver selfService.service.js). Vincular miembros es editarlos.
+// cuenta, la ven en "Mi club"; ver selfService.service.js). Ver y editar tienen su permiso (sql/081).
 const guardians = require('../controllers/guardians.controller');
 const meValidation = require('../validations/me.validation');
-const GUARDIAN_EDITORS = [FUNCTIONS.EDIT_MEMBERS, FUNCTIONS.LINK_MEMBER_USER];
-router.get('/:id/guardians', requireFunction(FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED), meValidation.guardianParams, handleValidation, guardians.list);
-router.get('/:id/wards', requireFunction(FUNCTIONS.VIEW_MEMBERS, FUNCTIONS.VIEW_MEMBERS_SCOPED), meValidation.guardianParams, handleValidation, guardians.wards);
+const GUARDIAN_EDITORS = [FUNCTIONS.EDIT_MEMBER_GUARDIANS];
+const GUARDIAN_VIEWERS = [FUNCTIONS.VIEW_MEMBER_GUARDIANS, FUNCTIONS.EDIT_MEMBER_GUARDIANS];
+router.get('/:id/guardians', requireFunction(...GUARDIAN_VIEWERS), meValidation.guardianParams, handleValidation, guardians.list);
+router.get('/:id/wards', requireFunction(...GUARDIAN_VIEWERS), meValidation.guardianParams, handleValidation, guardians.wards);
 router.post('/:id/guardians', requireFunction(...GUARDIAN_EDITORS), sanitizeBody, meValidation.addGuardian, handleValidation, guardians.add);
 router.delete('/:id/guardians/:guardianId', requireFunction(...GUARDIAN_EDITORS), meValidation.removeGuardian, handleValidation, guardians.remove);
+
+// Grupos de UNA ficha (pestaña Grupos del miembro): ver la ficha + administrar grupos.
+const memberGroupsService = require('../services/memberGroups.service');
+const membersService = require('../services/members.service');
+const ApiResponse = require('../helpers/ApiResponse');
+const asyncHandler = require('../helpers/asyncHandler');
+router.put(
+  '/:id/groups',
+  requireFunction(FUNCTIONS.MANAGE_MEMBER_GROUPS),
+  sanitizeBody,
+  validation.setGroups,
+  handleValidation,
+  asyncHandler(async (req, res) => {
+    const memberId = Number(req.params.id);
+    await membersService.getById(req.club.id, memberId, req.authContext, req.user.id);
+    const data = await memberGroupsService.setMemberGroups(req.club.id, memberId, req.body.groupIds, req.user.id);
+    return ApiResponse.ok(res, data, 'Grupos actualizados.');
+  })
+);
 
 module.exports = router;

@@ -25,7 +25,13 @@ const createMember = [fieldsRule, ...adminFields];
 // nunca los administrativos (estado, usuario, grupos).
 const createMemberSelf = [fieldsRule];
 
-const updateMember = [...memberId, fieldsRule, ...adminFields];
+// `newVersion`: lo editado se guarda como una respuesta nueva de las fichas modificadas (sql/078).
+const updateMember = [...memberId, fieldsRule, ...adminFields, body('newVersion').optional().isBoolean()];
+
+// "En el club": estado y fecha de ingreso (EDIT_MEMBER_MEMBERSHIP, sql/081).
+const membership = [...memberId, ...adminFields.slice(0, 3)];
+
+const formVersion = [...memberId, param('versionId').isInt({ min: 1 }).withMessage('Versión inválida.')];
 
 const linkUser = [...memberId, body('userId').optional({ nullable: true }).isInt({ min: 1 })];
 
@@ -51,4 +57,10 @@ const birthdaySettings = [
 ];
 const birthdayAssignment = [param('userId').isInt({ min: 1 }).withMessage('Usuario inválido.'), ...birthdaySettings];
 
-module.exports = { memberId, createMember, createMemberSelf, updateMember, linkUser, listMembers, birthdaySettings, birthdayAssignment };
+const setGroups = [
+  ...memberId,
+  body('groupIds').isArray().withMessage('Indica los grupos.'),
+  body('groupIds.*').isInt({ min: 1 }).withMessage('Grupo inválido.'),
+];
+
+module.exports = { setGroups, memberId, membership, formVersion, createMember, createMemberSelf, updateMember, linkUser, listMembers, birthdaySettings, birthdayAssignment };

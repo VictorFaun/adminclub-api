@@ -23,7 +23,7 @@ igual, no se rompe nada.
    - En **Authorized JavaScript origins**, agrega TODOS los orígenes desde donde se sirve el
      frontend:
      - Desarrollo local: `http://localhost:8100` (o el puerto que uses con `ionic serve`/`ng serve`).
-     - Producción: `https://adminclub.thedifference.pro` (o el dominio real que uses).
+     - Producción: `https://miclub.thedifference.pro` (o el dominio real que uses).
    - **No hace falta** configurar "Authorized redirect URIs" — este flujo (Google Identity
      Services) no usa redirect, el token se obtiene directo en el navegador.
    - Guarda y copia el **Client ID** (termina en `.apps.googleusercontent.com`). El **Client
@@ -65,7 +65,7 @@ contraseña propia (creadas 100% desde Google).
 
 ## 5. Probar
 
-- **Cuenta de Google nueva** (sin cuenta previa en Admin Club): al iniciar sesión con Google se
+- **Cuenta de Google nueva** (sin cuenta previa en Mi Club): al iniciar sesión con Google se
   crea una cuenta nueva automáticamente, ya verificada, sin necesidad de pasar por el registro
   normal.
 - **Cuenta de Google que coincide con un correo ya registrado** (con contraseña local): al iniciar

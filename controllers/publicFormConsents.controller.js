@@ -50,7 +50,7 @@ const downloadFile = asyncHandler(async (req, res) => {
 /** Público (sin sesión): solo con el formulario activo y el consentimiento activo. */
 const publicDownloadFile = asyncHandler(async (req, res) => {
   const club = await memberApplicationsService.publicClub(req.params.code);
-  const file = await service.getFile(club.id, Number(req.params.consentId), Number(req.params.fileId), { activeOnly: true });
+  const file = await service.getFile(club.id, Number(req.params.consentId), Number(req.params.fileId));
   return sendInline(res, file);
 });
 

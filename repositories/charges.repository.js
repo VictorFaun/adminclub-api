@@ -173,9 +173,17 @@ class ChargesRepository extends BaseRepository {
   /** Nombre CORTO ("primer nombre + primer apellido", `first_name` + `last_name`) — a propósito
    * distinto del nombre completo que usa el resto de la app: esta lista se muestra en contextos
    * apretados (picker de responsables, badges de "pagado a"), ver payments.service.js. */
+  /** `account`: la cuenta del responsable para este cobro o, si no la tiene cargada, la última que
+   * ese mismo responsable cargó en otro cobro del club (es la misma persona: antes el botón «Ver
+   * cuenta» quedaba vacío en los cobros donde no se repitió). */
   async getResponsibleMembers(chargeId, conn = pool) {
     const [rows] = await conn.query(
-      `SELECT crm.member_id, crm.group_id, crm.position, crm.account,
+      `SELECT crm.member_id, crm.group_id, crm.position, COALESCE(crm.account, (
+                SELECT crm2.account FROM charge_responsible_members crm2
+                INNER JOIN charges c2 ON c2.id = crm2.charge_id
+                WHERE crm2.member_id = crm.member_id AND crm2.account IS NOT NULL
+                  AND c2.club_id = (SELECT c3.club_id FROM charges c3 WHERE c3.id = crm.charge_id)
+                ORDER BY crm2.charge_id DESC LIMIT 1)) AS account,
               NULLIF(CONCAT_WS(' ', mp.first_name, mp.last_name), '') AS member_name,
               mg.name AS group_name
        FROM charge_responsible_members crm
@@ -229,7 +237,12 @@ class ChargesRepository extends BaseRepository {
     if (!memberIds.length) return result;
 
     const [wildcardRows] = await conn.query(
-      `SELECT crm.member_id, crm.account, NULLIF(CONCAT_WS(' ', mp.first_name, mp.last_name), '') AS member_name
+      `SELECT crm.member_id, COALESCE(crm.account, (
+                SELECT crm2.account FROM charge_responsible_members crm2
+                INNER JOIN charges c2 ON c2.id = crm2.charge_id
+                WHERE crm2.member_id = crm.member_id AND crm2.account IS NOT NULL
+                  AND c2.club_id = (SELECT c3.club_id FROM charges c3 WHERE c3.id = crm.charge_id)
+                ORDER BY crm2.charge_id DESC LIMIT 1)) AS account, NULLIF(CONCAT_WS(' ', mp.first_name, mp.last_name), '') AS member_name
        FROM charge_responsible_members crm INNER JOIN members m ON m.id = crm.member_id LEFT JOIN member_profiles mp ON mp.member_id = m.id
        WHERE crm.charge_id = ? AND crm.group_id IS NULL ORDER BY crm.position ASC LIMIT 1`,
       [chargeId]
@@ -240,7 +253,12 @@ class ChargesRepository extends BaseRepository {
     }
 
     const [groupRows] = await conn.query(
-      `SELECT mgm.member_id, crm.member_id AS responsible_member_id, crm.account,
+      `SELECT mgm.member_id, crm.member_id AS responsible_member_id, COALESCE(crm.account, (
+                SELECT crm2.account FROM charge_responsible_members crm2
+                INNER JOIN charges c2 ON c2.id = crm2.charge_id
+                WHERE crm2.member_id = crm.member_id AND crm2.account IS NOT NULL
+                  AND c2.club_id = (SELECT c3.club_id FROM charges c3 WHERE c3.id = crm.charge_id)
+                ORDER BY crm2.charge_id DESC LIMIT 1)) AS account,
               NULLIF(CONCAT_WS(' ', mp.first_name, mp.last_name), '') AS responsible_member_name
        FROM charge_responsible_members crm
        INNER JOIN member_group_members mgm ON mgm.group_id = crm.group_id

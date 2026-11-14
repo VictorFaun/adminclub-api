@@ -20,6 +20,18 @@ const paymentScopeRules = [
   body('paymentScope.groupIds.*').optional().isInt({ min: 1 }),
 ];
 
+// Fichas / campos que puede editar (EDIT_MEMBER_FORMS_SCOPED / EDIT_MEMBER_FIELD_VALUES_SCOPED, sql/080).
+const editScopeRules = [
+  body('editScope').optional().isObject().withMessage('editScope debe ser un objeto.'),
+  body('editScope.formIds').optional().isArray(),
+  body('editScope.formIds.*').optional().isInt({ min: 1 }),
+  body('editScope.fieldIds').optional().isArray(),
+  body('editScope.fieldIds.*').optional().isInt({ min: 1 }),
+  // Fichas que puede ver (VIEW_MEMBER_FORM_DATA_SCOPED, sql/081).
+  body('editScope.viewFormIds').optional().isArray(),
+  body('editScope.viewFormIds.*').optional().isInt({ min: 1 }),
+];
+
 const createRole = [
   body('name').trim().notEmpty().withMessage('El nombre del rol es obligatorio.').isLength({ max: 80 }),
   body('description').optional({ nullable: true }).trim().isLength({ max: 255 }),
@@ -28,6 +40,7 @@ const createRole = [
   body('functionCodes.*').isString(),
   ...memberScopeRules,
   ...paymentScopeRules,
+  ...editScopeRules,
 ];
 
 const updateRole = [
@@ -39,6 +52,7 @@ const updateRole = [
   body('functionCodes.*').optional().isString(),
   ...memberScopeRules,
   ...paymentScopeRules,
+  ...editScopeRules,
 ];
 
 module.exports = { roleId, createRole, updateRole };

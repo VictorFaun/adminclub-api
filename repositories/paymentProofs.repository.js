@@ -86,10 +86,11 @@ class PaymentProofsRepository extends BaseRepository {
    * se devuelve el lote COMPLETO para no mostrarlo a medias), `search` (nombre o RUT del miembro),
    * `from`/`to` (fecha de envío, YYYY-MM-DD).
    */
-  async listByClub(clubId, { status, memberIds, groupId, chargeId, search, from, to }, conn = pool) {
+  async listByClub(clubId, { status, memberIds, groupId, chargeId, search, from, to, archived = false }, conn = pool) {
     if (memberIds && !memberIds.length) return [];
     const params = [clubId];
-    let where = 'pp.club_id = ?';
+    // `archived`: true = solo los archivados (de cualquier estado); si no, solo los no archivados.
+    let where = `pp.club_id = ? AND pp.archived_at IS ${archived ? 'NOT NULL' : 'NULL'}`;
     if (status) {
       where += ' AND pp.status = ?';
       params.push(status);
@@ -164,6 +165,31 @@ class PaymentProofsRepository extends BaseRepository {
       params
     );
     return { groups, charges };
+  }
+
+  /** Archiva/desarchiva lotes completos (un pago múltiple se archiva entero) ya revisados, de
+   * miembros dentro de `memberIds` (null = todos). Devuelve cuántos lotes cambió. */
+  async setArchivedBatches(clubId, ids, archived, actorId, memberIds, conn = pool) {
+    if (!ids.length || (memberIds && !memberIds.length)) return 0;
+    const params = [archived ? actorId : null, clubId, clubId, ids];
+    let scope = '';
+    if (memberIds) {
+      scope = 'AND member_id IN (?)';
+      params.push(memberIds);
+    }
+    const [batches] = await conn.query(
+      `SELECT COUNT(DISTINCT batch_uuid) AS total FROM payment_proofs
+       WHERE club_id = ? AND id IN (?) AND status <> 'pending' AND archived_at IS ${archived ? 'NULL' : 'NOT NULL'} ${scope}`,
+      [clubId, ids, ...(memberIds ? [memberIds] : [])]
+    );
+    await conn.query(
+      `UPDATE payment_proofs SET archived_at = ${archived ? 'NOW()' : 'NULL'}, archived_by = ?
+       WHERE club_id = ? AND status <> 'pending' AND batch_uuid IN (
+         SELECT b FROM (SELECT batch_uuid AS b FROM payment_proofs WHERE club_id = ? AND id IN (?) ${scope}) x
+       )`,
+      params
+    );
+    return batches[0].total;
   }
 
   async countPending(clubId, memberIds, conn = pool) {

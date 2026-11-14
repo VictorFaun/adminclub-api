@@ -109,6 +109,11 @@ class InvitationsRepository extends BaseRepository {
     );
   }
 
+  /** Opciones del formulario público (sql/077): texto JSON o null (= las del club). */
+  async setFormSettings(invitationId, json, conn = pool) {
+    await conn.query('UPDATE invitations SET form_settings = ? WHERE id = ?', [json, invitationId]);
+  }
+
   async incrementUse(invitationId, conn = pool) {
     await conn.query('UPDATE invitations SET uses_count = uses_count + 1 WHERE id = ?', [invitationId]);
   }

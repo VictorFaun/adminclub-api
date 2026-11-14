@@ -25,7 +25,7 @@ const reorder = asyncHandler(async (req, res) => {
 });
 
 const addSuggested = asyncHandler(async (req, res) => {
-  const data = await memberFieldsService.addSuggested(req.club.id, req.user.id);
+  const data = await memberFieldsService.addSuggested(req.club.id, req.user.id, undefined, req.body?.formId || null);
   return ApiResponse.ok(res, data, data.added ? `Se agregaron ${data.added} campos sugeridos.` : 'La ficha ya tiene todos los campos sugeridos.');
 });
 

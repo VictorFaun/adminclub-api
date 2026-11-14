@@ -15,7 +15,7 @@ async function start() {
   registerAllCronJobs();
 
   httpServer.listen(env.port, () => {
-    logger.info(`[server] Admin Club API escuchando en el puerto ${env.port} (${env.nodeEnv})`);
+    logger.info(`[server] Mi Club API escuchando en el puerto ${env.port} (${env.nodeEnv})`);
     logger.info(`[server] Prefijo de API: ${env.apiPrefix}`);
   });
 }

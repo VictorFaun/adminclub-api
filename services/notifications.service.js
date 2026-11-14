@@ -146,7 +146,6 @@ class NotificationsService {
           bodyHtml,
           ctaText: ctaUrl ? ctaText || 'Ver más' : undefined,
           ctaUrl,
-          eyebrow,
           preheader,
         })
       : renderPlatformEmail({ title, bodyHtml, ctaText: ctaUrl ? ctaText || 'Ver más' : undefined, ctaUrl, eyebrow, preheader });

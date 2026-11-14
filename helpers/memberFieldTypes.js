@@ -82,7 +82,8 @@ function isFieldVisible(field, values, catalog, sectionCondition = null) {
       const list = Array.isArray(raw) ? raw.map(String) : raw === null || raw === undefined ? [] : [String(raw)];
       if (!list.includes(condition.value)) return false;
     } else {
-      const birthField = catalog.find((f) => f.role === 'birth_date');
+      // Puede haber una fecha de nacimiento por ficha (sql/083): sirve la primera respondida.
+      const birthField = catalog.find((f) => f.role === 'birth_date' && values[f.code]);
       const age = ageAt(birthField ? values[birthField.code] : null);
       if (age === null) continue;
       if (condition.type === 'age_lt' && !(age < condition.value)) return false;
@@ -120,8 +121,6 @@ function normalizeSettings(fieldType, raw, role = null) {
   if (FIELD_WIDTHS.includes(s.width) && fieldType !== 'section') out.width = s.width;
   // Sensible: solo lo ven/editan quienes tienen VIEW_SENSITIVE_MEMBER_FIELDS.
   if (s.sensitive && fieldType !== 'section') out.sensitive = true;
-  // Editable por el propio socio desde "Mi club" (nunca el identificador ni los sensibles; fotos y archivos sí).
-  if (s.selfEditable && !LAYOUT_TYPES.includes(fieldType) && role !== 'identifier' && !out.sensitive) out.selfEditable = true;
   // Condición para mostrarlo (en una sección, vale para todos sus campos).
   const condition = normalizeCondition(s.condition);
   if (condition) out.condition = condition;
@@ -163,18 +162,23 @@ function acceptedMimes(field) {
   return parseSettings(field).formats.flatMap((f) => DOC_FORMATS[f].mimes);
 }
 
-/** Usos especiales: qué tipos admite cada uno. Un uso por club. */
+/**
+ * Usos especiales: qué tipos admite cada uno. Los nombres y el identificador van una sola vez en el
+ * club (en la ficha del identificador, que responden todos). Los `perForm` van una vez por ficha
+ * (sql/083): así se pide, por ejemplo, la fecha de nacimiento solo en las fichas que la necesitan.
+ * El dato del miembro sale de la primera ficha que lo tenga respondido (ver vista member_profiles).
+ */
 const ROLES = {
   first_name: { label: 'Nombre', types: ['text'] },
   middle_name: { label: 'Segundo nombre', types: ['text'] },
   last_name: { label: 'Apellido', types: ['text'] },
   second_last_name: { label: 'Segundo apellido', types: ['text'] },
   identifier: { label: 'Identificador (RUT, DNI…)', types: ['rut', 'text', 'number'] },
-  birth_date: { label: 'Fecha de nacimiento', types: ['date'] },
-  email: { label: 'Correo de contacto', types: ['email'] },
-  phone: { label: 'Teléfono de contacto', types: ['phone'] },
-  birthday_photo: { label: 'Foto para cumpleaños', types: ['image'] },
-  avatar: { label: 'Foto de perfil (avatar)', types: ['image'] },
+  birth_date: { label: 'Fecha de nacimiento', types: ['date'], perForm: true },
+  email: { label: 'Correo de contacto', types: ['email'], perForm: true },
+  phone: { label: 'Teléfono de contacto', types: ['phone'], perForm: true },
+  birthday_photo: { label: 'Foto para cumpleaños', types: ['image'], perForm: true },
+  avatar: { label: 'Foto de perfil (avatar)', types: ['image'], perForm: true },
 };
 
 /** Ficha sugerida: se precarga en cada club nuevo y se puede restaurar desde Configuración. */

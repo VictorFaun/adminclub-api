@@ -28,7 +28,7 @@ const receipt = asyncHandler(async (req, res) => {
 });
 
 const updateProfile = asyncHandler(async (req, res) => {
-  const data = await selfService.updateProfile(...ctx(req), mid(req), { fields: req.body.fields });
+  const data = await selfService.updateProfile(...ctx(req), mid(req), { fields: req.body.fields, newVersion: !!req.body.newVersion });
   return ApiResponse.ok(res, data, 'Ficha actualizada correctamente.');
 });
 

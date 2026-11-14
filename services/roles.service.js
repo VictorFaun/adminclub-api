@@ -2,6 +2,8 @@ const rolesRepository = require('../repositories/roles.repository');
 const functionsRepository = require('../repositories/functions.repository');
 const membersRepository = require('../repositories/members.repository');
 const memberGroupsRepository = require('../repositories/memberGroups.repository');
+const memberFormsRepository = require('../repositories/memberForms.repository');
+const memberFieldsRepository = require('../repositories/memberFields.repository');
 const auditRepository = require('../repositories/audit.repository');
 const AppError = require('../helpers/AppError');
 const { withTransaction } = require('../config/database');
@@ -14,7 +16,8 @@ class RolesService {
     role,
     functionCodes = [],
     memberScope = { memberIds: [], groupIds: [] },
-    paymentScope = { memberIds: [], groupIds: [] }
+    paymentScope = { memberIds: [], groupIds: [] },
+    editScope = { formIds: [], fieldIds: [], viewFormIds: [] }
   ) {
     return {
       id: role.id,
@@ -28,6 +31,8 @@ class RolesService {
       functions: functionCodes,
       memberScope,
       paymentScope,
+      // Fichas y campos que puede editar (sql/080) y fichas que puede ver (`viewFormIds`, sql/081).
+      editScope,
       createdAt: role.created_at,
     };
   }
@@ -110,7 +115,8 @@ class RolesService {
           r,
           await rolesRepository.getFunctionCodes(r.id),
           await rolesRepository.getMemberScope(r.id),
-          await rolesRepository.getPaymentScope(r.id)
+          await rolesRepository.getPaymentScope(r.id),
+          await rolesRepository.getEditScope(r.id)
         )
       )
     );
@@ -124,21 +130,36 @@ class RolesService {
   async getById(roleId, clubId) {
     const role = await rolesRepository.findById(roleId);
     if (!role || role.club_id !== clubId) throw AppError.notFound('Rol no encontrado.');
-    const [functionCodes, memberScope, paymentScope] = await Promise.all([
+    const [functionCodes, memberScope, paymentScope, editScope] = await Promise.all([
       rolesRepository.getFunctionCodes(roleId),
       rolesRepository.getMemberScope(roleId),
       rolesRepository.getPaymentScope(roleId),
+      rolesRepository.getEditScope(roleId),
     ]);
-    return this.toDto(role, functionCodes, memberScope, paymentScope);
+    return this.toDto(role, functionCodes, memberScope, paymentScope, editScope);
   }
 
-  async create(clubId, { name, description, color, functionCodes, memberScope, paymentScope }, actorId) {
+  /** Fichas y campos del club (descarta los ajenos y repetidos). `null` = no vino. */
+  async _resolveEditScope(clubId, scope) {
+    if (!scope) return null;
+    const [forms, fields] = await Promise.all([memberFormsRepository.findByClub(clubId), memberFieldsRepository.findByClub(clubId)]);
+    const formIds = new Set(forms.map((f) => f.id));
+    const fieldIds = new Set(fields.map((f) => f.id));
+    return {
+      formIds: [...new Set((scope.formIds ?? []).map(Number))].filter((id) => formIds.has(id)),
+      fieldIds: [...new Set((scope.fieldIds ?? []).map(Number))].filter((id) => fieldIds.has(id)),
+      viewFormIds: [...new Set((scope.viewFormIds ?? []).map(Number))].filter((id) => formIds.has(id)),
+    };
+  }
+
+  async create(clubId, { name, description, color, functionCodes, memberScope, paymentScope, editScope }, actorId) {
     const existing = await rolesRepository.findByNameInScope(name, clubId);
     if (existing) throw AppError.conflict('Ya existe un rol con este nombre en el club.');
 
     const validFunctions = await this._resolveFunctionIds(functionCodes);
     const resolvedMemberScope = await this._resolveScope(clubId, memberScope);
     const resolvedPaymentScope = await this._resolveScope(clubId, paymentScope);
+    const resolvedEditScope = await this._resolveEditScope(clubId, editScope);
 
     const roleId = await withTransaction(async (conn) => {
       const id = await rolesRepository.createRole(
@@ -148,6 +169,7 @@ class RolesService {
       await rolesRepository.setFunctions(id, validFunctions.ids, conn);
       if (resolvedMemberScope) await rolesRepository.setMemberScope(id, resolvedMemberScope.memberIds, resolvedMemberScope.groupIds, conn);
       if (resolvedPaymentScope) await rolesRepository.setPaymentScope(id, resolvedPaymentScope.memberIds, resolvedPaymentScope.groupIds, conn);
+      if (resolvedEditScope) await rolesRepository.setEditScope(id, resolvedEditScope.formIds, resolvedEditScope.fieldIds, conn, resolvedEditScope.viewFormIds);
       return id;
     });
 
@@ -156,7 +178,7 @@ class RolesService {
     return this.getById(roleId, clubId);
   }
 
-  async update(roleId, clubId, { name, description, color, functionCodes, memberScope, paymentScope }, actorId) {
+  async update(roleId, clubId, { name, description, color, functionCodes, memberScope, paymentScope, editScope }, actorId) {
     const role = await rolesRepository.findById(roleId);
     if (!role || role.club_id !== clubId) throw AppError.notFound('Rol no encontrado.');
 
@@ -177,6 +199,8 @@ class RolesService {
     const previousPaymentScope = paymentScope !== undefined ? await rolesRepository.getPaymentScope(roleId) : undefined;
     const resolvedMemberScope = memberScope !== undefined ? await this._resolveScope(clubId, memberScope) : undefined;
     const resolvedPaymentScope = paymentScope !== undefined ? await this._resolveScope(clubId, paymentScope) : undefined;
+    const previousEditScope = editScope !== undefined ? await rolesRepository.getEditScope(roleId) : undefined;
+    const resolvedEditScope = editScope !== undefined ? await this._resolveEditScope(clubId, editScope) : undefined;
 
     await withTransaction(async (conn) => {
       if (Object.keys(updates).length) await rolesRepository.updateById(roleId, updates, conn);
@@ -190,6 +214,7 @@ class RolesService {
       if (resolvedPaymentScope !== undefined) {
         await rolesRepository.setPaymentScope(roleId, resolvedPaymentScope.memberIds, resolvedPaymentScope.groupIds, conn);
       }
+      if (resolvedEditScope) await rolesRepository.setEditScope(roleId, resolvedEditScope.formIds, resolvedEditScope.fieldIds, conn, resolvedEditScope.viewFormIds);
     });
 
     const changes = buildDiff({
@@ -201,6 +226,9 @@ class RolesService {
       memberScopeGroupIds: resolvedMemberScope !== undefined ? diffArray(previousMemberScope.groupIds, resolvedMemberScope.groupIds) : undefined,
       paymentScopeIds: resolvedPaymentScope !== undefined ? diffArray(previousPaymentScope.memberIds, resolvedPaymentScope.memberIds) : undefined,
       paymentScopeGroupIds: resolvedPaymentScope !== undefined ? diffArray(previousPaymentScope.groupIds, resolvedPaymentScope.groupIds) : undefined,
+      editScopeFormIds: resolvedEditScope ? diffArray(previousEditScope.formIds, resolvedEditScope.formIds) : undefined,
+      editScopeFieldIds: resolvedEditScope ? diffArray(previousEditScope.fieldIds, resolvedEditScope.fieldIds) : undefined,
+      viewScopeFormIds: resolvedEditScope ? diffArray(previousEditScope.viewFormIds, resolvedEditScope.viewFormIds) : undefined,
     });
     if (changes) {
       await auditRepository.logAction({ userId: actorId, clubId, action: 'ROLE_UPDATED', entityType: 'role', entityId: roleId, changes });
@@ -230,10 +258,11 @@ class RolesService {
     const original = await rolesRepository.findById(roleId);
     if (!original || original.club_id !== clubId) throw AppError.notFound('Rol no encontrado.');
 
-    const [functionCodes, memberScope, paymentScope] = await Promise.all([
+    const [functionCodes, memberScope, paymentScope, editScope] = await Promise.all([
       rolesRepository.getFunctionCodes(roleId),
       rolesRepository.getMemberScope(roleId),
       rolesRepository.getPaymentScope(roleId),
+      rolesRepository.getEditScope(roleId),
     ]);
     let newName = `${original.name} (copia)`;
     let suffix = 2;
@@ -245,7 +274,7 @@ class RolesService {
 
     return this.create(
       clubId,
-      { name: newName, description: original.description, color: original.color, functionCodes, memberScope, paymentScope },
+      { name: newName, description: original.description, color: original.color, functionCodes, memberScope, paymentScope, editScope },
       actorId
     );
   }

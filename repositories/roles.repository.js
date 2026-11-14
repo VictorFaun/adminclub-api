@@ -76,6 +76,25 @@ class RolesRepository extends BaseRepository {
     }
   }
 
+  /** Fichas y campos que un rol puede editar (EDIT_MEMBER_FORMS_SCOPED / EDIT_MEMBER_FIELD_VALUES_SCOPED, sql/080)
+   * y fichas que puede ver (VIEW_MEMBER_FORM_DATA_SCOPED, sql/081). */
+  async getEditScope(roleId, conn = pool) {
+    const [formRows] = await conn.query('SELECT form_id FROM role_member_form_scope WHERE role_id = ?', [roleId]);
+    const [fieldRows] = await conn.query('SELECT field_id FROM role_member_field_scope WHERE role_id = ?', [roleId]);
+    const [viewRows] = await conn.query('SELECT form_id FROM role_member_view_form_scope WHERE role_id = ?', [roleId]);
+    return { formIds: formRows.map((r) => r.form_id), fieldIds: fieldRows.map((r) => r.field_id), viewFormIds: viewRows.map((r) => r.form_id) };
+  }
+
+  /** `viewFormIds`: fichas que puede VER (VIEW_MEMBER_FORM_DATA_SCOPED, sql/081). */
+  async setEditScope(roleId, formIds, fieldIds, conn = pool, viewFormIds = []) {
+    await conn.query('DELETE FROM role_member_form_scope WHERE role_id = ?', [roleId]);
+    await conn.query('DELETE FROM role_member_field_scope WHERE role_id = ?', [roleId]);
+    if (formIds.length) await conn.query('INSERT INTO role_member_form_scope (role_id, form_id) VALUES ?', [formIds.map((id) => [roleId, id])]);
+    if (fieldIds.length) await conn.query('INSERT INTO role_member_field_scope (role_id, field_id) VALUES ?', [fieldIds.map((id) => [roleId, id])]);
+    await conn.query('DELETE FROM role_member_view_form_scope WHERE role_id = ?', [roleId]);
+    if (viewFormIds.length) await conn.query('INSERT INTO role_member_view_form_scope (role_id, form_id) VALUES ?', [viewFormIds.map((id) => [roleId, id])]);
+  }
+
   /** Scope de miembros/grupos de un rol con VIEW_PAYMENTS_SCOPED (ver payments.service.js) —
    * tablas paralelas a las de arriba, concepto distinto ("de quién puedo ver la plata"). */
   async getPaymentScope(roleId, conn = pool) {

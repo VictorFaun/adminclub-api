@@ -189,7 +189,7 @@ function drawPhotoPlaceholder(ctx, w, h) {
 function textForElement(el, data) {
   switch (el.variant) {
     case 'name':
-      return data.name;
+      return el.shortName && data.shortName ? data.shortName : data.name;
     case 'age':
       return data.age !== null && data.age !== undefined ? String(data.age) : '';
     case 'date':

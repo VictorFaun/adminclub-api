@@ -125,6 +125,15 @@ const revokeSession = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, null, 'Sesión cerrada correctamente.');
 });
 
+const getSessionLimit = asyncHandler(async (req, res) => {
+  return ApiResponse.ok(res, await authService.getSessionLimit(req.user.id), 'Límite de sesiones obtenido.');
+});
+
+const setSessionLimit = asyncHandler(async (req, res) => {
+  const data = await authService.setSessionLimit(req.user.id, req.body.maxSessions, req.sessionId, { ipAddress: req.ip, userAgent: req.headers['user-agent'] });
+  return ApiResponse.ok(res, data, data.closed ? `Límite guardado. Se cerraron ${data.closed} sesiones antiguas.` : 'Límite guardado.');
+});
+
 const revokeOtherSessions = asyncHandler(async (req, res) => {
   const closed = await authService.revokeOtherSessions(req.user.id, req.sessionId, { ipAddress: req.ip, userAgent: req.headers['user-agent'] });
   return ApiResponse.ok(res, { closed }, closed ? 'Se cerraron las demás sesiones.' : 'No había otras sesiones abiertas.');
@@ -152,4 +161,6 @@ module.exports = {
   listSessions,
   revokeSession,
   revokeOtherSessions,
+  getSessionLimit,
+  setSessionLimit,
 };

@@ -29,7 +29,7 @@ En **API Keys → Create API Key**, con permiso de "Sending access" es suficient
 ```
 RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxxx
 EMAIL_FROM=no-reply@tudominio.cl
-EMAIL_FROM_NAME=Admin Club
+EMAIL_FROM_NAME=Mi Club
 ```
 
 `EMAIL_FROM` **debe** ser una dirección del dominio que verificaste en el paso 1 — Resend rechaza
@@ -43,7 +43,7 @@ el envío si el remitente no pertenece a un dominio verificado en tu cuenta.
 - **Bienvenida** (al registrarse por correo o al crear una cuenta nueva con Google) —
   `sendWelcomeEmail`.
 
-Los tres usan branding genérico de Admin Club (`renderPlatformEmail` en
+Los tres usan branding genérico de Mi Club (`renderPlatformEmail` en
 `api/helpers/emailTemplate.js`) — son acciones a nivel de **usuario**, no de un club específico
 (un usuario puede pertenecer a varios clubes, así que no hay un logo/color único que usar ahí).
 

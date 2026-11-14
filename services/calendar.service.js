@@ -371,7 +371,8 @@ class CalendarService {
         if (date < from || date > to || year < by) continue;
         items.push({
           memberId: m.id,
-          name: [m.first_name, m.middle_name, m.last_name, m.second_last_name].filter(Boolean).join(' ') || `Miembro #${m.id}`,
+          // Primer nombre y primer apellido (el nombre completo es muy largo para el calendario).
+          name: [m.first_name, m.last_name].filter(Boolean).join(' ') || `Miembro #${m.id}`,
           date,
           age: year - by,
         });

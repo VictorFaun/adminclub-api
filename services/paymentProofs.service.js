@@ -23,6 +23,7 @@ const permissionService = require('./permission.service');
 const membersRepository = require('../repositories/members.repository');
 const memberApplicationsRepository = require('../repositories/memberApplications.repository');
 const logger = require('../helpers/logger');
+const publicPageService = require('./publicPage.service');
 
 const MAX_PENDING_PER_INSTANCE = 3;
 /** Tope de períodos en un mismo comprobante (pago múltiple). */
@@ -31,7 +32,7 @@ const PUBLIC_PAYMENTS_KEY = 'public_payments_enabled';
 /** Mostrar también la asistencia a entrenamientos en la página pública (solo si está activa). */
 const PUBLIC_ATTENDANCE_KEY = 'public_payments_show_attendance';
 /** Últimas marcas de asistencia que se muestran en la página pública. */
-const PUBLIC_RECENT_SESSIONS = 10;
+const PUBLIC_RECENT_SESSIONS = 60;
 /** Un período pendiente que vence en más de estos días (y no está atrasado) todavía no se ofrece
  * como "por pagar" en la lista principal. */
 const DUE_SOON_DAYS = 45;
@@ -64,22 +65,25 @@ const parseInstanceIds = (raw) => {
 class PaymentProofsService {
   // ------------------------------------------------------------------ público (sin sesión)
 
+  /** ¿Está la sección de pagos de la página pública? (interruptor general + Tesorería). */
   async isPublicPaymentsEnabled(clubId) {
-    const settings = await settingsRepository.findAllByClub(clubId);
-    return settings[PUBLIC_PAYMENTS_KEY] === '1';
+    return (await publicPageService.activeSections(clubId)).treasury;
   }
 
+  /** Club de la página pública: activo, con la página encendida y alguna sección activa. */
   async _publicClub(code) {
     const club = await clubsRepository.findByPublicCode(String(code || '').slice(0, 40));
-    if (!club || club.status !== CLUB_STATUS.ACTIVE || !(await this.isPublicPaymentsEnabled(club.id))) {
-      throw AppError.notFound('Esta página de pagos no está disponible.');
-    }
+    const sections = club && club.status === CLUB_STATUS.ACTIVE ? await publicPageService.activeSections(club.id) : null;
+    if (!sections?.any) throw AppError.notFound('Esta página no está disponible.');
+    club.publicSections = sections;
     return club;
   }
 
   async getPublicClub(code) {
     const club = await this._publicClub(code);
     return {
+      // Qué pestañas tiene la página (las fichas, con su nombre, salen al consultar).
+      sections: { treasury: club.publicSections.treasury, attendance: club.publicSections.attendance, forms: club.publicSections.formIds.length > 0 },
       name: club.name,
       description: club.description,
       logoUrl: toAbsoluteMediaUrl(club.logo_url),
@@ -165,8 +169,21 @@ class PaymentProofsService {
     const club = await this._publicClub(code);
     const member = await this._findByIdentifier(club.id, rut);
     if (!member) return { found: false };
-    const attendance = (await this._publicSettings(club.id)).showAttendance ? await this._publicAttendance(club.id, member.id) : null;
-    return { found: true, memberFirstName: member.first_name || '', ...(await this.payableForMember(member)), attendance };
+    const s = club.publicSections;
+    const [payable, attendance, forms] = await Promise.all([
+      s.treasury ? this.payableForMember(member) : { items: [], recurring: [] },
+      s.attendance ? this._publicAttendance(club.id, member.id) : null,
+      publicPageService.formsForMember(club.id, member.id, s.formIds),
+    ]);
+    return {
+      found: true,
+      memberFirstName: member.first_name || '',
+      sections: { treasury: s.treasury, attendance: s.attendance },
+      ...payable,
+      attendance,
+      // Una pestaña por ficha publicada que la persona responde: [{ id, name, fields, values }].
+      forms,
+    };
   }
 
   /** Asistencia que ve la persona en la página pública: % total, por entrenamiento y sus últimas marcas. */
@@ -181,7 +198,8 @@ class PaymentProofsService {
       .sort((a, b) => b.sessionDate.localeCompare(a.sessionDate))
       .slice(0, PUBLIC_RECENT_SESSIONS)
       .map((i) => ({ trainingName: i.trainingName, trainingColor: i.trainingColor, sessionDate: i.sessionDate, displayStatus: i.displayStatus }));
-    return { summary, trainings, recent };
+    const count = (st) => items.filter((i) => i.displayStatus === st).length;
+    return { summary: { ...summary, absent: summary.marked - summary.attended, frozen: count('frozen'), notApplicable: count('not_applicable') }, trainings, recent };
   }
 
   async _publicSettings(clubId) {
@@ -237,6 +255,8 @@ class PaymentProofsService {
     let member;
     try {
       const club = await this._publicClub(code);
+      // Enviar comprobantes es parte de la sección Tesorería.
+      if (!club.publicSections.treasury) throw AppError.notFound('Esta página no recibe pagos.');
       member = await this._findByIdentifier(club.id, rut);
       if (!member) throw AppError.notFound('No encontramos información para ese RUT.');
     } catch (error) {
@@ -411,7 +431,24 @@ class PaymentProofsService {
     };
   }
 
-  async list(clubId, { status, groupId, chargeId, search, from, to }, actorId, authContext) {
+  /** Archiva (o desarchiva) comprobantes ya revisados (por lote): salen de Aprobados/Rechazados. */
+  async archive(clubId, ids, archived, actorId, authContext) {
+    const memberIds = await paymentsService.getVisibleMemberIds(authContext, actorId, clubId);
+    const changed = await paymentProofsRepository.setArchivedBatches(clubId, ids.map(Number), archived, actorId, memberIds);
+    if (changed) {
+      await auditRepository.logAction({
+        userId: actorId,
+        clubId,
+        action: archived ? 'PAYMENT_PROOFS_ARCHIVED' : 'PAYMENT_PROOFS_UNARCHIVED',
+        entityType: 'payment_proof',
+        entityId: null,
+        changes: { ids: ids.map(Number), count: changed },
+      });
+    }
+    return { changed };
+  }
+
+  async list(clubId, { status, groupId, chargeId, search, from, to, archived }, actorId, authContext) {
     const memberIds = await paymentsService.getVisibleMemberIds(authContext, actorId, clubId);
     const rows = await paymentProofsRepository.listByClub(clubId, {
       status,
@@ -421,6 +458,7 @@ class PaymentProofsService {
       search: search ? String(search).trim().slice(0, 100) : null,
       from: from || null,
       to: to || null,
+      archived: archived === true || archived === 'true' || archived === '1',
     });
     const accounts = rows.length ? await treasuryAccountsRepository.findByClub(clubId) : [];
     return rows.map((r) => this._toDto(r, accounts));

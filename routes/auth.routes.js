@@ -1,4 +1,5 @@
 const router = require('express').Router();
+const { body } = require('express-validator');
 const controller = require('../controllers/auth.controller');
 const validation = require('../validations/auth.validation');
 const { handleValidation, sanitizeBody } = require('../middlewares/validation.middleware');
@@ -21,6 +22,15 @@ router.post('/logout-all', authMiddleware, controller.logoutAll);
 
 // Sesiones de la cuenta por dispositivo (Perfil → Sesiones).
 router.get('/sessions', authMiddleware, controller.listSessions);
+// Máximo de sesiones abiertas a la vez (Perfil → Sesiones). Antes de "/sessions/:id".
+router.get('/sessions/limit', authMiddleware, controller.getSessionLimit);
+router.put(
+  '/sessions/limit',
+  authMiddleware,
+  [body('maxSessions').isInt({ min: 1, max: 50 }).withMessage('Elige entre 1 y 50 sesiones.').toInt()],
+  handleValidation,
+  controller.setSessionLimit
+);
 router.post('/sessions/revoke-others', authMiddleware, controller.revokeOtherSessions);
 router.delete('/sessions/:id', authMiddleware, validation.sessionId, handleValidation, controller.revokeSession);
 

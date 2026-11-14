@@ -84,6 +84,7 @@ class PermissionService {
     }
 
     return {
+      userId,
       isSuperAdmin,
       globalRoles: globalRoleCodes,
       roles: roles.map((r) => ({ id: r.id, name: r.name, scope: r.scope, color: r.color })),

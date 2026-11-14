@@ -7,7 +7,9 @@ const membersService = require('./members.service');
 const memberFormsService = require('./memberForms.service');
 const AppError = require('../helpers/AppError');
 const { readFirstSheet } = require('../helpers/excel');
-const { canSeeSensitive } = require('../helpers/sensitiveFields');
+const { canSeeSensitive, hiddenFieldsOf, formViewScope } = require('../helpers/sensitiveFields');
+const permissionService = require('./permission.service');
+const { FUNCTIONS } = require('../config/constants');
 const { UPLOAD_TYPES, LAYOUT_TYPES, parseSettings, parseOptions } = require('../helpers/memberFieldTypes');
 const { toDateOnly } = require('../helpers/membership');
 
@@ -150,7 +152,8 @@ class MemberSpreadsheetService {
       status: query.status,
       groupId: query.groupId ? Number(query.groupId) : null,
       formId,
-      linked: query.linked,
+      // Filtrar por cuenta vinculada es verla (sql/081).
+      linked: permissionService.hasAnyFunction(authContext, [FUNCTIONS.VIEW_MEMBER_ACCOUNT, FUNCTIONS.LINK_MEMBER_USER]) ? query.linked : undefined,
       memberIds: access.full ? null : access.memberIds,
       ...filters,
     });
@@ -162,14 +165,20 @@ class MemberSpreadsheetService {
       memberMembershipsRepository.findByMembers(ids),
     ]);
     const formName = new Map(forms.map((f) => [f.id, f.name]));
-    const ordered = await this._orderedFields(clubId, canSeeSensitive(authContext), formId ? [formId] : null);
-    const { fields, groups } = await this._groupByForms(clubId, ordered, formId ? [formId] : forms.map((f) => f.id));
+    // Solo los campos de las fichas que puede ver, y grupos / ingreso con su permiso (sql/081).
+    const hidden = new Set((await hiddenFieldsOf(clubId, authContext)).map((f) => f.id));
+    const scope = await formViewScope(clubId, authContext);
+    const ordered = (await this._orderedFields(clubId, canSeeSensitive(authContext), formId ? [formId] : null)).filter((f) => !hidden.has(f.id));
+    const shownForms = formId ? [formId] : forms.map((f) => f.id).filter((id) => scope.all || scope.formIds.includes(id));
+    const { fields, groups } = await this._groupByForms(clubId, ordered, shownForms);
+    const seeGroups = permissionService.hasAnyFunction(authContext, [FUNCTIONS.VIEW_MEMBER_GROUPS, FUNCTIONS.MANAGE_MEMBER_GROUPS]);
+    const seeJoined = permissionService.hasAnyFunction(authContext, [FUNCTIONS.VIEW_MEMBER_MEMBERSHIP, FUNCTIONS.EDIT_MEMBER_MEMBERSHIP]);
     const columns = [
       { header: 'Nombre completo', width: 30 },
       ...fields.map((f) => ({ header: f.label, type: f.field_type === 'date' ? 'date' : undefined })),
       { header: STATUS_COL, width: 10 },
-      { header: GROUPS_COL, width: 24 },
-      { header: JOINED_COL, type: 'date', width: 14 },
+      ...(seeGroups ? [{ header: GROUPS_COL, width: 24 }] : []),
+      ...(seeJoined ? [{ header: JOINED_COL, type: 'date', width: 14 }] : []),
     ];
     const data = rows.map((m) => {
       const byField = new Map((valuesByMember[m.id] || []).map((v) => [v.field_id, v.value]));
@@ -178,13 +187,13 @@ class MemberSpreadsheetService {
         membersService._fullName(m),
         ...fields.map((f) => this._cellValue(f, byField.get(f.id))),
         m.status === 'active' ? 'Activo' : 'Inactivo',
-        (groupsByMember[m.id] || []).map((g) => g.name).join(', '),
-        joined ? new Date(`${toDateOnly(joined)}T12:00:00Z`) : null,
+        ...(seeGroups ? [(groupsByMember[m.id] || []).map((g) => g.name).join(', ')] : []),
+        ...(seeJoined ? [joined ? new Date(`${toDateOnly(joined)}T12:00:00Z`) : null] : []),
       ];
     });
     const sheetName = formId && formName.has(formId) ? formName.get(formId).slice(0, 31) : 'Miembros';
     // Fila de grupos: a qué ficha(s) pertenece cada columna de datos.
-    const sheetGroups = groups ? [{ label: '', span: 1 }, ...groups, { label: '', span: 3 }] : null;
+    const sheetGroups = groups ? [{ label: '', span: 1 }, ...groups, { label: '', span: 1 + (seeGroups ? 1 : 0) + (seeJoined ? 1 : 0) }] : null;
     return { name: sheetName, columns, rows: data, groups: sheetGroups, freezeColumns: 1 };
   }
 
@@ -196,7 +205,9 @@ class MemberSpreadsheetService {
   async templateSheets(clubId, authContext, formIds = []) {
     const forms = await memberFormsRepository.findByClub(clubId);
     const chosen = formIds.length ? forms.filter((f) => formIds.includes(f.id)) : forms.filter((f) => f.is_default);
-    const target = chosen.length ? chosen : forms.slice(0, 1);
+    // Con la ficha del Identificador siempre (ver memberForms.service.js#withIdentifierForm).
+    const targetIds = await memberFormsService.withIdentifierForm(clubId, (chosen.length ? chosen : forms.slice(0, 1)).map((f) => f.id));
+    const target = forms.filter((f) => targetIds.includes(f.id));
     const ordered = await this._orderedFields(clubId, canSeeSensitive(authContext), target.map((f) => f.id));
     const { fields, groups: formGroups } = await this._groupByForms(clubId, ordered, target.map((f) => f.id));
     const formsByField = await this._formsByField(clubId);
@@ -258,7 +269,7 @@ class MemberSpreadsheetService {
     const catalogForHeaders = await memberFieldsRepository.findByClub(clubId);
     for (const f of catalogForHeaders) knownHeaders.add(norm(f.label)).add(norm(f.code));
     const isHeaderRow = (texts) => texts.some((t) => t && knownHeaders.has(norm(t)));
-    const { headers, rows } = await readFirstSheet(buffer, { isHeaderRow }).catch(() => {
+    const { headers, rows, groupRow } = await readFirstSheet(buffer, { isHeaderRow }).catch(() => {
       throw AppError.badRequest('No se pudo leer el archivo. Sube la planilla en formato .xlsx.');
     });
     if (!rows.length) throw AppError.badRequest('La planilla no tiene filas con datos.');
@@ -270,29 +281,49 @@ class MemberSpreadsheetService {
     const groups = await memberGroupsRepository.findOptions(clubId);
     const forms = await memberFormsRepository.findByClub(clubId);
     const chosen = formIds.length ? forms.filter((f) => formIds.includes(f.id)).map((f) => f.id) : [];
-    const defaultFormIds = chosen.length ? chosen : await memberFormsService.defaultIds(clubId);
+    const defaultFormIds = await memberFormsService.withIdentifierForm(clubId, chosen.length ? chosen : await memberFormsService.defaultIds(clubId));
     const byForm = await memberFormsRepository.fieldIdsByForm(clubId);
 
-    // Columna → campo (por nombre o código; sin importar tildes, mayúsculas ni "*").
-    const mapping = headers.map((h) => {
+    // Columna → campo (por nombre o código; sin importar tildes, mayúsculas ni "*"). Cada ficha
+    // tiene sus propios campos (sql/079) y dos pueden tener uno con el mismo nombre: manda la fila
+    // de fichas sobre el encabezado (la de la planilla de ejemplo / exportada) y, si no viene, el
+    // orden de las fichas elegidas y después el de las demás.
+    const formOfField = new Map();
+    for (const form of forms) for (const id of byForm[form.id] || []) formOfField.set(id, form.id);
+    const rank = new Map([...defaultFormIds, ...forms.map((f) => f.id).filter((id) => !defaultFormIds.includes(id))].map((id, i) => [id, i]));
+    const candidates = [...fields].sort((a, b) => (rank.get(formOfField.get(a.id)) ?? 999) - (rank.get(formOfField.get(b.id)) ?? 999));
+    const used = new Set();
+    const mapping = headers.map((h, i) => {
       const n = norm(h);
       if (!n) return null;
       if (n === norm(FORMS_COL)) return { kind: 'forms' };
       if (n === norm(STATUS_COL)) return { kind: 'status' };
       if (n === norm(GROUPS_COL)) return { kind: 'groups' };
       if (n === norm(JOINED_COL)) return { kind: 'joined' };
-      const field = fields.find((f) => norm(f.label) === n || norm(f.code) === n);
+      const groupForm = groupRow?.[i] ? forms.find((f) => norm(f.name) === norm(groupRow[i])) : null;
+      const pool = groupForm ? candidates.filter((f) => formOfField.get(f.id) === groupForm.id) : candidates;
+      // En el orden de prioridad (fichas elegidas primero), por nombre o código.
+      const field = pool.find((f) => !used.has(f.id) && (norm(f.label) === n || norm(f.code) === n));
+      if (field) used.add(field.id);
       return field ? { kind: 'field', field } : null;
     });
     const unknownColumns = headers.filter((h, i) => h && !mapping[i]);
     if (!mapping.some((m) => m?.kind === 'field')) throw AppError.badRequest('Ninguna columna coincide con los campos de la ficha. Descarga la planilla de ejemplo.');
 
     const identifierField = catalog.find((f) => f.role === 'identifier');
+    // Nombre para el resumen: el campo con ese uso o, si la fila es de otra ficha, el de igual nombre.
+    let rowFields = {};
+    const nameFrom = (role) => {
+      const f = catalog.find((x) => x.role === role);
+      if (!f) return null;
+      return rowFields[f.code] || catalog.filter((x) => x.id !== f.id && norm(x.label) === norm(f.label)).map((x) => rowFields[x.code]).find(Boolean) || null;
+    };
     const seenIdentifiers = new Map();
     const formName = new Map(forms.map((f) => [f.id, f.name]));
     const results = [];
     for (const { rowNumber, values } of rows) {
       const data = { fields: {}, status: 'active', groupIds: [], joinedOn: null, formIds: null };
+      rowFields = data.fields;
       const problems = [];
       mapping.forEach((m, i) => {
         if (!m) return;
@@ -332,20 +363,23 @@ class MemberSpreadsheetService {
       });
 
       // Fichas de la fila (vacía = las por defecto) y datos que no son de ellas.
-      const rowFormIds = data.formIds?.length ? [...new Set(data.formIds)] : defaultFormIds;
+      const rowFormIds = data.formIds?.length ? await memberFormsService.withIdentifierForm(clubId, [...new Set(data.formIds)]) : defaultFormIds;
       data.formIds = rowFormIds;
       const allowed = new Set(rowFormIds.flatMap((id) => byForm[id] || []));
       const outside = fields.filter((f) => Object.prototype.hasOwnProperty.call(data.fields, f.code) && !allowed.has(f.id));
       if (outside.length) {
         const names = rowFormIds.map((id) => formName.get(id)).join(', ') || 'ninguna';
-        problems.push(`${outside.map((f) => `"${f.label}"`).join(', ')} no ${outside.length === 1 ? 'es' : 'son'} de las fichas elegidas (${names}): elige también su ficha al importar o deja ${outside.length === 1 ? 'esa celda vacía' : 'esas celdas vacías'}.`);
+        problems.push(`${outside.map((f) => `"${f.label}" (${formName.get(formOfField.get(f.id)) ?? 'sin ficha'})`).join(', ')} no ${outside.length === 1 ? 'es' : 'son'} de las fichas elegidas (${names}): elige también su ficha al importar o deja ${outside.length === 1 ? 'esa celda vacía' : 'esas celdas vacías'}.`);
       }
 
-      // Identificador repetido dentro de la misma planilla.
-      if (identifierField && data.fields[identifierField.code]) {
-        const key = String(data.fields[identifierField.code]).replace(/\./g, '').toUpperCase();
-        if (seenIdentifiers.has(key)) problems.push(`${identifierField.label} repetido (también en la fila ${seenIdentifiers.get(key)}).`);
-        else seenIdentifiers.set(key, rowNumber);
+      // Identificador (el del campo con ese uso o, si la fila es de otra ficha, su campo igual):
+      // repetido en la planilla o de alguien que ya es miembro.
+      const { value: identifier } = await membersService.identifierFrom(clubId, data.fields);
+      if (identifierField && identifier) {
+        if (seenIdentifiers.has(identifier)) problems.push(`${identifierField.label} repetido (también en la fila ${seenIdentifiers.get(identifier)}).`);
+        else seenIdentifiers.set(identifier, rowNumber);
+        const existing = await membersService.findByIdentifier(clubId, data.fields);
+        if (existing) problems.push(`Ya existe un miembro con ese ${identifierField.label} (${membersService._fullName(existing)}).`);
       }
 
       if (!problems.length) {
@@ -356,10 +390,7 @@ class MemberSpreadsheetService {
           problems.push(e.message);
         }
       }
-      const name = membersService._fullName({
-        first_name: data.fields[catalog.find((f) => f.role === 'first_name')?.code],
-        last_name: data.fields[catalog.find((f) => f.role === 'last_name')?.code],
-      });
+      const name = membersService._fullName({ first_name: nameFrom('first_name'), last_name: nameFrom('last_name') });
       const formsText = rowFormIds.map((id) => formName.get(id)).filter(Boolean).join(', ');
       if (problems.length) {
         results.push({ row: rowNumber, name, forms: formsText, ok: false, errors: problems });

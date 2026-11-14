@@ -111,14 +111,32 @@ class MembersRepository extends BaseRepository {
 
   // --- Documentos adjuntos (privados) ---
 
+  /** Documentos vigentes de la ficha (sin los archivados, que solo quedan en versiones anteriores). */
   async findDocuments(memberId, conn = pool) {
     const [rows] = await conn.query(
       `SELECT d.*, u.username AS uploaded_by_username FROM member_documents d
        LEFT JOIN users u ON u.id = d.uploaded_by
-       WHERE d.member_id = ? ORDER BY d.created_at DESC`,
+       WHERE d.member_id = ? AND d.archived_at IS NULL ORDER BY d.created_at DESC`,
       [memberId]
     );
     return rows;
+  }
+
+  /** Documentos por id (vigentes o archivados), para mostrar una versión anterior de una ficha. */
+  async findDocumentsByIds(memberId, ids, conn = pool) {
+    if (!ids.length) return [];
+    const [rows] = await conn.query(
+      `SELECT d.*, u.username AS uploaded_by_username FROM member_documents d
+       LEFT JOIN users u ON u.id = d.uploaded_by
+       WHERE d.member_id = ? AND d.id IN (?) ORDER BY d.created_at DESC`,
+      [memberId, ids]
+    );
+    return rows;
+  }
+
+  async setDocumentsArchived(ids, archived, conn = pool) {
+    if (!ids.length) return;
+    await conn.query(`UPDATE member_documents SET archived_at = ${archived ? 'NOW()' : 'NULL'} WHERE id IN (?)`, [ids]);
   }
 
   async findDocument(documentId, conn = pool) {
@@ -279,6 +297,40 @@ class MembersRepository extends BaseRepository {
    * pertenecen a algún grupo vinculado a alguno de sus roles. Una sola query (UNION), evita
    * N+1 y evita traer roles/scopes a JS solo para volver a consultar.
    */
+  /**
+   * Fichas y campos que el usuario puede editar por sus roles en el club (sql/080): solo cuentan
+   * los roles que además tienen la funcionalidad correspondiente.
+   */
+  async findEditScope(userId, clubId, conn = pool) {
+    const [forms] = await conn.query(
+      `SELECT DISTINCT s.form_id AS id FROM role_member_form_scope s
+         INNER JOIN user_roles ur ON ur.role_id = s.role_id AND ur.user_id = ? AND ur.club_id = ?
+         INNER JOIN role_functions rf ON rf.role_id = s.role_id
+         INNER JOIN functions f ON f.id = rf.function_id AND f.code = 'EDIT_MEMBER_FORMS_SCOPED'`,
+      [userId, clubId]
+    );
+    const [fields] = await conn.query(
+      `SELECT DISTINCT s.field_id AS id FROM role_member_field_scope s
+         INNER JOIN user_roles ur ON ur.role_id = s.role_id AND ur.user_id = ? AND ur.club_id = ?
+         INNER JOIN role_functions rf ON rf.role_id = s.role_id
+         INNER JOIN functions f ON f.id = rf.function_id AND f.code = 'EDIT_MEMBER_FIELD_VALUES_SCOPED'`,
+      [userId, clubId]
+    );
+    return { formIds: forms.map((r) => r.id), fieldIds: fields.map((r) => r.id) };
+  }
+
+  /** Fichas cuyos datos puede ver por sus roles con "Ver fichas específicas" (sql/081). */
+  async findViewFormScope(userId, clubId, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT DISTINCT s.form_id AS id FROM role_member_view_form_scope s
+         INNER JOIN user_roles ur ON ur.role_id = s.role_id AND ur.user_id = ? AND ur.club_id = ?
+         INNER JOIN role_functions rf ON rf.role_id = s.role_id
+         INNER JOIN functions f ON f.id = rf.function_id AND f.code = 'VIEW_MEMBER_FORM_DATA_SCOPED'`,
+      [userId, clubId]
+    );
+    return rows.map((r) => r.id);
+  }
+
   async findAccessibleMemberIds(userId, clubId, conn = pool) {
     const [rows] = await conn.query(
       `SELECT m.id AS id FROM role_member_scope rms

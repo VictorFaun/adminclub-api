@@ -117,6 +117,31 @@ class MemberGroupsService {
     });
   }
 
+  /** Deja a UN miembro exactamente en los grupos indicados (ficha del miembro, pestaña Grupos):
+   * agrega los que faltan y quita los que sobran, y regenera los períodos una sola vez. */
+  async setMemberGroups(clubId, memberId, groupIds, actorId) {
+    const ids = [...new Set(groupIds.map(Number))];
+    const valid = await memberGroupsRepository.findByIds(ids, clubId);
+    if (valid.length !== ids.length) throw AppError.badRequest('Uno o más grupos no pertenecen a este club.');
+
+    const current = ((await membersRepository.getGroupsForMembers([memberId]))[memberId] || []).map((g) => g.id);
+    const toAdd = ids.filter((id) => !current.includes(id));
+    const toRemove = current.filter((id) => !ids.includes(id));
+    for (const groupId of toAdd) {
+      await memberGroupsRepository.addMembers(groupId, [memberId]); // eslint-disable-line no-await-in-loop
+      // eslint-disable-next-line no-await-in-loop
+      await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_GROUP_MEMBERS_ADDED', entityType: 'member_group', entityId: groupId, changes: { added: [memberId] } });
+    }
+    for (const groupId of toRemove) {
+      await memberGroupsRepository.removeMember(groupId, memberId); // eslint-disable-line no-await-in-loop
+      // eslint-disable-next-line no-await-in-loop
+      await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_GROUP_MEMBER_REMOVED', entityType: 'member_group', entityId: groupId, changes: { removed: memberId } });
+    }
+    // Los agregados reciben ya los períodos de los cobros/entrenamientos de esos grupos.
+    if (toAdd.length) await require('../helpers/regeneratePeriods').regeneratePeriods(clubId); // eslint-disable-line global-require
+    return { added: toAdd.length, removed: toRemove.length };
+  }
+
   async removeMember(clubId, groupId, memberId, actorId) {
     const group = await memberGroupsRepository.findByIdInClub(groupId, clubId);
     if (!group) throw AppError.notFound('Grupo no encontrado.');

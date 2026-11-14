@@ -81,7 +81,7 @@ class EmailService {
   async sendWelcomeEmail(user) {
     return this.send({
       to: user.email,
-      subject: 'Bienvenido a Admin Club',
+      subject: 'Bienvenido a Mi Club',
       html: renderPlatformEmail({
         title: `¡Bienvenido, ${user.username}!`,
         bodyHtml: '<p>Tu cuenta fue creada correctamente. Ya puedes crear o unirte a un club para empezar a administrarlo.</p>',

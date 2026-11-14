@@ -23,7 +23,12 @@ const invitationForm = asyncHandler(async (req, res) => {
 
 // --- Administración ---
 const list = asyncHandler(async (req, res) => {
-  const data = await stripSensitive(req.club.id, req.authContext, await service.list(req.club.id, req.query.status));
+  const archived = req.query.archived === 'true' || req.query.archived === '1';
+  const items = await stripSensitive(req.club.id, req.authContext, await service.list(req.club.id, req.query.status, { archived }), { sensitiveOnly: true });
+  // La del apoderado (sql/082) va dentro de cada una: mismas reglas.
+  const data = await Promise.all(
+    items.map(async (item) => (item.guardian ? { ...item, guardian: await stripSensitive(req.club.id, req.authContext, item.guardian, { sensitiveOnly: true }) } : item))
+  );
   return ApiResponse.ok(res, data, 'Solicitudes obtenidas correctamente.');
 });
 
@@ -54,10 +59,16 @@ const updateSetting = asyncHandler(async (req, res) => {
 
 const downloadFile = asyncHandler(async (req, res) => {
   const row = (await memberApplicationsRepository.findFiles([Number(req.params.id)])).find((f) => f.id === Number(req.params.fileId));
-  await assertFieldAccessible(req.club.id, req.authContext, row?.field_id);
+  await assertFieldAccessible(req.club.id, req.authContext, row?.field_id, { sensitiveOnly: true });
   const file = await service.getFile(req.club.id, Number(req.params.id), Number(req.params.fileId));
   res.type(file.mimeType);
   return res.download(file.absolutePath, file.name);
 });
 
-module.exports = { publicForm, publicSubmit, invitationForm, list, pendingCount, approve, reject, getSetting, updateSetting, downloadFile };
+const archive = asyncHandler(async (req, res) => {
+  const archived = req.body.archived !== false;
+  const data = await service.archive(req.club.id, req.body.ids, archived, req.user.id);
+  return ApiResponse.ok(res, data, archived ? 'Solicitudes archivadas.' : 'Solicitudes desarchivadas.');
+});
+
+module.exports = { archive, publicForm, publicSubmit, invitationForm, list, pendingCount, approve, reject, getSetting, updateSetting, downloadFile };

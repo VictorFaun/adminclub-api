@@ -1,5 +1,6 @@
 const memberGuardiansRepository = require('../repositories/memberGuardians.repository');
 const membersRepository = require('../repositories/members.repository');
+const memberFormVersionsService = require('./memberFormVersions.service');
 const memberFieldsRepository = require('../repositories/memberFields.repository');
 const memberFormsRepository = require('../repositories/memberForms.repository');
 const memberFormsService = require('./memberForms.service');
@@ -20,9 +21,13 @@ const AppError = require('../helpers/AppError');
 const { withTransaction } = require('../config/database');
 const { todayLocal } = require('../helpers/membership');
 const { toAbsoluteMediaUrl, deleteUploadedFile } = require('../helpers/mediaUrl');
-const { parseSettings, UPLOAD_TYPES, LAYOUT_TYPES } = require('../helpers/memberFieldTypes');
+const { UPLOAD_TYPES, LAYOUT_TYPES } = require('../helpers/memberFieldTypes');
 const { deletePrivateFile, resolvePrivatePath } = require('../middlewares/privateUpload.middleware');
-const { USER_CLUB_STATUS } = require('../config/constants');
+const { USER_CLUB_STATUS, FUNCTIONS } = require('../config/constants');
+
+/** La persona ve TODA su ficha (también los campos sensibles y todas sus fichas): permisos con
+ * que se arman sus versiones (ver helpers/sensitiveFields.js#formViewScope). */
+const SELF_VIEW = { functions: [FUNCTIONS.VIEW_SENSITIVE_MEMBER_FIELDS, FUNCTIONS.VIEW_MEMBER_FORM_DATA] };
 
 /** Interruptores del club (club_settings) con su valor por defecto. */
 const SETTINGS = {
@@ -260,14 +265,15 @@ class SelfServiceService {
 
   // ------------------------------------------------------------------ mi ficha
 
-  /** Campos de las fichas del miembro (sin los sensibles), en el orden de sus fichas. */
+  /** Campos de las fichas del miembro (todos, también los sensibles: son sus datos), en el orden de sus fichas. */
   async _fieldCatalog(clubId, memberId) {
     const formIds = await memberFormsRepository.formIdsForMember(memberId);
-    return (await memberFormsService.fieldsOf(clubId, formIds)).filter((f) => !parseSettings(f).sensitive);
+    return memberFormsService.fieldsOf(clubId, formIds);
   }
 
+  /** Con "Editar su ficha" activado, puede editar todo menos el identificador. */
   _editable(field, settings) {
-    return !!settings.profileEdit && !!parseSettings(field).selfEditable && !LAYOUT_TYPES.includes(field.field_type) && field.role !== 'identifier';
+    return !!settings.profileEdit && !LAYOUT_TYPES.includes(field.field_type) && field.role !== 'identifier';
   }
 
   async profile(clubId, userId, memberId) {
@@ -281,22 +287,36 @@ class SelfServiceService {
     const documents = fileFieldIds.size
       ? (await membersRepository.findDocuments(member.id)).filter((d) => fileFieldIds.has(d.field_id)).map((d) => membersService._documentDto(d))
       : [];
+    // Sus fichas (cada una con sus campos) y las versiones de cada una, como en la ficha del club.
+    const formIds = await memberFormsRepository.formIdsForMember(member.id);
+    const [forms, byForm, versions] = await Promise.all([
+      memberFormsRepository.findByIds(clubId, formIds),
+      memberFormsRepository.fieldIdsByForm(clubId),
+      memberFormVersionsService.listForMember(clubId, member, SELF_VIEW),
+    ]);
+    const formById = new Map(forms.map((f) => [f.id, f]));
     return {
       member: { ...this._memberDto(member, dto.groups), joinedOn: dto.joinedOn ?? null, fields },
       fields: catalog.map((f) => ({ ...memberFieldsService.toDto(f), editable: this._editable(f, settings) })),
+      forms: formIds.filter((id) => formById.has(id)).map((id) => ({ id, name: formById.get(id).name, fieldIds: byForm[id] || [] })),
+      versions,
       documents,
       canEdit: catalog.some((f) => this._editable(f, settings)),
     };
   }
 
-  async updateProfile(clubId, userId, memberId, { fields }) {
+  /** `newVersion`: guarda lo editado como una respuesta nueva (versión "Mi club") de las fichas modificadas. */
+  async updateProfile(clubId, userId, memberId, { fields, newVersion = false }) {
     const { member, settings } = await this._own(clubId, userId, memberId, 'profileEdit');
     const editable = new Map((await this._fieldCatalog(clubId, member.id)).filter((f) => this._editable(f, settings) && !UPLOAD_TYPES.includes(f.field_type)).map((f) => [f.code, f]));
     // Whitelist en el servidor: lo que no es editable se ignora aunque venga en el body.
     const input = Object.fromEntries(Object.entries(fields && typeof fields === 'object' ? fields : {}).filter(([code]) => editable.has(code)));
     if (!Object.keys(input).length) throw AppError.badRequest('No hay campos editables para guardar.');
-    const values = await membersService._prepareFieldValues(clubId, input, { requireAll: false, memberId: member.id, allowSensitive: false, formIds: await memberFormsRepository.formIdsForMember(member.id) });
+    const formIds = await memberFormsRepository.formIdsForMember(member.id);
+    const values = await membersService._prepareFieldValues(clubId, input, { requireAll: false, memberId: member.id, allowSensitive: true, formIds });
+    const versionForms = newVersion ? await membersService._formsTouching(clubId, formIds, await membersService._changedFieldIds(member.id, values)) : [];
     await withTransaction(async (conn) => {
+      if (versionForms.length) await memberFormVersionsService.startNew(clubId, member.id, versionForms, { source: 'self', actorId: userId }, conn);
       if (Object.keys(values.set).length) await membersRepository.upsertFieldValues(member.id, values.set, conn);
       await membersRepository.deleteFieldValues(member.id, values.clear, conn);
     });
@@ -354,7 +374,8 @@ class SelfServiceService {
 
   async _ownDocument(member, documentId) {
     const doc = await membersRepository.findDocument(Number(documentId));
-    if (!doc || doc.member_id !== member.id) throw AppError.notFound('Documento no encontrado.');
+    // Los archivados (solo en versiones anteriores de la ficha) no se ven desde «Mi club».
+    if (!doc || doc.member_id !== member.id || doc.archived_at) throw AppError.notFound('Documento no encontrado.');
     return doc;
   }
 
@@ -362,8 +383,7 @@ class SelfServiceService {
     const { member, settings } = await this._own(clubId, userId, memberId, 'profileEdit');
     const doc = await this._ownDocument(member, documentId);
     await this._fileField(clubId, settings, doc.field_id, { editable: true }, member.id);
-    await membersRepository.deleteDocument(doc.id);
-    deletePrivateFile(doc.file_path);
+    await memberFormVersionsService.retireDocument(member.id, doc);
     await auditRepository.logAction({ userId, clubId, action: 'MEMBER_SELF_UPDATED', entityType: 'member', entityId: member.id, changes: { document: { from: doc.name, to: null } } });
   }
 

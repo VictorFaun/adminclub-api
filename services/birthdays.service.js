@@ -64,6 +64,12 @@ function minutesBetween(from, to) {
   return th * 60 + tm - (fh * 60 + fm);
 }
 
+/** "https://cualquier-dominio/uploads/x.png" → "/uploads/x.png"; cualquier otra URL queda igual. */
+function toRelativeUploadUrl(url) {
+  const m = String(url).match(/^https?:\/\/[^/]+(\/uploads\/.+)$/i);
+  return m ? m[1] : url;
+}
+
 function templateSettingKey(format) {
   return `birthday_template_${format}`;
 }
@@ -247,7 +253,10 @@ class BirthdaysService {
       return {
         ...base,
         type: 'image',
-        url: el.url.trim().slice(0, 500),
+        // Una imagen subida a la app se guarda con ruta RELATIVA (/uploads/...), como las demás: con
+        // la URL completa, al cambiar el dominio la tarjeta pedía la imagen al dominio antiguo y el
+        // navegador la bloqueaba al dibujarla (canvas). Al entregarla se le pone el dominio vigente.
+        url: toRelativeUploadUrl(el.url.trim()).slice(0, 500),
         lockAspectRatio: !!el.lockAspectRatio,
         ...this._fadeOptions(el),
       };
@@ -257,6 +266,8 @@ class BirthdaysService {
         ...base,
         type: 'text',
         variant: TEXT_VARIANTS.includes(el.variant) ? el.variant : 'static',
+        // Nombre corto: solo primer nombre y primer apellido (si no, el nombre completo).
+        ...(el.variant === 'name' && el.shortName ? { shortName: true } : {}),
         content: typeof el.content === 'string' ? el.content.slice(0, 200) : '',
         fontFamily: typeof el.fontFamily === 'string' && el.fontFamily.trim() ? el.fontFamily.trim().slice(0, 80) : 'sans-serif',
         fontSize: clampNumber(el.fontSize, 1, 400, 48),
@@ -293,6 +304,13 @@ class BirthdaysService {
       ? design.elements.map((el, i) => this._sanitizeElement(el, i)).filter(Boolean)
       : [];
     return { format, elements };
+  }
+
+  /** Igual que getTemplate, pero con las imágenes en URL absoluta del dominio vigente (para la app). */
+  async getTemplateForClient(clubId, format) {
+    const template = await this.getTemplate(clubId, format);
+    if (!template) return template;
+    return { ...template, elements: template.elements.map((el) => (el.type === 'image' ? { ...el, url: toAbsoluteMediaUrl(el.url) } : el)) };
   }
 
   async getTemplate(clubId, format) {
@@ -343,6 +361,7 @@ class BirthdaysService {
       if (!template || !template.elements.length) return null;
       const data = {
         name: this._fullNameOf(member),
+        shortName: [member.first_name, member.last_name].filter(Boolean).join(' '),
         age: this._turningAge(member.birth_date, daysUntil, today),
         dateLabel: this._dateLabel(member.birth_date),
         photoUrl: member.birthday_photo_url || null,

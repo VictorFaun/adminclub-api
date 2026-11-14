@@ -1,4 +1,5 @@
 const router = require('express').Router();
+const { body } = require('express-validator');
 const controller = require('../controllers/clubs.controller');
 const validation = require('../validations/clubs.validation');
 const { handleValidation, sanitizeBody } = require('../middlewares/validation.middleware');
@@ -56,6 +57,15 @@ router.get(
   '/:clubId/join-requests',
   requireFunction(FUNCTIONS.MANAGE_JOIN_REQUESTS),
   controller.listJoinRequests
+);
+// Archivar/desarchivar varias resueltas de una vez.
+router.post(
+  '/:clubId/join-requests/archive',
+  requireFunction(FUNCTIONS.MANAGE_JOIN_REQUESTS),
+  sanitizeBody,
+  [body('ids').isArray({ min: 1, max: 500 }), body('ids.*').isInt({ min: 1 }), body('archived').optional().isBoolean().toBoolean()],
+  handleValidation,
+  controller.archiveJoinRequests
 );
 router.put(
   '/:clubId/join-requests/:requestId',

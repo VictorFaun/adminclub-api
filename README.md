@@ -1,4 +1,4 @@
-# Admin Club — API
+# Mi Club — API
 
 API REST modular para una plataforma de administración de clubes, multi-tenant (multi-club) con roles y permisos 100% dinámicos. Construida con Node.js, Express y MySQL.
 
@@ -191,7 +191,9 @@ Prefijo base: `/api/v1`. Salvo que se indique "público", todos los endpoints re
 | `POST\|DELETE /members/:id/photo` | Sube/quita la foto de la ficha (pública, para plantillas de cumpleaños) | `EDIT_MEMBERS` |
 | `GET\|POST /members/:id/documents` | Lista / sube documentos adjuntos (PRIVADOS, `private_uploads/`, hasta 10MB) | `VIEW_MEMBERS` · `EDIT_MEMBERS` |
 | `GET /members/:id/documents/:docId/download` | Descarga autenticada de un documento | `VIEW_MEMBERS` / `_SCOPED` |
-| `DELETE /members/:id/documents/:docId` | Elimina un documento | `EDIT_MEMBERS` |
+| `DELETE /members/:id/documents/:docId` | Elimina un documento (se archiva si una versión anterior de la ficha lo usa) | `EDIT_MEMBERS` |
+| `GET /members/:id/form-versions` | Versiones de cada ficha del miembro (la primera de cada lista es la principal) | `VIEW_MEMBERS` / `_SCOPED` |
+| `DELETE /members/:id/form-versions/:versionId` | Elimina una versión (queda al menos una; si era la principal vuelve la anterior) | `DELETE_MEMBER_FORM_VERSIONS` |
 | `GET /members/forms` | Fichas del club (`fieldIds` en orden, `isDefault`, `memberCount`) | lectura de campos, `CREATE_/EDIT_INVITATIONS` |
 | `POST /members/forms` · `PUT /members/forms/:id` · `DELETE /members/forms/:id` | Crear / editar (nombre, descripción, por defecto) / eliminar (los campos que solo estaban en ella se eliminan; el club conserva al menos una) | `VIEW_MEMBER_FIELDS` + `CREATE_/EDIT_/DELETE_MEMBER_FIELDS` |
 | `PUT /members/forms/:id/fields` | Campos de la ficha y su orden (`{ fieldIds }`); no permite quitar un campo que no está en otra ficha | `VIEW_MEMBER_FIELDS` + `EDIT_MEMBER_FIELDS` |

@@ -13,6 +13,34 @@ const permissionService = require('../services/permission.service');
 const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const { FUNCTIONS } = require('../config/constants');
 
+const can = (req, ...codes) => permissionService.hasAnyFunction(req.authContext, codes);
+
+/**
+ * Lo que el actor puede ver de uno o varios miembros (sql/081): sin los campos que no puede ver
+ * (sensibles / fichas ajenas, ver helpers/sensitiveFields.js) ni las partes del detalle sin su
+ * permiso: cuenta vinculada, estado e ingreso (historial) y grupos.
+ */
+const present = async (req, data) => {
+  const stripped = await stripSensitive(req.club.id, req.authContext, data);
+  const seeAccount = can(req, FUNCTIONS.VIEW_MEMBER_ACCOUNT, FUNCTIONS.LINK_MEMBER_USER);
+  const seeMembership = can(req, FUNCTIONS.VIEW_MEMBER_MEMBERSHIP, FUNCTIONS.EDIT_MEMBER_MEMBERSHIP);
+  const seeGroups = can(req, FUNCTIONS.VIEW_MEMBER_GROUPS, FUNCTIONS.MANAGE_MEMBER_GROUPS);
+  const strip = (dto) => {
+    if (!dto) return dto;
+    const out = { ...dto };
+    if (!seeAccount) Object.assign(out, { userId: null, linkedUsername: null });
+    if (!seeMembership) {
+      delete out.memberships;
+      delete out.joinedOn;
+    }
+    if (!seeGroups) out.groups = [];
+    return out;
+  };
+  return Array.isArray(stripped) ? stripped.map(strip) : strip(stripped);
+};
+
+const MEMBERSHIP_KEYS = ['status', 'joinedOn', 'statusDate'];
+
 /** Agrega `canViewPayments` a uno o varios miembros ya resueltos por membersService — vive acá
  * (no en members.service.js) para evitar un ciclo de imports: payments.service.js ya depende de
  * members.service.js (para revalidar visibilidad de perfil), así que members.service.js no
@@ -58,8 +86,10 @@ const updateListSettings = asyncHandler(async (req, res) => {
 });
 
 const list = asyncHandler(async (req, res) => {
+  // Filtrar por "con/sin cuenta" es ver la cuenta vinculada.
+  if (!can(req, FUNCTIONS.VIEW_MEMBER_ACCOUNT, FUNCTIONS.LINK_MEMBER_USER)) delete req.query.linked;
   const result = await membersService.listForClub(req.club.id, req.query, req.authContext, req.user.id);
-  const items = await stripSensitive(req.club.id, req.authContext, result.items);
+  const items = await present(req, result.items);
   const { meta } = result;
   const withPayments = await attachCanViewPayments(items, req.club.id, req.user.id, req.authContext);
   return ApiResponse.paginated(res, withPayments, meta, 'Miembros obtenidos correctamente.');
@@ -110,13 +140,14 @@ const sendBirthdaysToMe = asyncHandler(async (req, res) => {
 
 const getBirthdayTemplate = asyncHandler(async (req, res) => {
   const format = String(req.query.format || '');
-  const data = await birthdaysService.getTemplate(req.club.id, format);
+  const data = await birthdaysService.getTemplateForClient(req.club.id, format);
   return ApiResponse.ok(res, data, 'Plantilla de cumpleaños obtenida correctamente.');
 });
 
 const saveBirthdayTemplate = asyncHandler(async (req, res) => {
   const format = String(req.body?.format || '');
-  const data = await birthdaysService.saveTemplate(req.club.id, format, req.body);
+  await birthdaysService.saveTemplate(req.club.id, format, req.body);
+  const data = await birthdaysService.getTemplateForClient(req.club.id, format);
   return ApiResponse.ok(res, data, 'Plantilla de cumpleaños guardada correctamente.');
 });
 
@@ -131,25 +162,35 @@ const uploadBirthdayTemplateImage = asyncHandler(async (req, res) => {
 });
 
 const getById = asyncHandler(async (req, res) => {
-  const member = await stripSensitive(req.club.id, req.authContext, await membersService.getById(req.club.id, Number(req.params.id), req.authContext, req.user.id));
+  const member = await present(req, await membersService.getById(req.club.id, Number(req.params.id), req.authContext, req.user.id));
   const [withPayments] = await attachCanViewPayments([member], req.club.id, req.user.id, req.authContext);
   return ApiResponse.ok(res, withPayments, 'Miembro obtenido correctamente.');
 });
 
 // MEMBER_CREATED se registra en members.service.js#create (con el id real), no acá.
 const create = asyncHandler(async (req, res) => {
-  const member = await stripSensitive(req.club.id, req.authContext, await membersService.create(req.club.id, req.body, req.user.id, { allowSensitive: canSeeSensitive(req.authContext) }));
+  const member = await present(req, await membersService.create(req.club.id, req.body, req.user.id, { allowSensitive: canSeeSensitive(req.authContext) }));
   return ApiResponse.created(res, member, 'Miembro creado correctamente.');
 });
 
 /** La ficha que exige el código de invitación queda en revisión (ver memberApplications.service.js#submitForAccount). */
 const createSelf = asyncHandler(async (req, res) => {
-  const data = await memberApplicationsService.submitForAccount(req.club.id, req.user.id, req.body, req.files);
+  const data = await memberApplicationsService.submitForAccount(req.club.id, req.user.id, req.body, req.files, { ipAddress: req.ip, userAgent: req.headers['user-agent'] });
   return ApiResponse.created(res, data, data.status === 'pending' ? 'Ficha enviada: el club la revisará.' : 'Ficha completada correctamente.');
 });
 
 const update = asyncHandler(async (req, res) => {
-  const member = await stripSensitive(req.club.id, req.authContext, await membersService.update(req.club.id, Number(req.params.id), req.body, req.user.id, req.authContext));
+  // Estado e ingreso tienen su propio permiso (ver updateMembership).
+  if (!can(req, FUNCTIONS.EDIT_MEMBER_MEMBERSHIP)) for (const key of MEMBERSHIP_KEYS) delete req.body[key];
+  const member = await present(req, await membersService.update(req.club.id, Number(req.params.id), req.body, req.user.id, req.authContext));
+  return ApiResponse.ok(res, member, 'Miembro actualizado correctamente.');
+});
+
+/** "En el club": estado (activo/inactivo, reincorporar) y fecha de ingreso (EDIT_MEMBER_MEMBERSHIP). */
+const updateMembership = asyncHandler(async (req, res) => {
+  const data = Object.fromEntries(MEMBERSHIP_KEYS.filter((k) => req.body[k] !== undefined).map((k) => [k, req.body[k]]));
+  if (!Object.keys(data).length) throw AppError.badRequest('No hay datos para guardar.');
+  const member = await present(req, await membersService.update(req.club.id, Number(req.params.id), data, req.user.id, req.authContext));
   return ApiResponse.ok(res, member, 'Miembro actualizado correctamente.');
 });
 
@@ -159,7 +200,7 @@ const remove = asyncHandler(async (req, res) => {
 });
 
 const linkUser = asyncHandler(async (req, res) => {
-  const member = await stripSensitive(req.club.id, req.authContext, await membersService.linkUser(req.club.id, Number(req.params.id), req.body.userId || null, req.user.id, req.authContext));
+  const member = await present(req, await membersService.linkUser(req.club.id, Number(req.params.id), req.body.userId || null, req.user.id, req.authContext));
   return ApiResponse.ok(res, member, req.body.userId ? 'Cuenta vinculada correctamente.' : 'Cuenta desvinculada correctamente.');
 });
 
@@ -200,7 +241,38 @@ const downloadDocument = asyncHandler(async (req, res) => {
   return res.download(file.absolutePath, file.name);
 });
 
+const editScope = asyncHandler(async (req, res) => {
+  const data = await membersService.editScope(req.club.id, req.user.id, req.authContext);
+  return ApiResponse.ok(res, data, 'Alcance de edición obtenido.');
+});
+
+const updateFields = asyncHandler(async (req, res) => {
+  const member = await present(req, await membersService.updateFields(req.club.id, Number(req.params.id), req.body, req.user.id, req.authContext));
+  return ApiResponse.ok(res, member, 'Ficha actualizada correctamente.');
+});
+
+const listFormVersions = asyncHandler(async (req, res) => {
+  const data = await membersService.listFormVersions(req.club.id, Number(req.params.id), req.user.id, req.authContext);
+  return ApiResponse.ok(res, data, 'Versiones obtenidas correctamente.');
+});
+
+const activateFormVersion = asyncHandler(async (req, res) => {
+  const data = await membersService.activateFormVersion(req.club.id, Number(req.params.id), Number(req.params.versionId), req.user.id, req.authContext);
+  return ApiResponse.ok(res, data, 'Versión principal actualizada.');
+});
+
+const removeFormVersion = asyncHandler(async (req, res) => {
+  const data = await membersService.removeFormVersion(req.club.id, Number(req.params.id), Number(req.params.versionId), req.user.id, req.authContext);
+  return ApiResponse.ok(res, data, 'Versión eliminada correctamente.');
+});
+
 module.exports = {
+  updateMembership,
+  editScope,
+  updateFields,
+  listFormVersions,
+  removeFormVersion,
+  activateFormVersion,
   exportMembers,
   importTemplate,
   importMembers,

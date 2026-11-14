@@ -88,6 +88,12 @@ const listJoinRequests = asyncHandler(async (req, res) => {
   return ApiResponse.paginated(res, items, meta, 'Solicitudes de acceso obtenidas correctamente.');
 });
 
+const archiveJoinRequests = asyncHandler(async (req, res) => {
+  const archived = req.body.archived !== false;
+  const data = await clubsService.archiveJoinRequests(req.club.id, req.body.ids, archived, req.user.id);
+  return ApiResponse.ok(res, data, archived ? 'Solicitudes archivadas.' : 'Solicitudes desarchivadas.');
+});
+
 const resolveJoinRequest = asyncHandler(async (req, res) => {
   await clubsService.resolveJoinRequest(req.club.id, Number(req.params.requestId), req.body.status, req.user.id);
   return ApiResponse.ok(res, null, 'Solicitud resuelta correctamente.');
@@ -120,6 +126,7 @@ module.exports = {
   requestAccess,
   listJoinRequests,
   resolveJoinRequest,
+  archiveJoinRequests,
   getSettings,
   updateSettings,
 };

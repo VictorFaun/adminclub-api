@@ -1,5 +1,5 @@
 {
-  "name": "admin-club-api",
+  "name": "mi-club-api",
   "version": "1.0.0",
   "description": "API REST modular para plataforma de administración de clubes (multi-tenant, RBAC dinámico)",
   "main": "server.js",
@@ -9,6 +9,7 @@
     "dev": "node --watch server.js",
     "db:migrate": "node database/migrate.js",
     "db:seed": "node database/seed.js",
+    "db:resync-coverage": "node database/resyncCoverage.js",
     "lint": "eslint .",
     "build": "node scripts/build.js"
   },

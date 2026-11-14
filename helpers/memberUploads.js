@@ -19,14 +19,25 @@ const PUBLIC_ROOT = path.join(__dirname, '..', env.upload.dir);
 
 /** `fields` llega como texto JSON en un multipart: se convierte a objeto antes de validar. */
 function parseMultipartFields(req, res, next) {
-  if (typeof req.body?.fields === 'string') {
-    try {
-      req.body.fields = JSON.parse(req.body.fields);
-    } catch {
-      req.body.fields = null;
+  // `guardianFields`: datos del apoderado (sql/082), mismo formato.
+  for (const key of ['fields', 'guardianFields']) {
+    if (typeof req.body?.[key] === 'string') {
+      try {
+        req.body[key] = JSON.parse(req.body[key]);
+      } catch {
+        req.body[key] = null;
+      }
     }
   }
   next();
+}
+
+/** Separa los archivos de la persona (`file_<id>`) de los de su apoderado (`gfile_<id>`, sql/082). */
+function splitGuardianFiles(files) {
+  const own = [];
+  const guardian = [];
+  for (const f of files || []) (/^gfile_/.test(f.fieldname || '') ? guardian : own).push(f);
+  return { own, guardian };
 }
 
 /** Ruta relativa (dentro de la carpeta privada) de un archivo recién recibido por multer. */
@@ -42,13 +53,15 @@ function discard(files) {
  * `[{ field, files: [{ file_path, name, mime_type, size_bytes }] }]`. Si algo falla, borra lo
  * recibido y lanza el error.
  */
-function collectUploads(catalog, files, { requireAll = true } = {}) {
+function collectUploads(catalog, files, { requireAll = true, prefix = 'file' } = {}) {
   const list = files || [];
   try {
     const byId = new Map(catalog.filter((f) => f.field_type === 'image' || f.field_type === 'file').map((f) => [String(f.id), f]));
     const grouped = new Map();
+    // `prefix`: `file` (la persona) o `gfile` (su apoderado).
+    const pattern = new RegExp(`^${prefix}_(\\d+)$`);
     for (const file of list) {
-      const match = /^file_(\d+)$/.exec(file.fieldname || '');
+      const match = pattern.exec(file.fieldname || '');
       const field = match && byId.get(match[1]);
       if (!field) throw AppError.badRequest('Se envió un archivo para un campo que no existe.');
       if (!grouped.has(field.id)) grouped.set(field.id, []);
@@ -131,4 +144,4 @@ function moveToPrivate(relativePrivate, subdir) {
   return relative;
 }
 
-module.exports = { TEMP_SUBDIR, IMAGE_MIMES, parseMultipartFields, collectUploads, assertDocuments, discard, moveToPublic, moveToPrivate };
+module.exports = { TEMP_SUBDIR, IMAGE_MIMES, parseMultipartFields, splitGuardianFiles, collectUploads, assertDocuments, discard, moveToPublic, moveToPrivate };

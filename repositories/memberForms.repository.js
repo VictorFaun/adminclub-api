@@ -1,5 +1,6 @@
 const { pool } = require('../config/database');
 const BaseRepository = require('./BaseRepository');
+const memberFormVersionsRepository = require('./memberFormVersions.repository');
 
 /**
  * Fichas del club (ver sql/072): cada una es una selección ordenada de campos del catálogo
@@ -125,17 +126,21 @@ class MemberFormsRepository extends BaseRepository {
   async setMemberForms(memberId, formIds, conn = pool) {
     await conn.query('DELETE FROM member_form_members WHERE member_id = ?', [memberId]);
     if (formIds.length) await conn.query('INSERT INTO member_form_members (form_id, member_id) VALUES ?', [formIds.map((id) => [id, memberId])]);
+    // Cada ficha asignada parte con su versión vigente (sql/078).
+    await memberFormVersionsRepository.ensureForMembers([memberId], conn);
   }
 
   /** Agrega fichas al miembro (conserva las que ya tenía). */
   async addMemberForms(memberId, formIds, conn = pool) {
     if (formIds.length) await conn.query('INSERT IGNORE INTO member_form_members (form_id, member_id) VALUES ?', [formIds.map((id) => [id, memberId])]);
+    await memberFormVersionsRepository.ensureForMembers([memberId], conn);
   }
 
   /** Asigna la ficha a varios miembros. Devuelve cuántas asignaciones nuevas hubo. */
   async assign(formId, memberIds, conn = pool) {
     if (!memberIds.length) return 0;
     const [result] = await conn.query('INSERT IGNORE INTO member_form_members (form_id, member_id) VALUES ?', [memberIds.map((id) => [formId, id])]);
+    await memberFormVersionsRepository.ensureForForm(formId, conn);
     return result.affectedRows;
   }
 

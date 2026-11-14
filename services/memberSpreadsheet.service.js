@@ -5,6 +5,7 @@ const memberGroupsRepository = require('../repositories/memberGroups.repository'
 const memberMembershipsRepository = require('../repositories/memberMemberships.repository');
 const membersService = require('./members.service');
 const memberFormsService = require('./memberForms.service');
+const memberFormVersionsRepository = require('../repositories/memberFormVersions.repository');
 const AppError = require('../helpers/AppError');
 const { readFirstSheet } = require('../helpers/excel');
 const { canSeeSensitive, hiddenFieldsOf, formViewScope } = require('../helpers/sensitiveFields');
@@ -28,6 +29,17 @@ const norm = (s) =>
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
+
+/** ¿Dos nombres de personas distintas? Coinciden si comparten al menos dos palabras (o una, si
+ * alguno tiene una sola): "Sofía Navarro" ≈ "Sofía Andrea Navarro Pérez", no ≈ "Marcela Soto". */
+function namesDiffer(a, b) {
+  const words = (s) => new Set(norm(s).split(' ').filter((w) => w.length > 1));
+  const x = words(a);
+  const y = words(b);
+  if (!x.size || !y.size) return false;
+  const shared = [...x].filter((w) => y.has(w)).length;
+  return shared < Math.min(2, x.size, y.size);
+}
 
 /** Fecha desde una celda de Excel: Date, "dd-mm-aaaa", "dd/mm/aaaa" o "aaaa-mm-dd". */
 function parseDate(value) {
@@ -240,7 +252,7 @@ class MemberSpreadsheetService {
         name: 'Instrucciones',
         columns: [{ header: 'Columna', width: 30 }, { header: 'Qué poner', width: 40 }, { header: 'Fichas', width: 30 }, { header: 'Opciones válidas', width: 60 }],
         rows: [
-          ...fields.map((f) => [f.label + (f.is_required ? ' (obligatorio)' : ''), typeText(f), (formsByField[f.id] || []).join(', '), parseOptions(f).join(', ')]),
+          ...fields.map((f) => [f.label + (f.is_required || f.role === 'identifier' ? ' (obligatorio)' : ''), typeText(f), (formsByField[f.id] || []).join(', '), parseOptions(f).join(', ')]),
           [STATUS_COL, 'Activo o Inactivo (vacío = Activo)', '', 'Activo, Inactivo'],
           [GROUPS_COL, 'Nombres de los grupos separados por coma', '', (groups || []).map((g) => g.name).join(', ')],
           [JOINED_COL, 'Fecha en que entró al club (dd-mm-aaaa)', '', ''],
@@ -250,6 +262,7 @@ class MemberSpreadsheetService {
           `Al importar, elige las mismas fichas (${formNames}): todas las personas de la planilla quedan con ellas y se les piden sus obligatorios (*).`,
           'La fila de colores sobre los encabezados indica a qué ficha(s) pertenece cada columna; no hace falta borrarla.',
           'Las imágenes y documentos se suben después, desde cada ficha.',
+          'Cada fila necesita el identificador (ej. el RUT): sin él no se importa. Si ya es de un miembro, al revisar se pregunta si sus datos se guardan como versión nueva de sus fichas.',
         ],
       },
     ];
@@ -262,8 +275,14 @@ class MemberSpreadsheetService {
    * la revisión que al crear. Un dato de un campo que no es de sus fichas es un error (no se pierde
    * en silencio).
    */
-  /** `formIds`: fichas que responden las personas de la planilla (sin indicar: las por defecto). */
-  async importFile(clubId, buffer, { dryRun, formIds = [] }, actorId, authContext) {
+  /**
+   * `formIds`: fichas que responden las personas de la planilla (sin indicar: las por defecto).
+   * Toda fila necesita el identificador. Si ya es de un miembro, la revisión lo avisa (`existing`)
+   * y al importar solo se guarda si su número viene en `updateRows`: como al aceptar una solicitud
+   * suya, cada ficha que ya tenía queda con una versión nueva y las que no tenía se le agregan.
+   */
+  async importFile(clubId, buffer, { dryRun, formIds = [], updateRows = [] }, actorId, authContext) {
+    const canUpdate = permissionService.hasFunction(authContext, FUNCTIONS.EDIT_MEMBERS);
     // El encabezado es la fila con "Fichas" o algún campo; la de grupos (si viene) se salta.
     const knownHeaders = new Set([FORMS_COL, STATUS_COL, GROUPS_COL, JOINED_COL].map(norm));
     const catalogForHeaders = await memberFieldsRepository.findByClub(clubId);
@@ -373,31 +392,69 @@ class MemberSpreadsheetService {
       }
 
       // Identificador (el del campo con ese uso o, si la fila es de otra ficha, su campo igual):
-      // repetido en la planilla o de alguien que ya es miembro.
+      // obligatorio (sin él no se puede reconocer a la persona ni evitar duplicarla), no repetido en
+      // la planilla, y si ya es de un miembro la fila puede ir como versión nueva de sus fichas.
       const { value: identifier } = await membersService.identifierFrom(clubId, data.fields);
-      if (identifierField && identifier) {
-        if (seenIdentifiers.has(identifier)) problems.push(`${identifierField.label} repetido (también en la fila ${seenIdentifiers.get(identifier)}).`);
-        else seenIdentifiers.set(identifier, rowNumber);
-        const existing = await membersService.findByIdentifier(clubId, data.fields);
-        if (existing) problems.push(`Ya existe un miembro con ese ${identifierField.label} (${membersService._fullName(existing)}).`);
+      let existing = null;
+      if (identifierField) {
+        if (!identifier) {
+          problems.push(`Falta el ${identifierField.label}: sin él no se puede saber si la persona ya es miembro.`);
+        } else {
+          if (seenIdentifiers.has(identifier)) problems.push(`${identifierField.label} repetido (también en la fila ${seenIdentifiers.get(identifier)}).`);
+          else seenIdentifiers.set(identifier, rowNumber);
+          existing = await membersService.findByIdentifier(clubId, data.fields);
+          if (existing && !canUpdate) problems.push(`Ya es miembro (${membersService._fullName(existing)}) y no tienes permiso para editar miembros.`);
+        }
       }
 
       if (!problems.length) {
         try {
-          // Mismas reglas que al crear: los campos (y obligatorios) de SUS fichas.
-          await membersService._prepareFieldValues(clubId, data.fields, { requireAll: true, allowSensitive, formIds: rowFormIds });
+          // Mismas reglas que al crear: los campos (y obligatorios) de SUS fichas. Para alguien que
+          // ya es miembro, como al aceptar una solicitud suya: lo que venga reemplaza su dato.
+          await membersService._prepareFieldValues(clubId, data.fields, existing ? { requireAll: false, allowSensitive, formIds: rowFormIds, memberId: existing.id } : { requireAll: true, allowSensitive, formIds: rowFormIds });
         } catch (e) {
           problems.push(e.message);
         }
       }
       const name = membersService._fullName({ first_name: nameFrom('first_name'), last_name: nameFrom('last_name') });
       const formsText = rowFormIds.map((id) => formName.get(id)).filter(Boolean).join(', ');
+      // Ya es miembro: qué pasa con cada ficha (versión nueva o se le agrega).
+      let match = null;
+      if (existing) {
+        const [has, counts] = await Promise.all([memberFormsRepository.formIdsForMember(existing.id), memberFormVersionsRepository.countsByMembers([existing.id])]);
+        const fullName = membersService._fullName(existing);
+        match = {
+          id: existing.id,
+          fullName,
+          // Mismo identificador pero otro nombre (ej. un RUT mal escrito): se avisa antes de confirmar.
+          nameDiffers: namesDiffer(name, fullName),
+          forms: rowFormIds.map((id) => ({ formId: id, name: formName.get(id), hasForm: has.includes(id), nextVersion: has.includes(id) ? (counts[existing.id]?.[id] ?? 1) + 1 : 1 })),
+        };
+      }
       if (problems.length) {
-        results.push({ row: rowNumber, name, forms: formsText, ok: false, errors: problems });
+        results.push({ row: rowNumber, name, forms: formsText, ok: false, errors: problems, existing: match });
         continue;
       }
       if (dryRun) {
-        results.push({ row: rowNumber, name, forms: formsText, ok: true, errors: [] });
+        results.push({ row: rowNumber, name, forms: formsText, ok: true, errors: [], existing: match });
+        continue;
+      }
+      if (existing) {
+        // Solo si se eligió al confirmar; si no, queda como estaba.
+        if (!updateRows.includes(rowNumber)) {
+          results.push({ row: rowNumber, name, forms: formsText, ok: true, skipped: true, errors: [], existing: match });
+          continue;
+        }
+        try {
+          await membersService.applySubmission(clubId, existing.id, data.fields, rowFormIds, actorId, { newVersion: true, source: 'import' });
+          if (data.groupIds.length) {
+            const current = (await membersRepository.getGroupsForMember(existing.id)).map((g) => g.id);
+            await membersRepository.setGroups(existing.id, [...new Set([...current, ...data.groupIds])]);
+          }
+          results.push({ row: rowNumber, name, forms: formsText, ok: true, updated: true, errors: [], existing: match, memberId: existing.id });
+        } catch (e) {
+          results.push({ row: rowNumber, name, forms: formsText, ok: false, errors: [e.message], existing: match });
+        }
         continue;
       }
       try {
@@ -410,7 +467,12 @@ class MemberSpreadsheetService {
     return {
       dryRun: !!dryRun,
       total: results.length,
-      valid: results.filter((r) => r.ok).length,
+      // Filas que crean un miembro nuevo (en la revisión: listas; al importar: creados).
+      valid: results.filter((r) => r.ok && !r.existing).length,
+      // Filas de personas que ya son miembros (en la revisión: se pueden guardar como versión nueva).
+      existing: results.filter((r) => r.ok && r.existing).length,
+      updated: results.filter((r) => r.updated).length,
+      skipped: results.filter((r) => r.skipped).length,
       invalid: results.filter((r) => !r.ok).length,
       unknownColumns,
       results,

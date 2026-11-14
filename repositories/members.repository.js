@@ -181,11 +181,19 @@ class MembersRepository extends BaseRepository {
     if (search) {
       // Busca en CUALQUIER dato de la ficha (nombre, identificador, correo, campos propios del club).
       // Los campos sensibles no entran en la búsqueda de quien no puede verlos.
+      // En dos pasos (primero los ids) y no con un EXISTS: en MariaDB, un EXISTS sobre todos los
+      // valores junto con la vista member_profiles (sql/083) dejaba los nombres en NULL
+      // («Miembro #38») por un fallo de su optimizador (split materialized + semijoin).
       const hidden = hiddenFieldIds.length ? ' AND sv.field_id NOT IN (?)' : '';
-      where.push(`EXISTS (SELECT 1 FROM member_field_values sv WHERE sv.member_id = m.id AND (sv.value LIKE ? OR sv.value LIKE ?)${hidden})`);
       // Un RUT/identificador se guarda sin puntos: los que tipee quien busca se ignoran.
-      whereParams.push(`%${search}%`, `%${search.replace(/\./g, '')}%`);
-      if (hiddenFieldIds.length) whereParams.push(hiddenFieldIds);
+      const [found] = await pool.query(
+        `SELECT DISTINCT sv.member_id AS id FROM member_field_values sv INNER JOIN members ms ON ms.id = sv.member_id AND ms.club_id = ?
+         WHERE (sv.value LIKE ? OR sv.value LIKE ?)${hidden}`,
+        [clubId, `%${search}%`, `%${search.replace(/\./g, '')}%`, ...(hiddenFieldIds.length ? [hiddenFieldIds] : [])]
+      );
+      if (!found.length) return { rows: [], total: 0 };
+      where.push('m.id IN (?)');
+      whereParams.push(found.map((r) => r.id));
     }
     // Solo quienes responden esa ficha (sql/072).
     if (formId) {

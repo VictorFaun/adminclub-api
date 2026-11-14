@@ -71,8 +71,10 @@ const importMembers = asyncHandler(async (req, res) => {
   const dryRun = String(req.body.dryRun ?? 'true') !== 'false';
   // `formIds` ('1,2'): fichas que responden las personas de la planilla.
   const formIds = String(req.body.formIds || '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
-  const data = await memberSpreadsheetService.importFile(req.club.id, req.file.buffer, { dryRun, formIds }, req.user.id, req.authContext);
-  return ApiResponse.ok(res, data, dryRun ? 'Planilla revisada.' : `Se importaron ${data.results.filter((r) => r.ok).length} miembros.`);
+  // `updateRows` ('3,7'): filas de personas que ya son miembros que se guardan como versión nueva.
+  const updateRows = String(req.body.updateRows || '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  const data = await memberSpreadsheetService.importFile(req.club.id, req.file.buffer, { dryRun, formIds, updateRows }, req.user.id, req.authContext);
+  return ApiResponse.ok(res, data, dryRun ? 'Planilla revisada.' : `Se importaron ${data.valid} miembros y se actualizaron ${data.updated}.`);
 });
 
 const listSettings = asyncHandler(async (req, res) => {

@@ -15,7 +15,8 @@ const { deletePrivateFile } = require('../middlewares/privateUpload.middleware')
 const members = () => require('./members.service');
 
 /** Cómo llegó cada versión (se muestra junto a la fecha). */
-const SOURCES = ['initial', 'manual', 'application', 'self'];
+// 'import': guardada desde una planilla de Excel (Importar miembros).
+const SOURCES = ['initial', 'manual', 'application', 'self', 'import'];
 
 /**
  * Versiones de las fichas (sql/078). Cada ficha de cada miembro tiene su historial de respuestas;

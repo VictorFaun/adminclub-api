@@ -76,10 +76,13 @@ class MemberGroupsRepository extends BaseRepository {
     return { rows, total: countRows[0].total };
   }
 
-  async addMembers(groupId, memberIds, conn = pool) {
+  /** `joinedAt` ('YYYY-MM-DD'): desde cuándo está en el grupo (se le cobra desde ese mes, sql/087);
+   * sin indicar, hoy. Quien ya estaba no cambia. */
+  async addMembers(groupId, memberIds, conn = pool, joinedAt = null) {
     if (!memberIds.length) return;
-    const values = memberIds.map((memberId) => [groupId, memberId]);
-    await conn.query('INSERT IGNORE INTO member_group_members (group_id, member_id) VALUES ?', [values]);
+    const when = joinedAt ? `${joinedAt} 00:00:00` : new Date();
+    const values = memberIds.map((memberId) => [groupId, memberId, when]);
+    await conn.query('INSERT IGNORE INTO member_group_members (group_id, member_id, joined_at) VALUES ?', [values]);
   }
 
   async removeMember(groupId, memberId, conn = pool) {

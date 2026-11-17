@@ -104,10 +104,10 @@ class PaymentProofsService {
 
   /** Miembro activo por el identificador escrito en la página pública (`null` si no hay). */
   async _findByIdentifier(clubId, raw) {
-    const field = await memberFieldsRepository.findByRole(clubId, 'identifier');
-    if (!field) return null;
-    const normalized = normalizeIdentifier(field, raw);
-    return normalized ? paymentProofsRepository.findActiveMemberByIdentifier(clubId, String(normalized).toUpperCase()) : null;
+    const fields = await memberFieldsRepository.findAllByRole(clubId, 'identifier');
+    if (!fields.length) return null;
+    const normalized = normalizeIdentifier(fields[0], raw);
+    return normalized ? paymentProofsRepository.findActiveMemberByIdentifier(clubId, String(normalized).toUpperCase(), fields.map((f) => f.id)) : null;
   }
 
   /**

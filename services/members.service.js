@@ -252,8 +252,8 @@ class MembersService {
     if (toReprice.length) {
       const base = new Map();
       for (const i of toReprice) {
-        if (!base.has(i.charge_id)) base.set(i.charge_id, (await chargesRepository.resolveAmounts(i.charge_id, [memberId], i.charge_amount, conn)).get(memberId));
-        const amount = proratedAmount(base.get(i.charge_id), intervals, 'monthly', i.period_label, policy);
+        if (!base.has(i.charge_id)) base.set(i.charge_id, await chargesRepository.resolveAmountSchedule(i.charge_id, [memberId], i.charge_amount, 'monthly', conn));
+        const amount = proratedAmount(base.get(i.charge_id).at(memberId, i.period_label), intervals, 'monthly', i.period_label, policy);
         if (Number(amount) !== Number(i.amount)) await chargeInstancesRepository.updateAmount(i.id, amount, conn);
       }
     }
@@ -337,13 +337,15 @@ class MembersService {
       else set[field.id] = value;
 
       if (field.role === 'identifier' && value !== null) {
+        // Puede haber un Identificador por ficha: ningún otro miembro puede tener ese valor en ninguno.
         const normalized = String(normalizeIdentifier(field, value)).toUpperCase();
-        if (await memberFieldsRepository.identifierExists(clubId, field.id, normalized, memberId)) {
+        const identifierIds = full.filter((f) => f.role === 'identifier').map((f) => f.id);
+        if (await memberFieldsRepository.identifierExists(clubId, identifierIds, normalized, memberId)) {
           throw AppError.conflict(`Ya existe un miembro con ese ${field.label} en el club.`);
         }
       }
     }
-    if (missing.length) throw AppError.badRequest(`Faltan campos obligatorios: ${missing.join(', ')}.`);
+    if (missing.length) throw AppError.badRequest(`Faltan campos obligatorios: ${missing.join(', ')}.`, { missing });
     return { set, clear };
   }
 
@@ -362,29 +364,31 @@ class MembersService {
    * tipo y con el mismo nombre (ej. su propio "RUT"; no un "RUT del apoderado").
    */
   async identifierFrom(clubId, fields) {
-    const field = await memberFieldsRepository.findByRole(clubId, 'identifier');
-    if (!field || !fields) return { field, value: null };
-    let raw = fields[field.code];
-    if (!raw && field.field_type !== 'text') {
-      const label = String(field.label).trim().toLowerCase();
-      const sameType = (await memberFieldsRepository.findByClub(clubId)).filter((f) => f.id !== field.id && f.field_type === field.field_type && String(f.label).trim().toLowerCase() === label);
-      raw = sameType.map((f) => fields[f.code]).find((v) => v) ?? null;
+    // Puede haber un Identificador por ficha (sql/086): sirve el primero respondido. Como respaldo,
+    // un campo sin ese uso pero del mismo tipo y nombre (ej. las copias de sql/079).
+    const catalog = await memberFieldsRepository.findByClub(clubId);
+    const idFields = catalog.filter((f) => f.role === 'identifier');
+    const field = idFields[0] ?? null;
+    if (!field || !fields) return { field, fieldIds: idFields.map((f) => f.id), value: null };
+    let source = idFields.find((f) => fields[f.code]);
+    if (!source) {
+      const keys = new Set(idFields.filter((f) => f.field_type !== 'text').map((f) => `${String(f.label).trim().toLowerCase()}|${f.field_type}`));
+      source = catalog.find((f) => !f.role && keys.has(`${String(f.label).trim().toLowerCase()}|${f.field_type}`) && fields[f.code]);
     }
-    const value = raw ? normalizeIdentifier(field, raw) : null;
-    return { field, value: value ? String(value).toUpperCase() : null };
+    const value = source ? normalizeIdentifier(source, fields[source.code]) : null;
+    return { field: source && source.role === 'identifier' ? source : field, fieldIds: idFields.map((f) => f.id), value: value ? String(value).toUpperCase() : null };
   }
 
   async findByIdentifier(clubId, fields) {
-    const { field, value } = await this.identifierFrom(clubId, fields);
+    const { fieldIds, value } = await this.identifierFrom(clubId, fields);
     if (!value) return null;
-    const id = await memberFieldsRepository.findMemberIdByIdentifier(clubId, field.id, value);
+    const id = await memberFieldsRepository.findMemberIdByIdentifier(clubId, fieldIds, value);
     return id ? membersRepository.findActiveById(id) : null;
   }
 
-  /** Fichas del miembro: las indicadas (validadas) o, si no se indican, las por defecto del club. */
+  /** Fichas del miembro: las indicadas (validadas) o ninguna (no hay fichas por defecto, sql/086). */
   async _resolveFormIds(clubId, formIds) {
-    const resolved = await memberFormsService.resolveIds(clubId, formIds);
-    return resolved ?? memberFormsService.withIdentifierForm(clubId, await memberFormsService.defaultIds(clubId));
+    return (await memberFormsService.resolveIds(clubId, formIds)) ?? [];
   }
 
   /**
@@ -560,7 +564,9 @@ class MembersService {
         conn
       );
       await memberFormsRepository.setMemberForms(id, formIds, conn);
-      if (groupIds.length) await membersRepository.setGroups(id, groupIds, conn);
+      // En sus grupos desde su ingreso al club (sin fecha = desde siempre, como su pertenencia al club):
+      // los cobros de esos grupos le corren desde ahí (sql/087).
+      if (groupIds.length) await membersRepository.setGroups(id, groupIds, conn, data.joinedOn ? toDateOnly(data.joinedOn) : '2000-01-01');
       if (Object.keys(values.set).length) await membersRepository.upsertFieldValues(id, values.set, conn);
       // Historial de pertenencia: activo desde su fecha de ingreso (sin fecha = desde siempre).
       // Lo anterior al ingreso le sale "no aplica" en cobros y asistencia (ver helpers/membership.js).
@@ -960,10 +966,8 @@ class MembersService {
     const user = await usersRepository.findById(userId, conn);
     if (!user) throw AppError.notFound('Cuenta no encontrada.');
     const catalog = await memberFieldsRepository.findByClub(clubId, conn);
-    // Correo, teléfono… pueden estar en varias fichas (sql/083): el de la ficha del identificador.
-    const idForm = await memberFormsService.identifierFormId(clubId, conn);
-    const formOf = await memberFormsService.formOfFields(clubId, conn);
-    const fieldOf = (role) => catalog.find((f) => f.role === role && formOf.get(f.id)?.id === idForm) || catalog.find((f) => f.role === role);
+    // Un uso puede estar en varias fichas (sql/086): el primero del catálogo.
+    const fieldOf = (role) => catalog.find((f) => f.role === role);
     const name = String(user.username || '').trim();
     const [first, ...rest] = name.split(/\s+/);
     const values = {};

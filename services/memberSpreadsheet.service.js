@@ -11,7 +11,7 @@ const { readFirstSheet } = require('../helpers/excel');
 const { canSeeSensitive, hiddenFieldsOf, formViewScope } = require('../helpers/sensitiveFields');
 const permissionService = require('./permission.service');
 const { FUNCTIONS } = require('../config/constants');
-const { UPLOAD_TYPES, LAYOUT_TYPES, parseSettings, parseOptions } = require('../helpers/memberFieldTypes');
+const { UPLOAD_TYPES, LAYOUT_TYPES, parseSettings, parseOptions, normalizeValue, isFieldVisible, sectionConditions } = require('../helpers/memberFieldTypes');
 const { toDateOnly } = require('../helpers/membership');
 
 const FORMS_COL = 'Fichas';
@@ -62,7 +62,46 @@ function parseDate(value) {
  * se eligen) y cada fila se valida contra ellas, igual que un alta manual. Una planilla antigua con
  * la columna "Fichas" la sigue respetando fila por fila.
  */
+/** Valor legible para la revisión de la importación (Sí/No, fechas dd-mm-aaaa, listas). */
+function showValue(field, value) {
+  if (value === null || value === undefined || value === '') return '';
+  if (field.field_type === 'boolean') return value === true || value === 'true' ? 'Sí' : 'No';
+  if (field.field_type === 'date') {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value));
+    return m ? `${m[3]}-${m[2]}-${m[1]}` : String(value);
+  }
+  if (Array.isArray(value)) return value.join(', ');
+  if (field.field_type === 'multiselect' && String(value).startsWith('[')) {
+    try {
+      return JSON.parse(value).join(', ');
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
 class MemberSpreadsheetService {
+  /**
+   * Obligatorios de las fichas `formIds` que quedarían vacíos para alguien que ya es miembro: ni en
+   * la planilla ni en lo que ya tenía (respeta las condiciones "solo si…" de cada campo).
+   */
+  _missingRequired(catalog, formIds, byForm, rowFields, current) {
+    const ids = new Set(formIds.flatMap((id) => byForm[id] || []));
+    const fields = catalog.filter((f) => ids.has(f.id));
+    const merged = {};
+    for (const f of catalog) {
+      const v = rowFields[f.code] !== undefined && rowFields[f.code] !== '' ? rowFields[f.code] : current[f.id];
+      if (v !== undefined && v !== null && v !== '') merged[f.code] = v;
+    }
+    const sections = sectionConditions(fields);
+    return fields
+      .filter((f) => f.is_required && !UPLOAD_TYPES.includes(f.field_type) && !LAYOUT_TYPES.includes(f.field_type))
+      .filter((f) => isFieldVisible(f, merged, catalog, sections.get(f.id)))
+      .filter((f) => merged[f.code] === undefined || (f.field_type === 'boolean' && String(merged[f.code]) !== 'true'))
+      .map((f) => f.label);
+  }
+
   /** Campos que van como columna: datos (sin imágenes, archivos ni secciones); sensibles solo con permiso. */
   _dataFields(catalog, allowSensitive) {
     return catalog.filter((f) => !UPLOAD_TYPES.includes(f.field_type) && !LAYOUT_TYPES.includes(f.field_type) && (allowSensitive || !parseSettings(f).sensitive));
@@ -216,9 +255,9 @@ class MemberSpreadsheetService {
    */
   async templateSheets(clubId, authContext, formIds = []) {
     const forms = await memberFormsRepository.findByClub(clubId);
-    const chosen = formIds.length ? forms.filter((f) => formIds.includes(f.id)) : forms.filter((f) => f.is_default);
-    // Con la ficha del Identificador siempre (ver memberForms.service.js#withIdentifierForm).
-    const targetIds = await memberFormsService.withIdentifierForm(clubId, (chosen.length ? chosen : forms.slice(0, 1)).map((f) => f.id));
+    // Las fichas elegidas o, sin elegir, todas (no hay fichas por defecto, sql/086).
+    const chosen = formIds.length ? forms.filter((f) => formIds.includes(f.id)) : [];
+    const targetIds = (chosen.length ? chosen : forms).map((f) => f.id);
     const target = forms.filter((f) => targetIds.includes(f.id));
     const ordered = await this._orderedFields(clubId, canSeeSensitive(authContext), target.map((f) => f.id));
     const { fields, groups: formGroups } = await this._groupByForms(clubId, ordered, target.map((f) => f.id));
@@ -252,7 +291,7 @@ class MemberSpreadsheetService {
         name: 'Instrucciones',
         columns: [{ header: 'Columna', width: 30 }, { header: 'Qué poner', width: 40 }, { header: 'Fichas', width: 30 }, { header: 'Opciones válidas', width: 60 }],
         rows: [
-          ...fields.map((f) => [f.label + (f.is_required || f.role === 'identifier' ? ' (obligatorio)' : ''), typeText(f), (formsByField[f.id] || []).join(', '), parseOptions(f).join(', ')]),
+          ...fields.map((f) => [f.label + (f.is_required ? ' (obligatorio)' : ''), typeText(f), (formsByField[f.id] || []).join(', '), parseOptions(f).join(', ')]),
           [STATUS_COL, 'Activo o Inactivo (vacío = Activo)', '', 'Activo, Inactivo'],
           [GROUPS_COL, 'Nombres de los grupos separados por coma', '', (groups || []).map((g) => g.name).join(', ')],
           [JOINED_COL, 'Fecha en que entró al club (dd-mm-aaaa)', '', ''],
@@ -262,7 +301,7 @@ class MemberSpreadsheetService {
           `Al importar, elige las mismas fichas (${formNames}): todas las personas de la planilla quedan con ellas y se les piden sus obligatorios (*).`,
           'La fila de colores sobre los encabezados indica a qué ficha(s) pertenece cada columna; no hace falta borrarla.',
           'Las imágenes y documentos se suben después, desde cada ficha.',
-          'Cada fila necesita el identificador (ej. el RUT): sin él no se importa. Si ya es de un miembro, al revisar se pregunta si sus datos se guardan como versión nueva de sus fichas.',
+          'El identificador (ej. el RUT) solo es obligatorio si la ficha lo marca así. Si viene y ya es de un miembro, al revisar se elige si sus datos se guardan como versión nueva de sus fichas.',
         ],
       },
     ];
@@ -276,10 +315,12 @@ class MemberSpreadsheetService {
    * en silencio).
    */
   /**
-   * `formIds`: fichas que responden las personas de la planilla (sin indicar: las por defecto).
-   * Toda fila necesita el identificador. Si ya es de un miembro, la revisión lo avisa (`existing`)
-   * y al importar solo se guarda si su número viene en `updateRows`: como al aceptar una solicitud
-   * suya, cada ficha que ya tenía queda con una versión nueva y las que no tenía se le agregan.
+   * `formIds`: fichas que responden las personas de la planilla (la columna "Fichas" manda).
+   * Revisión (`dryRun`): por fila, los datos que se crearían (`values`), lo que cambia si ya es
+   * miembro (`changes`, antes → después) y los obligatorios que faltan (`missing`: esa fila no se
+   * sube). El identificador solo se exige si la ficha lo marca obligatorio. Al confirmar, una fila de
+   * alguien que ya es miembro se guarda solo si su número viene en `updateRows` (versión nueva de
+   * las fichas que tenía; las que no tenía se le agregan).
    */
   async importFile(clubId, buffer, { dryRun, formIds = [], updateRows = [] }, actorId, authContext) {
     const canUpdate = permissionService.hasFunction(authContext, FUNCTIONS.EDIT_MEMBERS);
@@ -300,7 +341,8 @@ class MemberSpreadsheetService {
     const groups = await memberGroupsRepository.findOptions(clubId);
     const forms = await memberFormsRepository.findByClub(clubId);
     const chosen = formIds.length ? forms.filter((f) => formIds.includes(f.id)).map((f) => f.id) : [];
-    const defaultFormIds = await memberFormsService.withIdentifierForm(clubId, chosen.length ? chosen : await memberFormsService.defaultIds(clubId));
+    // Fichas de las filas sin columna "Fichas": las elegidas al importar (no hay fichas por defecto).
+    const defaultFormIds = chosen;
     const byForm = await memberFormsRepository.fieldIdsByForm(clubId);
 
     // Columna → campo (por nombre o código; sin importar tildes, mayúsculas ni "*"). Cada ficha
@@ -329,13 +371,13 @@ class MemberSpreadsheetService {
     const unknownColumns = headers.filter((h, i) => h && !mapping[i]);
     if (!mapping.some((m) => m?.kind === 'field')) throw AppError.badRequest('Ninguna columna coincide con los campos de la ficha. Descarga la planilla de ejemplo.');
 
-    const identifierField = catalog.find((f) => f.role === 'identifier');
     // Nombre para el resumen: el campo con ese uso o, si la fila es de otra ficha, el de igual nombre.
     let rowFields = {};
+    // De cada uso, el primero respondido (puede haber uno por ficha, sql/086).
     const nameFrom = (role) => {
-      const f = catalog.find((x) => x.role === role);
-      if (!f) return null;
-      return rowFields[f.code] || catalog.filter((x) => x.id !== f.id && norm(x.label) === norm(f.label)).map((x) => rowFields[x.code]).find(Boolean) || null;
+      const own = catalog.filter((x) => x.role === role);
+      const labels = new Set(own.map((x) => norm(x.label)));
+      return own.map((x) => rowFields[x.code]).find(Boolean) || catalog.filter((x) => !x.role && labels.has(norm(x.label))).map((x) => rowFields[x.code]).find(Boolean) || null;
     };
     const seenIdentifiers = new Map();
     const formName = new Map(forms.map((f) => [f.id, f.name]));
@@ -382,7 +424,7 @@ class MemberSpreadsheetService {
       });
 
       // Fichas de la fila (vacía = las por defecto) y datos que no son de ellas.
-      const rowFormIds = data.formIds?.length ? await memberFormsService.withIdentifierForm(clubId, [...new Set(data.formIds)]) : defaultFormIds;
+      const rowFormIds = data.formIds?.length ? [...new Set(data.formIds)] : defaultFormIds;
       data.formIds = rowFormIds;
       const allowed = new Set(rowFormIds.flatMap((id) => byForm[id] || []));
       const outside = fields.filter((f) => Object.prototype.hasOwnProperty.call(data.fields, f.code) && !allowed.has(f.id));
@@ -391,33 +433,56 @@ class MemberSpreadsheetService {
         problems.push(`${outside.map((f) => `"${f.label}" (${formName.get(formOfField.get(f.id)) ?? 'sin ficha'})`).join(', ')} no ${outside.length === 1 ? 'es' : 'son'} de las fichas elegidas (${names}): elige también su ficha al importar o deja ${outside.length === 1 ? 'esa celda vacía' : 'esas celdas vacías'}.`);
       }
 
-      // Identificador (el del campo con ese uso o, si la fila es de otra ficha, su campo igual):
-      // obligatorio (sin él no se puede reconocer a la persona ni evitar duplicarla), no repetido en
-      // la planilla, y si ya es de un miembro la fila puede ir como versión nueva de sus fichas.
-      const { value: identifier } = await membersService.identifierFrom(clubId, data.fields);
+      // Identificador: solo si la ficha lo pide obligatorio (lo valida _prepareFieldValues). Si
+      // viene, no puede repetirse en la planilla, y si ya es de un miembro la fila puede ir como
+      // versión nueva de sus fichas (se elige en la revisión).
+      const { value: identifier, field: idField } = await membersService.identifierFrom(clubId, data.fields);
       let existing = null;
-      if (identifierField) {
-        if (!identifier) {
-          problems.push(`Falta el ${identifierField.label}: sin él no se puede saber si la persona ya es miembro.`);
-        } else {
-          if (seenIdentifiers.has(identifier)) problems.push(`${identifierField.label} repetido (también en la fila ${seenIdentifiers.get(identifier)}).`);
-          else seenIdentifiers.set(identifier, rowNumber);
-          existing = await membersService.findByIdentifier(clubId, data.fields);
-          if (existing && !canUpdate) problems.push(`Ya es miembro (${membersService._fullName(existing)}) y no tienes permiso para editar miembros.`);
-        }
+      if (identifier) {
+        if (seenIdentifiers.has(identifier)) problems.push(`${idField?.label ?? 'Identificador'} repetido (también en la fila ${seenIdentifiers.get(identifier)}).`);
+        else seenIdentifiers.set(identifier, rowNumber);
+        existing = await membersService.findByIdentifier(clubId, data.fields);
+        if (existing && !canUpdate) problems.push(`Ya es miembro (${membersService._fullName(existing)}) y no tienes permiso para editar miembros.`);
       }
 
+      // Datos que tiene hoy (si ya es miembro): para ver qué cambia y qué obligatorio sigue faltando.
+      const current = existing ? Object.fromEntries((await membersRepository.getFieldValues(existing.id)).map((v) => [v.field_id, v.value])) : {};
+      let missing = [];
       if (!problems.length) {
         try {
-          // Mismas reglas que al crear: los campos (y obligatorios) de SUS fichas. Para alguien que
-          // ya es miembro, como al aceptar una solicitud suya: lo que venga reemplaza su dato.
+          // Mismas reglas que al crear: los campos y obligatorios de SUS fichas.
           await membersService._prepareFieldValues(clubId, data.fields, existing ? { requireAll: false, allowSensitive, formIds: rowFormIds, memberId: existing.id } : { requireAll: true, allowSensitive, formIds: rowFormIds });
         } catch (e) {
-          problems.push(e.message);
+          if (e.details?.missing) missing = e.details.missing;
+          else problems.push(e.message);
         }
+        // Ya es miembro: un obligatorio vacío en la planilla vale si ya lo tenía.
+        if (existing && !problems.length) missing = this._missingRequired(catalog, rowFormIds, byForm, data.fields, current);
       }
       const name = membersService._fullName({ first_name: nameFrom('first_name'), last_name: nameFrom('last_name') });
       const formsText = rowFormIds.map((id) => formName.get(id)).filter(Boolean).join(', ');
+      // Lo que se guardaría: datos nuevos o, si ya es miembro, solo lo que cambia (antes → después).
+      const formOfFieldId = new Map(Object.entries(byForm).flatMap(([fid, ids]) => ids.map((id) => [id, Number(fid)])));
+      const entries = Object.entries(data.fields)
+        .map(([code, raw]) => {
+          const field = catalog.find((f) => f.code === code);
+          if (!field) return null;
+          let to;
+          try {
+            to = normalizeValue(field, raw);
+          } catch {
+            to = raw;
+          }
+          return { field, to };
+        })
+        .filter(Boolean);
+      const label = (field) => (rowFormIds.length > 1 ? `${field.label} (${formName.get(formOfFieldId.get(field.id)) ?? ''})` : field.label);
+      const newValues = existing ? [] : entries.map(({ field, to }) => ({ label: label(field), value: showValue(field, to) })).filter((v) => v.value);
+      const changes = existing
+        ? entries
+            .filter(({ field, to }) => String(to ?? '') !== String(current[field.id] ?? '') && to !== undefined)
+            .map(({ field, to }) => ({ label: label(field), from: showValue(field, current[field.id]) || '—', to: showValue(field, to) || '—' }))
+        : [];
       // Ya es miembro: qué pasa con cada ficha (versión nueva o se le agrega).
       let match = null;
       if (existing) {
@@ -431,18 +496,19 @@ class MemberSpreadsheetService {
           forms: rowFormIds.map((id) => ({ formId: id, name: formName.get(id), hasForm: has.includes(id), nextVersion: has.includes(id) ? (counts[existing.id]?.[id] ?? 1) + 1 : 1 })),
         };
       }
-      if (problems.length) {
-        results.push({ row: rowNumber, name, forms: formsText, ok: false, errors: problems, existing: match });
+      const detail = { values: newValues, changes, missing };
+      if (problems.length || missing.length) {
+        results.push({ row: rowNumber, name, forms: formsText, ok: false, errors: problems, existing: match, ...detail });
         continue;
       }
       if (dryRun) {
-        results.push({ row: rowNumber, name, forms: formsText, ok: true, errors: [], existing: match });
+        results.push({ row: rowNumber, name, forms: formsText, ok: true, errors: [], existing: match, ...detail });
         continue;
       }
       if (existing) {
         // Solo si se eligió al confirmar; si no, queda como estaba.
         if (!updateRows.includes(rowNumber)) {
-          results.push({ row: rowNumber, name, forms: formsText, ok: true, skipped: true, errors: [], existing: match });
+          results.push({ row: rowNumber, name, forms: formsText, ok: true, skipped: true, errors: [], existing: match, ...detail });
           continue;
         }
         try {
@@ -451,7 +517,7 @@ class MemberSpreadsheetService {
             const current = (await membersRepository.getGroupsForMember(existing.id)).map((g) => g.id);
             await membersRepository.setGroups(existing.id, [...new Set([...current, ...data.groupIds])]);
           }
-          results.push({ row: rowNumber, name, forms: formsText, ok: true, updated: true, errors: [], existing: match, memberId: existing.id });
+          results.push({ row: rowNumber, name, forms: formsText, ok: true, updated: true, errors: [], existing: match, memberId: existing.id, ...detail });
         } catch (e) {
           results.push({ row: rowNumber, name, forms: formsText, ok: false, errors: [e.message], existing: match });
         }
@@ -459,7 +525,7 @@ class MemberSpreadsheetService {
       }
       try {
         const member = await membersService.create(clubId, data, actorId, { allowSensitive });
-        results.push({ row: rowNumber, name, forms: formsText, ok: true, errors: [], memberId: member.id });
+        results.push({ row: rowNumber, name, forms: formsText, ok: true, errors: [], memberId: member.id, ...detail });
       } catch (e) {
         results.push({ row: rowNumber, name, forms: formsText, ok: false, errors: [e.message] });
       }

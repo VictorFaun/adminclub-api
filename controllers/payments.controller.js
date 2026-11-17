@@ -80,6 +80,11 @@ const chargeMatrix = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, data, 'Estado del cobro obtenido correctamente.');
 });
 
+const removeUntouchedForFormer = asyncHandler(async (req, res) => {
+  const data = await paymentsService.removeUntouchedForFormer(req.club.id, Number(req.params.chargeId), Number(req.params.memberId), req.user.id, req.authContext);
+  return ApiResponse.ok(res, data, data.removed ? `Se quitaron ${data.removed} período(s) sin pagos.` : 'No había períodos sin pagos para quitar.');
+});
+
 const ensureInstance = asyncHandler(async (req, res) => {
   const data = await paymentsService.ensureInstance(
     req.club.id,
@@ -177,6 +182,7 @@ module.exports = {
   listForMember,
   chargeMatrix,
   ensureInstance,
+  removeUntouchedForFormer,
   listForInstance,
   create,
   update,

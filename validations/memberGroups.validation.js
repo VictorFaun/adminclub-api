@@ -1,4 +1,4 @@
-const { body, param } = require('express-validator');
+const { body, param, query } = require('express-validator');
 
 const HEX_COLOR = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/;
 
@@ -21,11 +21,15 @@ const addMembers = [
   ...groupId,
   body('memberIds').isArray({ min: 1 }).withMessage('Debes indicar al menos un miembro.'),
   body('memberIds.*').isInt({ min: 1 }),
+  // Desde cuándo están en el grupo (se les cobra desde ese mes, sql/087).
+  body('since').optional({ nullable: true }).isISO8601().withMessage('Fecha inválida.'),
 ];
 
 const removeMember = [
   ...groupId,
   param('memberId').isInt({ min: 1 }).withMessage('Identificador de miembro inválido.'),
+  // Hasta cuándo estuvo en el grupo.
+  query('until').optional({ nullable: true }).isISO8601().withMessage('Fecha inválida.'),
 ];
 
 module.exports = { groupId, createGroup, updateGroup, addMembers, removeMember };

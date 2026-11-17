@@ -9,6 +9,10 @@ const targetFields = [
   body('targetGroups').optional().isArray(),
   body('targetGroups.*.groupId').isInt({ min: 1 }).withMessage('Grupo inválido.'),
   body('targetGroups.*.amount').isFloat({ min: 0.01 }).withMessage('El monto debe ser mayor a cero.'),
+  // Grupos que solo cambian el precio de quienes ya están en el cobro (sql/087).
+  body('priceGroups').optional().isArray(),
+  body('priceGroups.*.groupId').isInt({ min: 1 }).withMessage('Grupo inválido.'),
+  body('priceGroups.*.amount').isFloat({ min: 0.01 }).withMessage('El monto debe ser mayor a cero.'),
   body('targetMembers').optional().isArray(),
   body('targetMembers.*.memberId').isInt({ min: 1 }).withMessage('Miembro inválido.'),
   body('targetMembers.*.amount').isFloat({ min: 0.01 }).withMessage('El monto debe ser mayor a cero.'),

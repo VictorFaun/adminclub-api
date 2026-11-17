@@ -89,6 +89,13 @@ class ChargeInstancesService {
     return periods;
   }
 
+  /** ¿El período es del mes (o año) en que entró al grupo, o posterior? Sin fecha: siempre. */
+  _afterGroupJoin(recurrence, periodLabel, since) {
+    if (!since || recurrence === CHARGE_RECURRENCE.ONCE) return true;
+    if (recurrence === CHARGE_RECURRENCE.MONTHLY) return periodLabel >= since.slice(0, 7);
+    return periodLabel >= since.slice(0, 4);
+  }
+
   async generateForCharge(chargeId, referenceDate = new Date()) {
     const charge = await chargesRepository.findActiveById(chargeId);
     // Un cobro archivado no debe seguir generando nuevos períodos en silencio: quedaría oculto de
@@ -104,9 +111,13 @@ class ChargeInstancesService {
     // Monto por miembro (default < grupo < etiqueta < miembro específico) — se resuelve UNA vez
     // para todos los miembros del cobro, no por fila, para no repetir las mismas queries por
     // cada período generado.
-    const amounts = await chargesRepository.resolveAmounts(chargeId, memberIds, charge.amount);
+    // (un precio especial, ej. Directiva, aplica desde que entró a ese grupo: sql/087)
+    const amounts = await chargesRepository.resolveAmountSchedule(chargeId, memberIds, charge.amount, charge.recurrence);
     // Solo los períodos en que cada miembro está en el club (desde su ingreso, sin sus retiros).
     const memberships = await memberMembershipsRepository.findByMembers(memberIds);
+    // Y, si está en el cobro por un grupo, desde el mes en que entró a ese grupo (sql/087): sumar
+    // a alguien a mitad de año no le carga los meses anteriores como atrasados.
+    const joinedAt = await chargesRepository.groupJoinDates(chargeId, memberIds);
     // Política del club para el mes de ingreso/retiro (mensuales): cuál aplica y si se prorratea.
     const policy = await clubPolicyService.getMonthPolicy(charge.club_id);
 
@@ -115,7 +126,8 @@ class ChargeInstancesService {
       for (const memberId of memberIds) {
         const intervals = memberships.get(memberId);
         if (!coversChargePeriod(intervals, charge.recurrence, period.label, period.dueDate, policy)) continue;
-        const amount = proratedAmount(amounts.get(memberId), intervals, charge.recurrence, period.label, policy);
+        if (!this._afterGroupJoin(charge.recurrence, period.label, joinedAt.get(memberId))) continue;
+        const amount = proratedAmount(amounts.at(memberId, period.label), intervals, charge.recurrence, period.label, policy);
         rows.push({ chargeId, memberId, periodLabel: period.label, amount, dueDate: period.dueDate });
       }
     }
@@ -148,12 +160,53 @@ class ChargeInstancesService {
       dueDate = toDateString(year, charge.due_month, clampDay(year, charge.due_month, charge.due_day));
     }
 
-    const amounts = await chargesRepository.resolveAmounts(chargeId, [memberId], charge.amount);
+    const amounts = await chargesRepository.resolveAmountSchedule(chargeId, [memberId], charge.amount, charge.recurrence);
     const policy = await clubPolicyService.getMonthPolicy(charge.club_id);
     const intervals = await memberMembershipsRepository.findByMember(memberId);
-    const amount = proratedAmount(amounts.get(memberId), intervals, charge.recurrence, periodKey, policy);
+    const amount = proratedAmount(amounts.at(memberId, periodKey), intervals, charge.recurrence, periodKey, policy);
     await chargeInstancesRepository.bulkInsertIgnore([{ chargeId, memberId, periodLabel: periodKey, amount, dueDate }]);
     return chargeInstancesRepository.findByChargeMemberPeriod(chargeId, memberId, periodKey);
+  }
+
+  /**
+   * Tras cambiar los grupos de un miembro (sql/087). Crea los períodos que le faltan desde que entró
+   * a un grupo y, en sus períodos SIN movimientos (pendientes, sin abonos, comprobantes ni monto
+   * ajustado a mano; aunque estén atrasados):
+   *  - si ya no está en el cobro, quita los que vencen después de `until` (su salida del grupo);
+   *  - si sigue, recalcula el monto desde `since` (entró a un grupo con otro precio) o desde
+   *    `until` (salió de uno, ej. Directiva → vuelve al precio de su grupo).
+   * Lo pagado, abonado o marcado "No aplica" nunca se toca. Devuelve { created, updated, removed }.
+   */
+  async syncMemberAfterGroupChange(clubId, memberId, { since = null, until = null } = {}) {
+    const created = await this.generateDueInstances(clubId);
+    const charges = await chargesRepository.findActiveByClubForGeneration(clubId);
+    const intervals = await memberMembershipsRepository.findByMember(memberId);
+    const policy = await clubPolicyService.getMonthPolicy(clubId);
+    let updated = 0;
+    let removed = 0;
+    for (const charge of charges) {
+      /* eslint-disable no-await-in-loop */
+      const inCharge = (await chargesRepository.expandTargetMemberIds(charge.id, undefined, { inactive: 'all' })).includes(memberId);
+      if (!inCharge) {
+        if (!until) continue;
+        const rows = await chargeInstancesRepository.findUntouchedForMember(charge.id, memberId, until, { after: true });
+        removed += await chargeInstancesRepository.deleteUntouched(rows.map((r) => r.id));
+        continue;
+      }
+      const from = since || until;
+      if (!from) continue;
+      const amounts = await chargesRepository.resolveAmountSchedule(charge.id, [memberId], charge.amount, charge.recurrence);
+      const rows = await chargeInstancesRepository.findUntouchedForMember(charge.id, memberId, from, { after: !since });
+      for (const row of rows) {
+        const next = proratedAmount(amounts.at(memberId, row.period_label), intervals, charge.recurrence, row.period_label, policy);
+        if (Number(next) !== Number(row.amount)) {
+          await chargeInstancesRepository.setAmount(row.id, next);
+          updated += 1;
+        }
+      }
+      /* eslint-enable no-await-in-loop */
+    }
+    return { created, updated, removed };
   }
 
   /** `clubId` opcional: sin él, recorre todos los clubes (usado por el cron diario). */

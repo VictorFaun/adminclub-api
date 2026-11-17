@@ -10,14 +10,16 @@ class PaymentProofsRepository extends BaseRepository {
 
   /** Miembro ACTIVO del club por su identificador (el campo con uso "identificador": RUT, DNI…),
    * ya normalizado (ver helpers/memberFieldTypes.js#normalizeIdentifier). */
-  async findActiveMemberByIdentifier(clubId, normalized, conn = pool) {
-    const [rows] = await conn.query(
-      `SELECT m.id, m.club_id, mp.first_name FROM members m
-       INNER JOIN member_profiles mp ON mp.member_id = m.id
-       WHERE m.club_id = ? AND m.deleted_at IS NULL AND m.status = 'active' AND mp.rut IS NOT NULL
-         AND UPPER(mp.rut) = ? LIMIT 1`,
-      [clubId, normalized]
+  /** `fieldIds`: los campos de uso Identificador (puede haber uno por ficha, sql/086). */
+  async findActiveMemberByIdentifier(clubId, normalized, fieldIds, conn = pool) {
+    // Primero los ids (en dos pasos: ver members.repository.js#paginateByClub) y después su nombre.
+    const [found] = await conn.query(
+      `SELECT DISTINCT m.id FROM member_field_values v INNER JOIN members m ON m.id = v.member_id
+       WHERE v.field_id IN (?) AND m.club_id = ? AND m.deleted_at IS NULL AND m.status = 'active' AND UPPER(v.value) = ? LIMIT 1`,
+      [fieldIds, clubId, normalized]
     );
+    if (!found.length) return null;
+    const [rows] = await conn.query('SELECT m.id, m.club_id, mp.first_name FROM members m LEFT JOIN member_profiles mp ON mp.member_id = m.id WHERE m.id = ?', [found[0].id]);
     return rows[0] || null;
   }
 

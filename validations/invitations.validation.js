@@ -22,6 +22,8 @@ const createInvitation = [
   body('formSettings.guardian').optional().isObject(),
   body('formSettings.guardian.enabled').optional().isBoolean().toBoolean(),
   body('formSettings.guardian.formIds').optional().isArray({ max: 50 }),
+  body('formSettings.rolePriority').optional().isObject(),
+  body('formSettings.guardian.rolePriority').optional().isObject(),
 ];
 
 const updateInvitation = [...invitationId, ...createInvitation];

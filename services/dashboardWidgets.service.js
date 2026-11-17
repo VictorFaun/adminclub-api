@@ -432,7 +432,8 @@ class DashboardWidgetsService {
       [clubId]
     );
     const [nameFields] = await pool.query("SELECT code, role FROM member_fields WHERE club_id = ? AND role IN ('first_name', 'last_name')", [clubId]);
-    const code = (role) => nameFields.find((f) => f.role === role)?.code;
+    // Puede haber un campo de cada uso por ficha (sql/086): el primero respondido.
+    const pick = (data, role) => nameFields.filter((f) => f.role === role).map((f) => data?.[f.code]).find(Boolean);
     return {
       items: apps.map((a) => {
         let data = a.fields;
@@ -443,7 +444,7 @@ class DashboardWidgetsService {
             data = {};
           }
         }
-        const name = [data?.[code('first_name')], data?.[code('last_name')]].filter(Boolean).join(' ') || 'Sin nombre';
+        const name = [pick(data, 'first_name'), pick(data, 'last_name')].filter(Boolean).join(' ') || 'Sin nombre';
         return { id: a.id, name, groupName: a.group_name, groupColor: a.group_color, createdAt: a.created_at };
       }),
     };

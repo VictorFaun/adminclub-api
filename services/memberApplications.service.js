@@ -9,6 +9,7 @@ const usersRepository = require('../repositories/users.repository');
 const auditRepository = require('../repositories/audit.repository');
 const invitationsRepository = require('../repositories/invitations.repository');
 const memberFormsRepository = require('../repositories/memberForms.repository');
+const memberRolePriorityRepository = require('../repositories/memberRolePriority.repository');
 const memberFormVersionsRepository = require('../repositories/memberFormVersions.repository');
 const membersService = require('./members.service');
 const memberFieldsService = require('./memberFields.service');
@@ -131,8 +132,7 @@ class MemberApplicationsService {
     const club = await clubsRepository.findActiveById(invitation.club_id);
     if (!club || club.status !== CLUB_STATUS.ACTIVE) throw AppError.notFound('Este formulario no está disponible.');
     await invitationsService.assertUsable(invitation);
-    // Con la ficha del Identificador aunque la invitación sea anterior a esa regla (sql/079).
-    const formIds = await memberFormsService.withIdentifierForm(club.id, await invitationsRepository.findFormIds(invitation.id));
+    const formIds = await invitationsRepository.findFormIds(invitation.id);
     return { club, invitation, formIds };
   }
 
@@ -158,10 +158,9 @@ class MemberApplicationsService {
 
   /** Fichas y campos del apoderado que pide la invitación, o null. `publicOnly`: solo los del formulario público. */
   async _guardianForm(clubId, opts, { publicOnly = false } = {}) {
-    if (!opts?.guardian?.enabled) return null;
-    const chosen = opts.guardian.formIds?.length ? opts.guardian.formIds : await memberFormsRepository.findDefaultIds(clubId);
-    const valid = (await memberFormsRepository.findByIds(clubId, chosen)).map((f) => f.id);
-    const formIds = await memberFormsService.withIdentifierForm(clubId, valid);
+    if (!opts?.guardian?.enabled || !opts.guardian.formIds?.length) return null;
+    const formIds = (await memberFormsRepository.findByIds(clubId, opts.guardian.formIds)).map((f) => f.id);
+    if (!formIds.length) return null;
     return { formIds, forms: await this._formsInfo(clubId, formIds), fields: await this._formFields(clubId, formIds, { publicOnly }) };
   }
 
@@ -225,15 +224,14 @@ class MemberApplicationsService {
   /** Opciones del formulario de una cuenta: las de su invitación (sin invitación, no se pregunta nada más). */
   async _accountOptions(clubId, userId) {
     const invitation = await this._accountInvitation(clubId, userId);
-    if (!invitation) return { invitation: null, opts: { askMessage: false, groups: { mode: 'off', groupIds: [] }, consentIds: [], guardian: { enabled: false, formIds: [] } } };
+    if (!invitation) return { invitation: null, opts: { askMessage: false, groups: { mode: 'off', groupIds: [] }, consentIds: [], guardian: { enabled: false, formIds: [], rolePriority: {} }, rolePriority: {} } };
     return { invitation, opts: await invitationFormSettingsService.effective(invitation) };
   }
 
-  /** Fichas pendientes de una cuenta (las que pidió su invitación; antes de sql/072, las por defecto). */
+  /** Fichas pendientes de una cuenta (las que pidió su invitación; no hay fichas por defecto). */
   async _pendingFormIds(clubId, membership) {
     const ids = parseIds(membership?.pending_form_ids);
-    const valid = ids.length ? (await memberFormsRepository.findByIds(clubId, ids)).map((f) => f.id) : [];
-    return valid.length ? valid : memberFormsRepository.findDefaultIds(clubId);
+    return ids.length ? (await memberFormsRepository.findByIds(clubId, ids)).map((f) => f.id) : [];
   }
 
   async _clubBranding(club) {
@@ -533,11 +531,12 @@ class MemberApplicationsService {
 
   async _nameFromFields(clubId, fields) {
     const catalog = await memberFieldsRepository.findByClub(clubId);
-    // El nombre está en una sola ficha (sql/079): si se respondió otra, sirve su campo del mismo nombre.
+    // Puede haber un campo de cada uso por ficha (sql/086): sirve el primero respondido. Como
+    // respaldo, uno sin uso pero con el mismo nombre (las copias de sql/079).
     const byRole = (role) => {
-      const f = catalog.find((x) => x.role === role);
-      if (!f) return null;
-      return fields[f.code] || catalog.filter((x) => x.id !== f.id && x.label.trim().toLowerCase() === f.label.trim().toLowerCase()).map((x) => fields[x.code]).find(Boolean) || null;
+      const own = catalog.filter((x) => x.role === role);
+      const labels = new Set(own.map((x) => x.label.trim().toLowerCase()));
+      return own.map((x) => fields[x.code]).find(Boolean) || catalog.filter((x) => !x.role && labels.has(x.label.trim().toLowerCase())).map((x) => fields[x.code]).find(Boolean) || null;
     };
     return [byRole('first_name'), byRole('middle_name'), byRole('last_name'), byRole('second_last_name')].filter(Boolean).join(' ') || 'Sin nombre';
   }
@@ -585,10 +584,12 @@ class MemberApplicationsService {
     const catalog = await memberFieldsRepository.findByClub(clubId);
     const files = await memberApplicationsRepository.findFiles(rows.map((r) => r.id));
     const consents = await publicFormConsentsService.acceptanceByApplication(rows.map((r) => r.id));
-    const codeOf = (role) => catalog.find((x) => x.role === role)?.code;
-    const nameCodes = ['first_name', 'middle_name', 'last_name', 'second_last_name'].map(codeOf).filter(Boolean);
+    // Puede haber un campo de cada uso por ficha (sql/086): de cada uso, el primero respondido.
+    const pick = (fields, role) => catalog.filter((x) => x.role === role).map((x) => fields[x.code]).find(Boolean) || null;
+    const nameOf = (fields, roles) => roles.map((role) => pick(fields, role)).filter(Boolean).join(' ');
+    const NAME_ROLES = ['first_name', 'middle_name', 'last_name', 'second_last_name'];
     // Primer nombre + primer apellido: para títulos y espacios angostos, donde el completo se corta.
-    const shortCodes = ['first_name', 'last_name'].map(codeOf).filter(Boolean);
+    const SHORT_ROLES = ['first_name', 'last_name'];
     const forms = new Map((await memberFormsRepository.findByClub(clubId)).map((f) => [f.id, f.name]));
     // Miembro con el mismo identificador: el que se guardó al enviarla o, si la solicitud sigue
     // pendiente y no tenía, el que coincida ahora (igual que al aceptarla).
@@ -614,8 +615,8 @@ class MemberApplicationsService {
       return {
         id: row.id,
         status: row.status,
-        fullName: nameCodes.map((c) => fields[c]).filter(Boolean).join(' ') || 'Sin nombre',
-        shortName: shortCodes.map((c) => fields[c]).filter(Boolean).join(' ') || nameCodes.map((c) => fields[c]).filter(Boolean).join(' ') || 'Sin nombre',
+        fullName: nameOf(fields, NAME_ROLES) || 'Sin nombre',
+        shortName: nameOf(fields, SHORT_ROLES) || nameOf(fields, NAME_ROLES) || 'Sin nombre',
         fields,
         // Fichas que responde y de qué invitación viene.
         formIds,
@@ -716,8 +717,12 @@ class MemberApplicationsService {
     const guardianApp = await this._guardianAppOf(id);
     const guardianPlan = guardianApp?.status === 'pending' ? await this._checkGuardian(clubId, app, guardianApp) : null;
     const result = await this._approveMain(clubId, app, { groupIds, joinedOn }, actorId);
+    // Qué ficha usar primero para cada dato especial repetido: la que eligió el código.
+    const priority = await this._priorityOf(app);
+    await memberRolePriorityRepository.setForMember(result.memberId, priority.main);
     if (guardianPlan) {
       result.guardianMemberId = await this._approveGuardian(clubId, app, guardianApp, guardianPlan, result.memberId, joinedOn, actorId);
+      if (result.guardianMemberId) await memberRolePriorityRepository.setForMember(result.guardianMemberId, priority.guardian);
     }
     return result;
   }
@@ -816,11 +821,22 @@ class MemberApplicationsService {
     return { memberId: member.id };
   }
 
-  /** Fichas que responde la solicitud (anteriores a sql/072: las por defecto). */
+  /** Fichas que responde la solicitud (no hay fichas por defecto, sql/086). */
   async _appFormIds(clubId, app) {
     const ids = parseIds(app.form_ids);
-    const valid = ids.length ? (await memberFormsRepository.findByIds(clubId, ids)).map((f) => f.id) : [];
-    return valid.length ? valid : memberFormsRepository.findDefaultIds(clubId);
+    return ids.length ? (await memberFormsRepository.findByIds(clubId, ids)).map((f) => f.id) : [];
+  }
+
+  /**
+   * Prioridad de los datos especiales repetidos que eligió el código de la solicitud (sql/086):
+   * `{ main, guardian }`, cada uno `{ role: [formId, ...] }`. Sin código, vacía.
+   */
+  async _priorityOf(app) {
+    if (!app.invitation_id) return { main: {}, guardian: {} };
+    const invitation = await invitationsRepository.findById(app.invitation_id);
+    if (!invitation) return { main: {}, guardian: {} };
+    const opts = await invitationFormSettingsService.effective(invitation);
+    return { main: opts.rolePriority || {}, guardian: opts.guardian?.rolePriority || {} };
   }
 
   /**
@@ -903,7 +919,7 @@ class MemberApplicationsService {
         .map((f) => String(fields[f.code] || '').trim())
         .find((v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v));
       if (!to) return;
-      const firstName = fields[catalog.find((f) => f.role === 'first_name')?.code] || '';
+      const firstName = catalog.filter((f) => f.role === 'first_name').map((f) => fields[f.code]).find(Boolean) || '';
       const club = await clubsRepository.findById(clubId);
       const brand = { name: club.name, primaryColor: club.primary_color, logoUrl: toAbsoluteMediaUrl(club.logo_url) };
       const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);

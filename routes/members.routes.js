@@ -190,7 +190,8 @@ router.put(
   asyncHandler(async (req, res) => {
     const memberId = Number(req.params.id);
     await membersService.getById(req.club.id, memberId, req.authContext, req.user.id);
-    const data = await memberGroupsService.setMemberGroups(req.club.id, memberId, req.body.groupIds, req.user.id);
+    const day = (v) => (v ? String(v).slice(0, 10) : null);
+    const data = await memberGroupsService.setMemberGroups(req.club.id, memberId, req.body.groupIds, req.user.id, { since: day(req.body.since), until: day(req.body.until) });
     return ApiResponse.ok(res, data, 'Grupos actualizados.');
   })
 );

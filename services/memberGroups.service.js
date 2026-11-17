@@ -2,6 +2,7 @@ const memberGroupsRepository = require('../repositories/memberGroups.repository'
 const membersRepository = require('../repositories/members.repository');
 const auditRepository = require('../repositories/audit.repository');
 const AppError = require('../helpers/AppError');
+const todayISO = () => new Date().toISOString().slice(0, 10);
 const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const { parsePagination, buildMeta } = require('../helpers/pagination');
 const { diffValue, buildDiff } = require('../helpers/auditDiff');
@@ -98,15 +99,18 @@ class MemberGroupsService {
     return { items, meta: buildMeta({ page, limit, total }) };
   }
 
-  async addMembers(clubId, groupId, memberIds, actorId) {
+  /** `since` ('YYYY-MM-DD'): desde cuándo están en el grupo (se les cobra desde ese mes). */
+  async addMembers(clubId, groupId, memberIds, actorId, since = null) {
     const group = await memberGroupsRepository.findByIdInClub(groupId, clubId);
     if (!group) throw AppError.notFound('Grupo no encontrado.');
     const found = await membersRepository.findByIds(memberIds, clubId);
     if (found.length !== memberIds.length) throw AppError.badRequest('Uno o más miembros no pertenecen a este club.');
 
-    await memberGroupsRepository.addMembers(groupId, memberIds);
-    // Los agregados reciben ya los períodos de los cobros/entrenamientos de ese grupo.
+    await memberGroupsRepository.addMembers(groupId, memberIds, undefined, since);
+    // Los agregados reciben ya los períodos de los cobros/entrenamientos de ese grupo (desde
+    // `since`) y sus pendientes sin movimientos toman el precio nuevo (ej. entró a Directiva).
     await require('../helpers/regeneratePeriods').regeneratePeriods(clubId); // eslint-disable-line global-require
+    for (const memberId of memberIds) await this._syncCharges(clubId, memberId, { since: since || todayISO() }); // eslint-disable-line no-await-in-loop
     await auditRepository.logAction({
       userId: actorId,
       clubId,
@@ -119,7 +123,14 @@ class MemberGroupsService {
 
   /** Deja a UN miembro exactamente en los grupos indicados (ficha del miembro, pestaña Grupos):
    * agrega los que faltan y quita los que sobran, y regenera los períodos una sola vez. */
-  async setMemberGroups(clubId, memberId, groupIds, actorId) {
+  /** `since`: desde cuándo está en los grupos que se agregan; `until`: hasta cuándo estuvo en los que se quitan. */
+  /** Ajusta sus cobros al cambio de grupos (ver chargeInstances.service.js#syncMemberAfterGroupChange). */
+  async _syncCharges(clubId, memberId, dates) {
+    // eslint-disable-next-line global-require
+    return require('./chargeInstances.service').syncMemberAfterGroupChange(clubId, memberId, dates);
+  }
+
+  async setMemberGroups(clubId, memberId, groupIds, actorId, { since = null, until = null } = {}) {
     const ids = [...new Set(groupIds.map(Number))];
     const valid = await memberGroupsRepository.findByIds(ids, clubId);
     if (valid.length !== ids.length) throw AppError.badRequest('Uno o más grupos no pertenecen a este club.');
@@ -128,7 +139,7 @@ class MemberGroupsService {
     const toAdd = ids.filter((id) => !current.includes(id));
     const toRemove = current.filter((id) => !ids.includes(id));
     for (const groupId of toAdd) {
-      await memberGroupsRepository.addMembers(groupId, [memberId]); // eslint-disable-line no-await-in-loop
+      await memberGroupsRepository.addMembers(groupId, [memberId], undefined, since); // eslint-disable-line no-await-in-loop
       // eslint-disable-next-line no-await-in-loop
       await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_GROUP_MEMBERS_ADDED', entityType: 'member_group', entityId: groupId, changes: { added: [memberId] } });
     }
@@ -139,13 +150,20 @@ class MemberGroupsService {
     }
     // Los agregados reciben ya los períodos de los cobros/entrenamientos de esos grupos.
     if (toAdd.length) await require('../helpers/regeneratePeriods').regeneratePeriods(clubId); // eslint-disable-line global-require
-    return { added: toAdd.length, removed: toRemove.length };
+    let charges = null;
+    if (toAdd.length || toRemove.length) {
+      charges = await this._syncCharges(clubId, memberId, { since: toAdd.length ? since || todayISO() : null, until: toRemove.length ? until || todayISO() : null });
+    }
+    return { added: toAdd.length, removed: toRemove.length, charges };
   }
 
-  async removeMember(clubId, groupId, memberId, actorId) {
+  /** `until` ('YYYY-MM-DD'): hasta cuándo estuvo en el grupo (lo que vence después, sin
+   * movimientos, se le quita de los cobros de ese grupo). */
+  async removeMember(clubId, groupId, memberId, actorId, until = null) {
     const group = await memberGroupsRepository.findByIdInClub(groupId, clubId);
     if (!group) throw AppError.notFound('Grupo no encontrado.');
     await memberGroupsRepository.removeMember(groupId, memberId);
+    await this._syncCharges(clubId, memberId, { until: until || todayISO() });
     await auditRepository.logAction({
       userId: actorId,
       clubId,

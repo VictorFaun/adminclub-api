@@ -103,7 +103,8 @@ class InvitationsService {
     const account = requiresAccount === undefined ? (current ? !!current.requires_account : true) : !!requiresAccount;
     let forms = await memberFormsService.resolveIds(clubId, formIds);
     if (forms === null) {
-      if (requiresMemberProfile !== undefined) forms = requiresMemberProfile ? await memberFormsService.defaultIds(clubId) : [];
+      // `requiresMemberProfile` (antiguo) ya no agrega fichas: no hay fichas por defecto (sql/086).
+      if (requiresMemberProfile !== undefined) forms = [];
       else forms = current ? await invitationsRepository.findFormIds(current.id) : [];
     }
     if (!account && !forms.length) {
@@ -123,7 +124,7 @@ class InvitationsService {
     }
     const { account, forms } = await this._resolveConfig(clubId, { requiresAccount, formIds, requiresMemberProfile }, invitation);
     const previousForms = await invitationsRepository.findFormIds(invitationId);
-    const settingsJson = formSettings ? await invitationFormSettingsService.normalize(clubId, formSettings) : null;
+    const settingsJson = formSettings ? await invitationFormSettingsService.normalize(clubId, formSettings, forms) : null;
 
     // Si el actor no puede asignar roles, el rol de la invitación se conserva tal cual. Sin cuenta
     // no hay a quién asignárselo.
@@ -176,7 +177,7 @@ class InvitationsService {
   async create(clubId, { maxUses, expiresAt, defaultRoleId, note, requiresAccount, formIds, requiresMemberProfile, formSettings }, actorId) {
     const { account, forms } = await this._resolveConfig(clubId, { requiresAccount, formIds, requiresMemberProfile });
     // Sin opciones (cliente anterior): las que tenía el club.
-    const settingsJson = await invitationFormSettingsService.normalize(clubId, formSettings || (await invitationFormSettingsService.clubDefaults(clubId)));
+    const settingsJson = await invitationFormSettingsService.normalize(clubId, formSettings || (await invitationFormSettingsService.clubDefaults(clubId)), forms);
     // Elegir el rol con el que entrará quien use la invitación es, en la práctica,
     // asignar un rol: exige el mismo permiso (ASSIGN_USER_ROLES) que hacerlo a mano
     // desde el perfil de un usuario. Si el actor no lo tiene, se ignora lo que haya

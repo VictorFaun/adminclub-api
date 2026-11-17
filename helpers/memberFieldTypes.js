@@ -163,17 +163,17 @@ function acceptedMimes(field) {
 }
 
 /**
- * Usos especiales: qué tipos admite cada uno. Los nombres y el identificador van una sola vez en el
- * club (en la ficha del identificador, que responden todos). Los `perForm` van una vez por ficha
- * (sql/083): así se pide, por ejemplo, la fecha de nacimiento solo en las fichas que la necesitan.
- * El dato del miembro sale de la primera ficha que lo tenga respondido (ver vista member_profiles).
+ * Usos especiales: qué tipos admite cada uno. Todos van una vez POR FICHA (sql/083, sql/086): dos
+ * fichas pueden tener cada una su "Nombre" o su "Identificador". El dato del miembro sale de la
+ * ficha con más prioridad que lo tenga respondido (member_role_priority; ver vista member_profiles).
+ * El identificador se busca en todos sus campos (members.service.js#identifierFrom).
  */
 const ROLES = {
-  first_name: { label: 'Nombre', types: ['text'] },
-  middle_name: { label: 'Segundo nombre', types: ['text'] },
-  last_name: { label: 'Apellido', types: ['text'] },
-  second_last_name: { label: 'Segundo apellido', types: ['text'] },
-  identifier: { label: 'Identificador (RUT, DNI…)', types: ['rut', 'text', 'number'] },
+  first_name: { label: 'Nombre', types: ['text'], perForm: true },
+  middle_name: { label: 'Segundo nombre', types: ['text'], perForm: true },
+  last_name: { label: 'Apellido', types: ['text'], perForm: true },
+  second_last_name: { label: 'Segundo apellido', types: ['text'], perForm: true },
+  identifier: { label: 'Identificador (RUT, DNI…)', types: ['rut', 'text', 'number'], perForm: true },
   birth_date: { label: 'Fecha de nacimiento', types: ['date'], perForm: true },
   email: { label: 'Correo de contacto', types: ['email'], perForm: true },
   phone: { label: 'Teléfono de contacto', types: ['phone'], perForm: true },

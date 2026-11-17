@@ -4,6 +4,9 @@ const membersRepository = require('../repositories/members.repository');
 const memberGroupsRepository = require('../repositories/memberGroups.repository');
 const auditRepository = require('../repositories/audit.repository');
 const chargeInstancesService = require('./chargeInstances.service');
+const clubPolicyService = require('./clubPolicy.service');
+const memberMembershipsRepository = require('../repositories/memberMemberships.repository');
+const { proratedAmount } = require('../helpers/membership');
 const treasuryAccountsService = require('./treasuryAccounts.service');
 const permissionService = require('./permission.service');
 const AppError = require('../helpers/AppError');
@@ -53,10 +56,21 @@ class ChargesService {
       responsibles: responsibles.map((r) => ({ memberId: r.memberId, memberName: r.memberName, groupId: r.groupId, groupName: r.groupName, account: r.account ?? null })),
       // `{id, amount}` — el nombre del target (grupo/miembro) es `id` en ambos para que el
       // frontend pueda pasarlos tal cual a <app-priced-target-picker>, sin remapear.
-      targetGroups: targetGroups.map((g) => ({ id: g.groupId, amount: g.amount })),
+      targetGroups: targetGroups.filter((g) => !g.priceOnly).map((g) => ({ id: g.groupId, amount: g.amount })),
+      // Grupos que solo cambian el precio de quienes ya están en el cobro (sql/087).
+      priceGroups: targetGroups.filter((g) => g.priceOnly).map((g) => ({ id: g.groupId, amount: g.amount })),
       targetMembers: targetMembers.map((m) => ({ id: m.memberId, amount: m.amount })),
       exclusionMemberIds,
       createdAt: charge.created_at,
+    };
+  }
+
+  /** Grupos del payload o, si no vienen, los que ya tenía el cobro (separados en cobrados / solo precio). */
+  async _currentGroupTargets(chargeId, data) {
+    const current = data.targetGroups === undefined || data.priceGroups === undefined ? await chargesRepository.getTargetGroups(chargeId) : [];
+    return {
+      targetGroups: data.targetGroups ?? current.filter((g) => !g.priceOnly),
+      priceGroups: data.priceGroups ?? current.filter((g) => g.priceOnly),
     };
   }
 
@@ -79,7 +93,13 @@ class ChargesService {
    * (defensa en profundidad — `charges.validation.js` ya lo exige, pero el service es la
    * fuente de verdad) — `targetGroups`/`targetMembers` vienen en la forma cruda del payload
    * (`{groupId,amount}`/`{memberId,amount}`). */
-  async _resolveTargets(clubId, { targetMembers = [], targetGroups = [], exclusionMemberIds = [] }) {
+  async _resolveTargets(clubId, { targetMembers = [], targetGroups = [], priceGroups = [], exclusionMemberIds = [] }) {
+    // Un mismo grupo no puede ser "a quién se le cobra" y "solo precio" a la vez.
+    const charged = new Set(targetGroups.map((t) => Number(t.groupId)));
+    if (priceGroups.some((t) => charged.has(Number(t.groupId)))) {
+      throw AppError.badRequest('Un grupo no puede estar a la vez en «A quién se le cobra» y en «Precios especiales».');
+    }
+    targetGroups = [...targetGroups.map((t) => ({ ...t, priceOnly: false })), ...priceGroups.map((t) => ({ ...t, priceOnly: true }))];
     for (const t of [...targetGroups, ...targetMembers]) {
       if (!(Number(t.amount) > 0)) throw AppError.badRequest('Cada grupo o miembro apuntado necesita un monto mayor a $0.');
     }
@@ -186,7 +206,7 @@ class ChargesService {
     const schedule = this._resolveSchedule(data);
     const targets = await this._resolveTargets(clubId, data);
     const responsibles = this._normalizeResponsibles(data.responsibles || []);
-    await this._assertResponsiblesValid(clubId, responsibles, targets.targetGroups.map((t) => t.groupId));
+    await this._assertResponsiblesValid(clubId, responsibles, targets.targetGroups.filter((t) => !t.priceOnly).map((t) => t.groupId));
     const purpose = data.purpose || 'treasury';
     this._assertPurposeValid(purpose, data.recurrence, responsibles.length);
     const treasuryAccountId = await treasuryAccountsService.assertValidForCharge(clubId, data.treasuryAccountId ?? null, purpose);
@@ -276,11 +296,11 @@ class ChargesService {
     }
 
     const targetsChanged =
-      data.targetMembers !== undefined || data.targetGroups !== undefined || data.exclusionMemberIds !== undefined;
+      data.targetMembers !== undefined || data.targetGroups !== undefined || data.priceGroups !== undefined || data.exclusionMemberIds !== undefined;
     const targets = targetsChanged
       ? await this._resolveTargets(clubId, {
           targetMembers: data.targetMembers ?? (await chargesRepository.getTargetMembers(chargeId)),
-          targetGroups: data.targetGroups ?? (await chargesRepository.getTargetGroups(chargeId)),
+          ...(await this._currentGroupTargets(chargeId, data)),
           exclusionMemberIds: data.exclusionMemberIds ?? (await chargesRepository.getExclusionMemberIds(chargeId)),
         })
       : null;
@@ -288,7 +308,8 @@ class ChargesService {
     const responsiblesChanged = data.responsibles !== undefined;
     let responsibleCount = 0;
     if (responsiblesChanged) {
-      const targetGroupIds = targets ? targets.targetGroups.map((t) => t.groupId) : (await chargesRepository.getTargetGroups(chargeId)).map((t) => t.groupId);
+      // Responsables por grupo: solo los grupos a los que se les cobra (no los de "solo precio").
+      const targetGroupIds = (targets ? targets.targetGroups : await chargesRepository.getTargetGroups(chargeId)).filter((t) => !t.priceOnly).map((t) => t.groupId);
       data.responsibles = this._normalizeResponsibles(data.responsibles);
       await this._assertResponsiblesValid(clubId, data.responsibles, targetGroupIds);
       responsibleCount = data.responsibles.length;
@@ -326,11 +347,21 @@ class ChargesService {
         const memberIds = await chargesRepository.expandTargetMemberIds(chargeId, conn);
         if (memberIds.length) {
           const newDefaultAmount = updates.amount !== undefined ? updates.amount : charge.amount;
-          const amounts = await chargesRepository.resolveAmounts(chargeId, memberIds, newDefaultAmount, conn);
+          // Por período: un precio especial (ej. Directiva) solo desde que entró a ese grupo, y el
+          // mes de ingreso/retiro prorrateado según la política del club (sql/087). Solo períodos
+          // sin movimientos (pendientes, sin abonos, comprobantes ni monto ajustado a mano).
+          const amounts = await chargesRepository.resolveAmountSchedule(chargeId, memberIds, newDefaultAmount, finalRecurrence, conn);
+          const memberships = await memberMembershipsRepository.findByMembers(memberIds);
+          const policy = await clubPolicyService.getMonthPolicy(clubId);
+          /* eslint-disable no-await-in-loop */
           for (const memberId of memberIds) {
-            // eslint-disable-next-line no-await-in-loop
-            await chargeInstancesRepository.updateAmountForMember(chargeId, memberId, amounts.get(memberId), effectiveFrom, conn);
+            const rows = await chargeInstancesRepository.findUntouchedForMember(chargeId, memberId, effectiveFrom, {}, conn);
+            for (const row of rows) {
+              const next = proratedAmount(amounts.at(memberId, row.period_label), memberships.get(memberId), finalRecurrence, row.period_label, policy);
+              if (Number(next) !== Number(row.amount)) await chargeInstancesRepository.setAmount(row.id, next, conn);
+            }
           }
+          /* eslint-enable no-await-in-loop */
         }
       }
     });

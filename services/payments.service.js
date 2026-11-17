@@ -474,8 +474,14 @@ class PaymentsService {
       // eslint-disable-next-line no-await-in-loop
       const charge = await chargesRepository.findActiveById(chargeId);
       if (!charge || charge.recurrence === 'once') continue;
+      // Ya no está en este cobro: solo sus períodos reales, no se inventan pendientes (sql/087).
       // eslint-disable-next-line no-await-in-loop
-      const amount = (await chargesRepository.resolveAmounts(chargeId, [memberId], charge.amount)).get(memberId);
+      if (!(await chargesRepository.expandTargetMemberIds(chargeId, undefined, { inactive: 'all' })).includes(memberId)) continue;
+      // Si está por un grupo, desde el mes (o año) en que entró a ese grupo.
+      // eslint-disable-next-line no-await-in-loop
+      const since = (await chargesRepository.groupJoinDates(chargeId, [memberId])).get(memberId);
+      // eslint-disable-next-line no-await-in-loop
+      const amounts = await chargesRepository.resolveAmountSchedule(chargeId, [memberId], charge.amount, charge.recurrence);
       const responsibleInfo = responsibleByCharge.get(chargeId) ?? null;
       // eslint-disable-next-line no-await-in-loop
       const policy = await clubPolicyService.getMonthPolicy(charge.club_id);
@@ -493,7 +499,8 @@ class PaymentsService {
         const todayIndex = now.getUTCFullYear() * 12 + (now.getUTCMonth() + 1);
         let endIndex = Math.max(Math.max(...existing), firstApplicable, todayIndex);
         if (lastApplicable !== null) endIndex = Math.min(endIndex, lastApplicable);
-        const startIndex = Math.max(firstApplicable, endIndex - 36);
+        const sinceIndex = since ? Number(since.slice(0, 4)) * 12 + Number(since.slice(5, 7)) : 0;
+        const startIndex = Math.max(firstApplicable, endIndex - 36, sinceIndex);
 
         for (let idx = startIndex; idx <= endIndex; idx += 1) {
           if (existing.has(idx)) continue;
@@ -501,7 +508,7 @@ class PaymentsService {
           const month = idx - year * 12;
           const key = `${year}-${pad(month)}`;
           if (!coversChargePeriod(intervals, 'monthly', key, null, policy)) continue;
-          virtual.push(this._virtualInstanceToDto(charge, key, proratedAmount(amount, intervals, 'monthly', key, policy), responsibleInfo));
+          virtual.push(this._virtualInstanceToDto(charge, key, proratedAmount(amounts.at(memberId, key), intervals, 'monthly', key, policy), responsibleInfo));
         }
       } else {
         const existing = new Set(periodLabels.map(Number));
@@ -510,12 +517,12 @@ class PaymentsService {
         const todayYear = new Date().getUTCFullYear();
         let endYear = Math.max(Math.max(...existing), firstApplicable, todayYear);
         if (lastApplicable !== null) endYear = Math.min(endYear, lastApplicable);
-        const startYear = Math.max(firstApplicable, endYear - 20);
+        const startYear = Math.max(firstApplicable, endYear - 20, since ? Number(since.slice(0, 4)) : 0);
 
         for (let y = startYear; y <= endYear; y += 1) {
           if (existing.has(y)) continue;
           if (!coversChargePeriod(intervals, 'yearly', String(y), null, policy)) continue;
-          virtual.push(this._virtualInstanceToDto(charge, String(y), amount, responsibleInfo));
+          virtual.push(this._virtualInstanceToDto(charge, String(y), amounts.at(memberId, String(y)), responsibleInfo));
         }
       }
     }
@@ -763,6 +770,15 @@ class PaymentsService {
     const rawSettlements = await this._computeSettlements(charge, periods);
 
     const { memberIds, scopedToMemberId } = await this._resolveChargeParticipants(charge, actorId, authContext);
+    // Fuera del cobro hoy (salieron de su grupo) y desde cuándo está cada uno por su grupo (sql/087).
+    const currentIds = new Set(await chargesRepository.expandTargetMemberIds(chargeId, undefined, { inactive: 'all' }));
+    const groupSince = await chargesRepository.groupJoinDates(chargeId, memberIds.filter((id) => currentIds.has(id)));
+    const outReason = (memberId, periodKey) => {
+      if (!currentIds.has(memberId)) return 'Ya no está en este cobro.';
+      const since = groupSince.get(memberId);
+      if (since && !chargeInstancesService._afterGroupJoin(charge.recurrence, periodKey, since)) return 'Todavía no estaba en el grupo al que se le cobra.';
+      return null;
+    };
     const settlements = scopedToMemberId ? this._filterSettlementsToResponsible(rawSettlements, scopedToMemberId) : rawSettlements;
 
     if (!memberIds.length) return { charge: chargeDto, periods, canGoBack, canGoForward, rows: [], settlements, years, year: selectedYear };
@@ -770,7 +786,7 @@ class PaymentsService {
     const [allMembers, instances, amounts, responsibleByMember, membershipsByMember] = await Promise.all([
       membersRepository.findNamesByIds(memberIds, clubId, undefined, { includeDeleted: true }),
       chargeInstancesRepository.findForChargeAndMembers(chargeId, memberIds),
-      chargesRepository.resolveAmounts(chargeId, memberIds, charge.amount),
+      chargesRepository.resolveAmountSchedule(chargeId, memberIds, charge.amount, charge.recurrence),
       chargesRepository.resolveResponsibles(chargeId, memberIds),
       memberMembershipsRepository.findByMembers(memberIds),
     ]);
@@ -808,6 +824,9 @@ class PaymentsService {
         // Ficha eliminada (ya no se puede eliminar, solo retirar; quedan las de antes): se muestra
         // como un retirado, de solo lectura, y sus atrasos no cuentan en los totales del cobro.
         deleted: !!m.deleted_at,
+        // Salió del cobro (ej. del grupo al que se le cobra) pero tiene períodos: se muestra con su
+        // historial; sus pendientes se pueden pagar o marcar «No aplica» (sql/087).
+        outOfCharge: !m.deleted_at && !currentIds.has(m.id),
         cells: periods.reduce((acc, p) => {
           const inst = cellLookup.get(m.id)?.get(p.key);
           acc[p.key] = inst
@@ -815,8 +834,8 @@ class PaymentsService {
             : this._virtualCellToDto(
                 charge,
                 p.key,
-                proratedAmount(amounts.get(m.id), membershipsByMember.get(m.id), charge.recurrence, p.key, policy),
-                chargePeriodReason(membershipsByMember.get(m.id), charge.recurrence, p.key, this._dueDateForPeriod(charge, p.key), policy)
+                proratedAmount(amounts.at(m.id, p.key), membershipsByMember.get(m.id), charge.recurrence, p.key, policy),
+                outReason(m.id, p.key) ?? chargePeriodReason(membershipsByMember.get(m.id), charge.recurrence, p.key, this._dueDateForPeriod(charge, p.key), policy)
               );
           return acc;
         }, {}),
@@ -858,6 +877,10 @@ class PaymentsService {
       // Eliminados con pagos en este cobro: su plata sigue contando, así que siguen a la vista
       // (solo quien ve TODOS los pagos — un scope acotado no puede resolverlos, ya no tienen grupo).
       if (visibleMemberIds === null) memberIds.push(...(await chargesRepository.findDeletedPayerIds(charge.id)).filter((id) => !memberIds.includes(id)));
+      // Quienes salieron del cobro (ej. del grupo al que se le cobra) pero tienen períodos: siguen a
+      // la vista con sus deudas y pagos (antes solo aparecían atrasados en su ficha, sql/087).
+      const former = (await chargesRepository.findFormerPayerIds(charge.id)).filter((id) => !memberIds.includes(id) && (visibleMemberIds === null || visibleMemberIds.includes(id)));
+      memberIds.push(...former);
       return { memberIds, scopedToMemberId: null };
     }
     const member = await membersRepository.findByUserId(actorId, charge.club_id);
@@ -1286,6 +1309,34 @@ class PaymentsService {
    * disparado desde la matriz "Pagos" al interactuar con una celda vacía (registrar un pago o
    * eximir un período que el cron aún no generó). `memberId` debe ser un participante real del
    * cobro (targets directos + grupos - exclusiones), no cualquier miembro del club. */
+  /**
+   * Quien ya no está en el cobro (salió del grupo, o quedó por error: ej. entró a un grupo de
+   * "precio especial" cuando todavía agregaba gente, ver sql/087-088): quita sus períodos SIN
+   * movimientos — pendientes, sin abonos, comprobantes ni monto ajustado a mano. Lo pagado, abonado
+   * o marcado "No aplica" queda. Devuelve { removed }.
+   */
+  async removeUntouchedForFormer(clubId, chargeId, memberId, actorId, authContext) {
+    const charge = await this._findChargeInClub(clubId, chargeId);
+    await this.assertChargeMemberPaymentAccessible(charge, memberId, actorId, authContext);
+    const current = await chargesRepository.expandTargetMemberIds(chargeId, undefined, { inactive: 'all' });
+    if (current.includes(memberId)) {
+      throw AppError.conflict('Esta persona sigue en el cobro: sus períodos no se pueden quitar así (márcalos «No aplica» si no corresponden).');
+    }
+    const rows = await chargeInstancesRepository.findUntouchedForMember(chargeId, memberId, '1900-01-01');
+    const removed = await chargeInstancesRepository.deleteUntouched(rows.map((r) => r.id));
+    if (removed) {
+      await auditRepository.logAction({
+        userId: actorId,
+        clubId,
+        action: 'CHARGE_INSTANCES_REMOVED',
+        entityType: 'charge',
+        entityId: chargeId,
+        changes: { memberId, removed, periods: rows.map((r) => r.period_label) },
+      });
+    }
+    return { removed };
+  }
+
   async ensureInstance(clubId, chargeId, memberId, periodKey, actorId, authContext) {
     const charge = await chargesRepository.findActiveById(chargeId);
     if (!charge || charge.club_id !== clubId) throw AppError.notFound('Cobro no encontrado.');
@@ -1294,6 +1345,10 @@ class PaymentsService {
 
     const participantIds = await chargesRepository.expandTargetMemberIds(chargeId, undefined, { inactive: 'all' });
     if (!participantIds.includes(memberId)) throw AppError.badRequest('Este miembro no participa de este cobro.');
+    const since = (await chargesRepository.groupJoinDates(chargeId, [memberId])).get(memberId);
+    if (since && !chargeInstancesService._afterGroupJoin(charge.recurrence, periodKey, since)) {
+      throw AppError.badRequest('En ese período todavía no estaba en el grupo al que se le cobra.');
+    }
 
     // Un miembro retirado puede tener deuda o historial de ANTES de su baja (pagarla, o marcarla
     // "no aplica"), pero no se le cargan períodos que vencen después.

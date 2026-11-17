@@ -38,12 +38,12 @@ const listMembers = asyncHandler(async (req, res) => {
 });
 
 const addMembers = asyncHandler(async (req, res) => {
-  await memberGroupsService.addMembers(req.club.id, Number(req.params.id), req.body.memberIds, req.user.id);
+  await memberGroupsService.addMembers(req.club.id, Number(req.params.id), req.body.memberIds, req.user.id, req.body.since ? String(req.body.since).slice(0, 10) : null);
   return ApiResponse.ok(res, null, 'Miembros agregados al grupo correctamente.');
 });
 
 const removeMember = asyncHandler(async (req, res) => {
-  await memberGroupsService.removeMember(req.club.id, Number(req.params.id), Number(req.params.memberId), req.user.id);
+  await memberGroupsService.removeMember(req.club.id, Number(req.params.id), Number(req.params.memberId), req.user.id, req.query.until ? String(req.query.until).slice(0, 10) : null);
   return ApiResponse.ok(res, null, 'Miembro quitado del grupo correctamente.');
 });
 

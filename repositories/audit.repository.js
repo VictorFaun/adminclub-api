@@ -181,8 +181,9 @@ class AuditRepository {
             data = {};
           }
         }
-        const codeOf = (role) => nameFields.find((f) => f.club_id === a.club_id && f.role === role)?.code;
-        const label = [data?.[codeOf('first_name')], data?.[codeOf('last_name')]].filter(Boolean).join(' ');
+        // Puede haber un campo de cada uso por ficha (sql/086): el primero respondido.
+        const pick = (role) => nameFields.filter((f) => f.club_id === a.club_id && f.role === role).map((f) => data?.[f.code]).find(Boolean);
+        const label = [pick('first_name'), pick('last_name')].filter(Boolean).join(' ');
         if (label) names.set(`member_application:${a.id}`, label);
       }
     }

@@ -17,6 +17,12 @@ class MemberFieldsRepository extends BaseRepository {
     return rows[0] || null;
   }
 
+  /** Todos los campos con ese uso (uno por ficha, sql/086), en el orden del catálogo. */
+  async findAllByRole(clubId, role, conn = pool) {
+    const [rows] = await conn.query('SELECT * FROM member_fields WHERE club_id = ? AND role = ? ORDER BY sort_order ASC, id ASC', [clubId, role]);
+    return rows;
+  }
+
   async findByRole(clubId, role, conn = pool) {
     const [rows] = await conn.query('SELECT * FROM member_fields WHERE club_id = ? AND role = ? LIMIT 1', [clubId, role]);
     return rows[0] || null;
@@ -50,8 +56,11 @@ class MemberFieldsRepository extends BaseRepository {
   }
 
   /** ¿Algún otro miembro del club ya tiene este identificador? (`normalized` en mayúsculas/canon). */
-  async identifierExists(clubId, fieldId, normalized, excludeMemberId = null, conn = pool) {
-    const params = [fieldId, clubId, normalized];
+  /** `fieldIds`: un campo o todos los de uso Identificador (pueden estar en varias fichas). */
+  async identifierExists(clubId, fieldIds, normalized, excludeMemberId = null, conn = pool) {
+    const ids = [].concat(fieldIds);
+    if (!ids.length) return false;
+    const params = [ids, clubId, normalized];
     let exclude = '';
     if (excludeMemberId) {
       exclude = 'AND m.id <> ?';
@@ -59,18 +68,20 @@ class MemberFieldsRepository extends BaseRepository {
     }
     const [rows] = await conn.query(
       `SELECT 1 FROM member_field_values v INNER JOIN members m ON m.id = v.member_id
-       WHERE v.field_id = ? AND m.club_id = ? AND m.deleted_at IS NULL AND UPPER(v.value) = ? ${exclude} LIMIT 1`,
+       WHERE v.field_id IN (?) AND m.club_id = ? AND m.deleted_at IS NULL AND UPPER(v.value) = ? ${exclude} LIMIT 1`,
       params
     );
     return rows.length > 0;
   }
 
   /** Miembro (no eliminado) del club que tiene este identificador (`normalized` en mayúsculas/canon). */
-  async findMemberIdByIdentifier(clubId, fieldId, normalized, conn = pool) {
+  async findMemberIdByIdentifier(clubId, fieldIds, normalized, conn = pool) {
+    const ids = [].concat(fieldIds);
+    if (!ids.length) return null;
     const [rows] = await conn.query(
       `SELECT m.id FROM member_field_values v INNER JOIN members m ON m.id = v.member_id
-       WHERE v.field_id = ? AND m.club_id = ? AND m.deleted_at IS NULL AND UPPER(v.value) = ? LIMIT 1`,
-      [fieldId, clubId, normalized]
+       WHERE v.field_id IN (?) AND m.club_id = ? AND m.deleted_at IS NULL AND UPPER(v.value) = ? LIMIT 1`,
+      [ids, clubId, normalized]
     );
     return rows[0]?.id ?? null;
   }

@@ -61,6 +61,9 @@ const setGroups = [
   ...memberId,
   body('groupIds').isArray().withMessage('Indica los grupos.'),
   body('groupIds.*').isInt({ min: 1 }).withMessage('Grupo inválido.'),
+  // Desde cuándo está en los grupos que se agregan / hasta cuándo en los que se quitan (sql/087).
+  body('since').optional({ nullable: true }).isISO8601().withMessage('Fecha inválida.'),
+  body('until').optional({ nullable: true }).isISO8601().withMessage('Fecha inválida.'),
 ];
 
 module.exports = { setGroups, memberId, membership, formVersion, createMember, createMemberSelf, updateMember, linkUser, listMembers, birthdaySettings, birthdayAssignment };

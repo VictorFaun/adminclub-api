@@ -65,6 +65,14 @@ router.post(
   controller.ensureInstance
 );
 
+// Quien ya no está en el cobro: quitar sus períodos sin movimientos (ver payments.service.js#removeUntouchedForFormer).
+router.delete(
+  '/charges/:chargeId/members/:memberId/untouched',
+  requireFunctionOrResponsibleCharge(FUNCTIONS.EXEMPT_PAYMENTS),
+  validation.removeUntouched,
+  handleValidation,
+  controller.removeUntouchedForFormer
+);
 // Todos los pagos que tocan UN período (puede haber varios abonos) — mismo par de
 // funcionalidades que listForMember/chargeMatrix, es la misma información de lectura (+
 // responsable del cobro, ver nota de la matriz arriba).

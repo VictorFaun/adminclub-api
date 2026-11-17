@@ -15,6 +15,10 @@ const chargeMatrix = [
   // Vista por año (ver payments.service.js#getChargeMatrix).
   query('year').optional().isInt({ min: 2000, max: 2100 }).withMessage('Año inválido.'),
 ];
+const removeUntouched = [
+  param('chargeId').isInt({ min: 1 }).withMessage('Identificador de cobro inválido.'),
+  param('memberId').isInt({ min: 1 }).withMessage('Identificador de miembro inválido.'),
+];
 const ensureInstance = [
   param('chargeId').isInt({ min: 1 }).withMessage('Identificador de cobro inválido.'),
   param('memberId').isInt({ min: 1 }).withMessage('Identificador de miembro inválido.'),
@@ -107,6 +111,7 @@ module.exports = {
   instanceIdParam,
   chargeMatrix,
   ensureInstance,
+  removeUntouched,
   createPayment,
   updatePayment,
   exemptInstance,

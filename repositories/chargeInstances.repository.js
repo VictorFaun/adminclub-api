@@ -183,6 +183,41 @@ class ChargeInstancesRepository extends BaseRepository {
     await conn.query('UPDATE charge_instances SET amount = ?, amount_overridden_by = ?, amount_overridden_at = NOW() WHERE id = ?', [amount, actorId, id]);
   }
 
+  /**
+   * Períodos "sin movimientos" de un miembro en un cobro que vencen desde `fromDate`: pendientes,
+   * sin abonos ni comprobantes y sin monto ajustado a mano. Son los únicos que se recalculan o se
+   * quitan al cambiar sus grupos (sql/087); los pagados, abonados o "No aplica" no se tocan.
+   * `after`: true = solo los que vencen DESPUÉS de `fromDate` (al salir de un grupo).
+   */
+  async findUntouchedForMember(chargeId, memberId, fromDate, { after = false } = {}, conn = pool) {
+    const [rows] = await conn.query(
+      `SELECT ci.id, ci.period_label, ci.amount FROM charge_instances ci
+       WHERE ci.charge_id = ? AND ci.member_id = ? AND ci.due_date ${after ? '>' : '>='} ? AND ci.status = 'pending'
+         AND ci.amount_overridden_at IS NULL
+         AND NOT EXISTS (SELECT 1 FROM payment_allocations pa WHERE pa.charge_instance_id = ci.id)
+         AND NOT EXISTS (SELECT 1 FROM payment_proofs pp WHERE pp.charge_instance_id = ci.id)`,
+      [chargeId, memberId, fromDate]
+    );
+    return rows;
+  }
+
+  async setAmount(instanceId, amount, conn = pool) {
+    await conn.query("UPDATE charge_instances SET amount = ? WHERE id = ? AND status = 'pending'", [amount, instanceId]);
+  }
+
+  async deleteUntouched(ids, conn = pool) {
+    if (!ids.length) return 0;
+    // Doble seguro: solo pendientes sin abonos ni comprobantes (borrar en cascada los perdería).
+    const [r] = await conn.query(
+      `DELETE ci FROM charge_instances ci
+       WHERE ci.id IN (?) AND ci.status = 'pending' AND ci.amount_overridden_at IS NULL
+         AND NOT EXISTS (SELECT 1 FROM payment_allocations pa WHERE pa.charge_instance_id = ci.id)
+         AND NOT EXISTS (SELECT 1 FROM payment_proofs pp WHERE pp.charge_instance_id = ci.id)`,
+      [ids]
+    );
+    return r.affectedRows;
+  }
+
   async updateAmountForMember(chargeId, memberId, amount, fromDate, conn = pool) {
     const [result] = await conn.query(
       `UPDATE charge_instances SET amount = ?

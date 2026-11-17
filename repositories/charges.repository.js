@@ -124,10 +124,11 @@ class ChargesRepository extends BaseRepository {
 
   async getTargetGroups(chargeId, conn = pool) {
     const [rows] = await conn.query(
-      'SELECT group_id, amount, position FROM charge_target_groups WHERE charge_id = ? ORDER BY position ASC',
+      'SELECT group_id, amount, position, price_only FROM charge_target_groups WHERE charge_id = ? ORDER BY position ASC',
       [chargeId]
     );
-    return rows.map((r) => ({ groupId: r.group_id, amount: Number(r.amount), position: r.position }));
+    // `priceOnly`: el grupo no agrega a nadie al cobro, solo cambia el monto (sql/087).
+    return rows.map((r) => ({ groupId: r.group_id, amount: Number(r.amount), position: r.position, priceOnly: !!r.price_only }));
   }
 
   async getExclusionMemberIds(chargeId, conn = pool) {
@@ -145,13 +146,14 @@ class ChargesRepository extends BaseRepository {
     }
   }
 
-  /** `targets`: `[{groupId, amount}]` — `position` se asigna acá según el orden del array (el
-   * orden en que llegan ya es el orden final que el admin dejó con las flechas subir/bajar). */
+  /** `targets`: `[{groupId, amount, priceOnly}]` — `position` se asigna acá según el orden del
+   * array (el orden en que llegan ya es el orden final que el admin dejó con las flechas). Los
+   * `priceOnly` (sql/087) solo cambian el monto de quienes ya están en el cobro. */
   async setTargetGroups(chargeId, targets, conn = pool) {
     await conn.query('DELETE FROM charge_target_groups WHERE charge_id = ?', [chargeId]);
     if (targets.length) {
-      await conn.query('INSERT INTO charge_target_groups (charge_id, group_id, amount, position) VALUES ?', [
-        targets.map((t, i) => [chargeId, t.groupId, t.amount, i]),
+      await conn.query('INSERT INTO charge_target_groups (charge_id, group_id, amount, position, price_only) VALUES ?', [
+        targets.map((t, i) => [chargeId, t.groupId, t.amount, i, t.priceOnly ? 1 : 0]),
       ]);
     }
   }
@@ -287,10 +289,12 @@ class ChargesRepository extends BaseRepository {
     const result = new Map(memberIds.map((id) => [id, Number(defaultAmount)]));
     if (!memberIds.length) return result;
 
+    // Un grupo de "solo precio" (sql/087) gana sobre el del grupo al que se le cobra: es el
+    // precio especial (ej. Directiva) de alguien que está en el cobro por su grupo (ej. TC Varones).
     const [groupRows] = await conn.query(
       `SELECT mgm.member_id, ctg.amount FROM charge_target_groups ctg
        INNER JOIN member_group_members mgm ON mgm.group_id = ctg.group_id
-       WHERE ctg.charge_id = ? AND mgm.member_id IN (?) ORDER BY ctg.position ASC`,
+       WHERE ctg.charge_id = ? AND mgm.member_id IN (?) ORDER BY ctg.price_only DESC, ctg.position ASC`,
       [chargeId, memberIds]
     );
     const seenGroup = new Set();
@@ -307,6 +311,51 @@ class ChargesRepository extends BaseRepository {
     for (const row of memberRows) result.set(row.member_id, Number(row.amount));
 
     return result;
+  }
+
+  /**
+   * Como resolveAmounts, pero por PERÍODO: un grupo de "solo precio" (ej. Directiva) aplica recién
+   * desde el mes (o año) en que la persona entró a ese grupo (sql/087) — antes paga el de su grupo.
+   * Devuelve `{ at(memberId, periodLabel) }`. Orden: miembro puntual > precio especial vigente en
+   * ese período (por posición) > grupo al que se le cobra (por posición) > monto general.
+   */
+  async resolveAmountSchedule(chargeId, memberIds, defaultAmount, recurrence, conn = pool) {
+    const base = new Map(memberIds.map((id) => [id, Number(defaultAmount)]));
+    const specials = new Map();
+    const fixed = new Map();
+    if (memberIds.length) {
+      const [groupRows] = await conn.query(
+        `SELECT mgm.member_id, ctg.amount, ctg.price_only, DATE_FORMAT(mgm.joined_at, '%Y-%m-%d') AS joined_at
+         FROM charge_target_groups ctg
+         INNER JOIN member_group_members mgm ON mgm.group_id = ctg.group_id
+         WHERE ctg.charge_id = ? AND mgm.member_id IN (?) ORDER BY ctg.position ASC`,
+        [chargeId, memberIds]
+      );
+      const seenBase = new Set();
+      for (const row of groupRows) {
+        if (row.price_only) {
+          if (!specials.has(row.member_id)) specials.set(row.member_id, []);
+          specials.get(row.member_id).push({ amount: Number(row.amount), since: row.joined_at });
+        } else if (!seenBase.has(row.member_id)) {
+          seenBase.add(row.member_id);
+          base.set(row.member_id, Number(row.amount));
+        }
+      }
+      const [memberRows] = await conn.query('SELECT member_id, amount FROM charge_target_members WHERE charge_id = ? AND member_id IN (?)', [chargeId, memberIds]);
+      for (const row of memberRows) fixed.set(row.member_id, Number(row.amount));
+    }
+    const started = (since, label) => {
+      if (!since || recurrence === 'once') return true;
+      return recurrence === 'monthly' ? label >= since.slice(0, 7) : label >= since.slice(0, 4);
+    };
+    return {
+      at(memberId, periodLabel) {
+        if (fixed.has(memberId)) return fixed.get(memberId);
+        const special = (specials.get(memberId) || []).find((s) => started(s.since, periodLabel));
+        if (special) return special.amount;
+        return base.has(memberId) ? base.get(memberId) : Number(defaultAmount);
+      },
+    };
   }
 
   /** Miembros ACTIVOS (con ficha, no eliminados) a quienes aplica hoy este cobro: unión de
@@ -333,6 +382,43 @@ class ChargesRepository extends BaseRepository {
     return rows.map((r) => r.id);
   }
 
+  /**
+   * Miembros (no eliminados) con períodos en este cobro que ya NO están en él (ej. salieron del
+   * grupo al que se le cobra): la matriz los sigue mostrando, para que sus deudas y pagos no
+   * queden escondidos (antes solo se veían como atrasados en su ficha).
+   */
+  async findFormerPayerIds(chargeId, conn = pool) {
+    const current = new Set(await this.expandTargetMemberIds(chargeId, conn, { inactive: 'all' }));
+    const [rows] = await conn.query(
+      `SELECT DISTINCT ci.member_id AS id FROM charge_instances ci
+       INNER JOIN members m ON m.id = ci.member_id AND m.deleted_at IS NULL
+       WHERE ci.charge_id = ?`,
+      [chargeId]
+    );
+    return rows.map((r) => r.id).filter((id) => !current.has(id));
+  }
+
+  /**
+   * Desde qué mes se le cobra a cada miembro por estar en un grupo del cobro (sql/087): el ingreso
+   * más antiguo a uno de sus grupos "a quién se le cobra". `null` si también está elegido uno a uno
+   * (se le cobra desde el inicio del cobro, como siempre). `{ memberId: 'YYYY-MM-DD' | null }`.
+   */
+  async groupJoinDates(chargeId, memberIds, conn = pool) {
+    if (!memberIds.length) return new Map();
+    const [direct] = await conn.query('SELECT member_id FROM charge_target_members WHERE charge_id = ? AND member_id IN (?)', [chargeId, memberIds]);
+    const directIds = new Set(direct.map((r) => r.member_id));
+    const [rows] = await conn.query(
+      `SELECT mgm.member_id, DATE_FORMAT(MIN(mgm.joined_at), '%Y-%m-%d') AS since FROM charge_target_groups ctg
+       INNER JOIN member_group_members mgm ON mgm.group_id = ctg.group_id
+       WHERE ctg.charge_id = ? AND ctg.price_only = 0 AND mgm.member_id IN (?)
+       GROUP BY mgm.member_id`,
+      [chargeId, memberIds]
+    );
+    const out = new Map(memberIds.map((id) => [id, null]));
+    for (const r of rows) if (!directIds.has(r.member_id)) out.set(r.member_id, r.since);
+    return out;
+  }
+
   async expandTargetMemberIds(chargeId, conn = pool, { inactive = 'none' } = {}) {
     const statusFilter = inactive === 'all' ? "m.status IN ('active', 'inactive')" : "m.status = 'active'";
     const [rows] = await conn.query(
@@ -342,7 +428,7 @@ class ChargesRepository extends BaseRepository {
          UNION
          SELECT mgm.member_id FROM charge_target_groups ctg
            INNER JOIN member_group_members mgm ON mgm.group_id = ctg.group_id
-           WHERE ctg.charge_id = ?
+           WHERE ctg.charge_id = ? AND ctg.price_only = 0
        )
        AND m.id NOT IN (SELECT member_id FROM charge_target_exclusions WHERE charge_id = ?)`,
       [chargeId, chargeId, chargeId]

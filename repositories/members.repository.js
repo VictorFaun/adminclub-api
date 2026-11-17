@@ -381,11 +381,16 @@ class MembersRepository extends BaseRepository {
     return byMember;
   }
 
-  async setGroups(memberId, groupIds, conn = pool) {
-    await conn.query('DELETE FROM member_group_members WHERE member_id = ?', [memberId]);
-    if (!groupIds.length) return;
-    const values = groupIds.map((groupId) => [groupId, memberId]);
-    await conn.query('INSERT INTO member_group_members (group_id, member_id) VALUES ?', [values]);
+  /** Deja al miembro en exactamente esos grupos: quita los que sobran y agrega los nuevos, sin
+   * tocar los que ya tenía (conservan su `joined_at`, desde cuándo se le cobra por ese grupo). */
+  async setGroups(memberId, groupIds, conn = pool, joinedAt = null) {
+    const ids = [...new Set(groupIds.map(Number))];
+    if (ids.length) await conn.query('DELETE FROM member_group_members WHERE member_id = ? AND group_id NOT IN (?)', [memberId, ids]);
+    else await conn.query('DELETE FROM member_group_members WHERE member_id = ?', [memberId]);
+    if (!ids.length) return;
+    // Los que entran: desde `joinedAt` ('YYYY-MM-DD', ej. su ingreso al club) o desde hoy.
+    const when = joinedAt ? `${String(joinedAt).slice(0, 10)} 00:00:00` : new Date();
+    await conn.query('INSERT IGNORE INTO member_group_members (group_id, member_id, joined_at) VALUES ?', [ids.map((groupId) => [groupId, memberId, when])]);
   }
 
   // --- Valores de campos personalizados ---

@@ -24,6 +24,7 @@ const membersRepository = require('../repositories/members.repository');
 const memberApplicationsRepository = require('../repositories/memberApplications.repository');
 const logger = require('../helpers/logger');
 const publicPageService = require('./publicPage.service');
+const memberGuardiansRepository = require('../repositories/memberGuardians.repository');
 
 const MAX_PENDING_PER_INSTANCE = 3;
 /** Tope de períodos en un mismo comprobante (pago múltiple). */
@@ -161,29 +162,62 @@ class PaymentProofsService {
   }
 
   /**
-   * Cobros de la persona con ese RUT: atrasados y pendientes próximos, más los cobros recurrentes
-   * activos (siempre visibles; si está al día se ofrece adelantar el próximo período).
+   * Lo que ve la persona con ese RUT: atrasados y pendientes próximos, más los cobros recurrentes
+   * activos (siempre visibles; si está al día se ofrece adelantar el próximo período), asistencia y
+   * fichas publicadas. Si es apoderado, además lo mismo de cada pupilo activo (`people`: primero
+   * ella, si tiene algo propio que mostrar, y después sus pupilos). Los campos de arriba son los de
+   * la primera persona de `people` (clientes anteriores).
    * `found:false` (200, sin error) si el RUT no corresponde a un miembro activo del club.
    */
   async lookup(code, rut) {
     const club = await this._publicClub(code);
     const member = await this._findByIdentifier(club.id, rut);
     if (!member) return { found: false };
+    const wards = (await memberGuardiansRepository.findWards(member.id)).filter((w) => w.status === 'active');
+    const own = await this._publicView(club, member);
+    const hasOwn = own.items.length || own.recurring.length || own.attendance || own.forms.length;
+    const people = [];
+    if (hasOwn || !wards.length) people.push({ memberId: member.id, self: true, firstName: member.first_name || '', lastName: '', relation: null, ...own });
+    for (const w of wards) {
+      const view = await this._publicView(club, { id: w.member_id, club_id: club.id, first_name: w.first_name });
+      people.push({ memberId: w.member_id, self: false, firstName: w.first_name || '', lastName: w.last_name || '', relation: w.relation || null, ...view });
+    }
+    const { memberId, self, firstName, lastName, relation, ...first } = people[0];
+    return {
+      found: true,
+      // Quien escribió su RUT (el saludo); `memberFirstName` es el de la primera persona mostrada.
+      viewerFirstName: member.first_name || '',
+      memberFirstName: firstName,
+      sections: { treasury: club.publicSections.treasury, attendance: club.publicSections.attendance },
+      ...first,
+      people,
+    };
+  }
+
+  /** Cobros, asistencia y fichas publicadas de UN miembro en la página pública. */
+  async _publicView(club, member) {
     const s = club.publicSections;
     const [payable, attendance, forms] = await Promise.all([
       s.treasury ? this.payableForMember(member) : { items: [], recurring: [] },
       s.attendance ? this._publicAttendance(club.id, member.id) : null,
       publicPageService.formsForMember(club.id, member.id, s.formIds),
     ]);
-    return {
-      found: true,
-      memberFirstName: member.first_name || '',
-      sections: { treasury: s.treasury, attendance: s.attendance },
-      ...payable,
-      attendance,
-      // Una pestaña por ficha publicada que la persona responde: [{ id, name, fields, values }].
-      forms,
-    };
+    // Una pestaña por ficha publicada que la persona responde: [{ id, name, fields, values }].
+    return { ...payable, attendance, forms };
+  }
+
+  /**
+   * A nombre de quién se reporta un pago en la página pública: la persona del RUT o, con
+   * `memberId`, uno de sus pupilos activos (nunca otro miembro).
+   */
+  async _payerFor(clubId, member, memberId) {
+    const id = Number(memberId);
+    if (!memberId || !Number.isInteger(id) || id === member.id) return member;
+    const ward = await membersRepository.findActiveById(id);
+    if (!ward || Number(ward.club_id) !== Number(clubId) || ward.status !== 'active' || !(await memberGuardiansRepository.exists(id, member.id))) {
+      throw AppError.notFound('No encontramos a esa persona entre tus pupilos.');
+    }
+    return ward;
   }
 
   /** Asistencia que ve la persona en la página pública: % total, por entrenamiento y sus últimas marcas. */
@@ -251,7 +285,7 @@ class PaymentProofsService {
    * (`amount` ≤ saldo); con varios NO: cada período se reporta por su saldo completo y `amount` se
    * ignora. Se crea una fila por período, todas con el mismo `batch_uuid` y el mismo archivo.
    */
-  async submitPublicProof(code, { rut, ...data }, file) {
+  async submitPublicProof(code, { rut, memberId, ...data }, file) {
     let member;
     try {
       const club = await this._publicClub(code);
@@ -259,6 +293,8 @@ class PaymentProofsService {
       if (!club.publicSections.treasury) throw AppError.notFound('Esta página no recibe pagos.');
       member = await this._findByIdentifier(club.id, rut);
       if (!member) throw AppError.notFound('No encontramos información para ese RUT.');
+      // Un apoderado puede pagar lo de sus pupilos.
+      member = await this._payerFor(club.id, member, memberId);
     } catch (error) {
       if (file) deletePrivateFile(`payment-proofs/${file.filename}`);
       throw error;

@@ -46,7 +46,7 @@ class ClubsRepository extends BaseRepository {
     }
     const whereSql = where.join(' AND ');
     const [rows] = await pool.query(
-      `SELECT id, uuid, name, public_code, description, logo_url, banner_url, primary_color, secondary_color
+      `SELECT id, uuid, name, public_code, description, logo_url, logo_thumb_url, banner_url, banner_thumb_url, primary_color, secondary_color
        FROM clubs WHERE ${whereSql} ORDER BY name ASC LIMIT ? OFFSET ?`,
       [...params, limit, offset]
     );

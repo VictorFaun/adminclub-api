@@ -8,9 +8,9 @@ const memberGuardiansRepository = require('../repositories/memberGuardians.repos
 const emailService = require('./email.service');
 const logger = require('../helpers/logger');
 const { renderClubEmail, renderHighlight, renderTable, renderNote } = require('../helpers/emailTemplate');
-const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const { PROFILE_COLS, profileJoin } = require('../helpers/memberProfileSql');
 const { CLUB_STATUS } = require('../config/constants');
+const { clubThumbUrl } = require('../helpers/clubMedia');
 
 const SETTINGS_KEY = 'debt_reminders';
 const LAST_SENT_KEY = 'debt_reminders_last_sent';
@@ -200,7 +200,7 @@ class DebtRemindersService {
     });
     const oldest = d.items[0]?.dueDate ? shortDate(d.items[0].dueDate) : null;
     return renderClubEmail({
-      club: { name: club.name, primaryColor: color, logoUrl: toAbsoluteMediaUrl(club.logo_url) },
+      club: { name: club.name, primaryColor: color, logoUrl: clubThumbUrl(club, 'logo') },
       title: own ? `Tienes ${clp(d.total)} pendientes` : `${d.name.split(' ')[0]} tiene ${clp(d.total)} pendientes`,
       preheader: `${oldest ? `${count === 1 ? 'Venció' : 'El más antiguo venció'} el ${oldest}. ` : ''}${link ? (ctaText === 'Ver mis pagos' ? 'Revisa el detalle y paga desde Mi club.' : 'Revisa el detalle y paga desde la página del club.') : 'Para pagar, comunícate con el club.'}`,
       // El monto ya va en el título y en el total de la tabla: el recuadro dice desde cuándo debe.

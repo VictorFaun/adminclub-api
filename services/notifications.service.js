@@ -3,7 +3,6 @@ const usersRepository = require('../repositories/users.repository');
 const clubsRepository = require('../repositories/clubs.repository');
 const emailService = require('./email.service');
 const { renderPlatformEmail, renderClubEmail } = require('../helpers/emailTemplate');
-const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const { parsePagination, buildMeta } = require('../helpers/pagination');
 const Notification = require('../models/Notification.model');
 const { pool } = require('../config/database');
@@ -12,6 +11,7 @@ const pushService = require('./push.service');
 const logger = require('../helpers/logger');
 const env = require('../config/env');
 const AppError = require('../helpers/AppError');
+const { clubThumbUrl } = require('../helpers/clubMedia');
 
 /** Etiqueta sobre el título del correo según el tipo de notificación — mismos textos que
  * app/src/app/core/models/notification.model.ts#NOTIFICATION_TYPE_LABEL. */
@@ -141,7 +141,7 @@ class NotificationsService {
 
     const html = club
       ? renderClubEmail({
-          club: { name: club.name, primaryColor: club.primary_color, logoUrl: toAbsoluteMediaUrl(club.logo_url) },
+          club: { name: club.name, primaryColor: club.primary_color, logoUrl: clubThumbUrl(club, 'logo') },
           title,
           bodyHtml,
           ctaText: ctaUrl ? ctaText || 'Ver más' : undefined,

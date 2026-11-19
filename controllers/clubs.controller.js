@@ -1,8 +1,6 @@
 const asyncHandler = require('../helpers/asyncHandler');
 const ApiResponse = require('../helpers/ApiResponse');
 const clubsService = require('../services/clubs.service');
-const clubsRepository = require('../repositories/clubs.repository');
-const { toAbsoluteMediaUrl, deleteUploadedFile } = require('../helpers/mediaUrl');
 
 const listPublic = asyncHandler(async (req, res) => {
   const { items, meta } = await clubsService.listPublic(req.query);
@@ -35,31 +33,23 @@ const remove = asyncHandler(async (req, res) => {
 
 const uploadLogo = asyncHandler(async (req, res) => {
   if (!req.file) return ApiResponse.ok(res, null, 'No se recibió ningún archivo.');
-  // Se guarda la ruta relativa en la BD (portable entre entornos) y se responde
-  // con la URL absoluta (el frontend puede correr en un puerto distinto al de la API).
-  const logoUrl = `/uploads/logos/${req.file.filename}`;
-  await clubsRepository.updateById(req.club.id, { logo_url: logoUrl });
-  deleteUploadedFile(req.club.logo_url);
-  return ApiResponse.ok(res, { logoUrl: toAbsoluteMediaUrl(logoUrl) }, 'Logo actualizado correctamente.');
+  const data = await clubsService.setMedia(req.club, 'logo', `/uploads/logos/${req.file.filename}`);
+  return ApiResponse.ok(res, data, 'Logo actualizado correctamente.');
 });
 
 const uploadBanner = asyncHandler(async (req, res) => {
   if (!req.file) return ApiResponse.ok(res, null, 'No se recibió ningún archivo.');
-  const bannerUrl = `/uploads/banners/${req.file.filename}`;
-  await clubsRepository.updateById(req.club.id, { banner_url: bannerUrl });
-  deleteUploadedFile(req.club.banner_url);
-  return ApiResponse.ok(res, { bannerUrl: toAbsoluteMediaUrl(bannerUrl) }, 'Banner actualizado correctamente.');
+  const data = await clubsService.setMedia(req.club, 'banner', `/uploads/banners/${req.file.filename}`);
+  return ApiResponse.ok(res, data, 'Banner actualizado correctamente.');
 });
 
 const removeLogo = asyncHandler(async (req, res) => {
-  await clubsRepository.updateById(req.club.id, { logo_url: null });
-  deleteUploadedFile(req.club.logo_url);
+  await clubsService.setMedia(req.club, 'logo', null);
   return ApiResponse.ok(res, null, 'Logo eliminado correctamente.');
 });
 
 const removeBanner = asyncHandler(async (req, res) => {
-  await clubsRepository.updateById(req.club.id, { banner_url: null });
-  deleteUploadedFile(req.club.banner_url);
+  await clubsService.setMedia(req.club, 'banner', null);
   return ApiResponse.ok(res, null, 'Banner eliminado correctamente.');
 });
 

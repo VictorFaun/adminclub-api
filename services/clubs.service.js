@@ -16,7 +16,8 @@ const AppError = require('../helpers/AppError');
 const { withTransaction } = require('../config/database');
 const { parsePagination, buildMeta } = require('../helpers/pagination');
 const crypto = require('crypto');
-const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
+const { toAbsoluteMediaUrl, deleteUploadedFile } = require('../helpers/mediaUrl');
+const { makeClubThumb, clubThumbUrl } = require('../helpers/clubMedia');
 const { CLUB_STATUS, USER_CLUB_STATUS, JOIN_REQUEST_STATUS } = require('../config/constants');
 const { diffValue, buildDiff } = require('../helpers/auditDiff');
 
@@ -51,6 +52,20 @@ const ACTIVITY_TEXT = {
 };
 
 class ClubsService {
+  /**
+   * Cambia (o quita, con `relativeUrl` null) el logo o el banner del club: guarda la ruta relativa
+   * (portable entre entornos), genera su versión reducida (sql/089; si falla queda NULL y se usa la
+   * original) y borra los archivos anteriores. Responde las URL absolutas (el frontend puede correr
+   * en otro puerto que la API).
+   */
+  async setMedia(club, kind, relativeUrl) {
+    const thumb = relativeUrl ? await makeClubThumb(relativeUrl, kind) : null;
+    await clubsRepository.updateById(club.id, { [`${kind}_url`]: relativeUrl, [`${kind}_thumb_url`]: thumb });
+    deleteUploadedFile(club[`${kind}_url`]);
+    deleteUploadedFile(club[`${kind}_thumb_url`]);
+    return { [`${kind}Url`]: toAbsoluteMediaUrl(relativeUrl), [`${kind}ThumbUrl`]: toAbsoluteMediaUrl(thumb || relativeUrl) };
+  }
+
   toDto(club) {
     return {
       id: club.id,
@@ -62,6 +77,9 @@ class ClubsService {
       description: club.description,
       logoUrl: toAbsoluteMediaUrl(club.logo_url),
       bannerUrl: toAbsoluteMediaUrl(club.banner_url),
+      // Versiones reducidas (sql/089) para lo chico; sin ellas, la original.
+      logoThumbUrl: clubThumbUrl(club, 'logo'),
+      bannerThumbUrl: clubThumbUrl(club, 'banner'),
       primaryColor: club.primary_color,
       secondaryColor: club.secondary_color,
       theme: club.theme,
@@ -236,6 +254,8 @@ class ClubsService {
         description: r.description,
         logoUrl: toAbsoluteMediaUrl(r.logo_url),
         bannerUrl: toAbsoluteMediaUrl(r.banner_url),
+        logoThumbUrl: clubThumbUrl(r, 'logo'),
+        bannerThumbUrl: clubThumbUrl(r, 'banner'),
         primaryColor: r.primary_color,
         secondaryColor: r.secondary_color,
       })),

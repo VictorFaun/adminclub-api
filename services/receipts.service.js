@@ -63,7 +63,7 @@ class ReceiptsService {
     const width = doc.page.width - 72;
     // Encabezado
     doc.rect(0, 0, doc.page.width, 6).fill(color);
-    const logo = localLogo(club.logo_url);
+    const logo = localLogo(club.logo_thumb_url) || localLogo(club.logo_url);
     let y = 30;
     if (logo) {
       try {

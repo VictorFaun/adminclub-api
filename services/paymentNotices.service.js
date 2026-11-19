@@ -9,9 +9,9 @@ const notificationsService = require('./notifications.service');
 const receiptsService = require('./receipts.service');
 const emailService = require('./email.service');
 const { renderClubEmail, renderTable, renderHighlight, renderNote, escapeHtml } = require('../helpers/emailTemplate');
-const { toAbsoluteMediaUrl } = require('../helpers/mediaUrl');
 const logger = require('../helpers/logger');
 const env = require('../config/env');
+const { clubThumbUrl } = require('../helpers/clubMedia');
 
 /** Mismas claves que paymentProofs.service.js / selfService.service.js (club_settings). */
 const publicPageService = require('./publicPage.service');
@@ -100,7 +100,7 @@ class PaymentNoticesService {
     }
     if (!recipients.size) return;
 
-    const brand = { name: club.name, primaryColor: club.primary_color, logoUrl: toAbsoluteMediaUrl(club.logo_url) };
+    const brand = { name: club.name, primaryColor: club.primary_color, logoUrl: clubThumbUrl(club, 'logo') };
     const links = {
       myClub: settings[SELF_SERVICE_KEY] === '1' ? `${env.clientUrl}/my/payments?member=${member.id}` : null,
       publicPay: publicPageService.treasuryLinkOn(settings) && club.public_code ? `${env.clientUrl}/pay/${club.public_code}` : null,

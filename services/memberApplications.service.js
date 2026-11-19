@@ -30,6 +30,7 @@ const { collectUploads, discard, splitGuardianFiles } = require('../helpers/memb
 const memberGuardiansRepository = require('../repositories/memberGuardians.repository');
 const { resolvePrivatePath, deletePrivateFile } = require('../middlewares/privateUpload.middleware');
 const { CLUB_STATUS, FUNCTIONS, USER_CLUB_STATUS } = require('../config/constants');
+const { clubThumbUrl } = require('../helpers/clubMedia');
 
 /** Invitación en la que se convirtió el viejo enlace del club `/inscripcion/<código-del-club>`. */
 const LEGACY_INVITATION_KEY = 'public_member_form_invitation_id';
@@ -921,7 +922,7 @@ class MemberApplicationsService {
       if (!to) return;
       const firstName = catalog.filter((f) => f.role === 'first_name').map((f) => fields[f.code]).find(Boolean) || '';
       const club = await clubsRepository.findById(clubId);
-      const brand = { name: club.name, primaryColor: club.primary_color, logoUrl: toAbsoluteMediaUrl(club.logo_url) };
+      const brand = { name: club.name, primaryColor: club.primary_color, logoUrl: clubThumbUrl(club, 'logo') };
       const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
       const hello = firstName ? `Hola ${esc(firstName)},` : 'Hola,';
       if (outcome === 'approved') {

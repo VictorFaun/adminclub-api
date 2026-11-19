@@ -41,8 +41,8 @@ class ClubUserInvitationsRepository extends BaseRepository {
   /** Pendientes de un usuario, con los datos del club y de quién invitó (clubes activos). */
   async findPendingForUser(userId, conn = pool) {
     const [rows] = await conn.query(
-      `SELECT cui.*, c.name AS club_name, c.description AS club_description, c.logo_url AS club_logo_url,
-              c.banner_url AS club_banner_url, c.primary_color AS club_primary_color, c.secondary_color AS club_secondary_color,
+      `SELECT cui.*, c.name AS club_name, c.description AS club_description, c.logo_url AS club_logo_url, c.logo_thumb_url AS club_logo_thumb_url,
+              c.banner_url AS club_banner_url, c.banner_thumb_url AS club_banner_thumb_url, c.primary_color AS club_primary_color, c.secondary_color AS club_secondary_color,
               u.username AS inviter_username
        FROM club_user_invitations cui
        INNER JOIN clubs c ON c.id = cui.club_id AND c.deleted_at IS NULL AND c.status = 'active'

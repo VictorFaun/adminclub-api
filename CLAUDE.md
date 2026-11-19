@@ -110,6 +110,7 @@ no la tiene (ver `invitations.service.js#create`).
 - Archivos subidos (`uploads/`): usar `middlewares/upload.middleware.js#uploadFor(subdir)`. SVG
   está deliberadamente prohibido (riesgo XSS almacenado, se sirven estáticos tal cual). La
   extensión del archivo se deriva del `mimetype` validado, nunca de `originalname`.
+- Logo y banner del club (sql/089, `helpers/clubMedia.js`): al subirlos (`clubs.service.js#setMedia`) se genera una versión reducida (`logo_thumb_url` 256 px PNG, `banner_thumb_url` 960 px JPG; NULL si falla). Los DTO traen `logoThumbUrl`/`bannerThumbUrl` (con la original de respaldo) y los correos y el recibo usan `clubThumbUrl(club, kind)`. Las originales solo van donde se ven grandes (inicio del club, página pública y formulario público). Para clubes antiguos: `npm run media:club-thumbs`.
 - Rate limiting general ya aplicado globalmente en `app.js` vía `env.apiPrefix`; endpoints de auth
   sensibles pueden necesitar un rate limit más estricto (`authRateLimitMax`) — ver
   `middlewares/rateLimit.middleware.js`.

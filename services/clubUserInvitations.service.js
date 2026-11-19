@@ -130,6 +130,8 @@ class ClubUserInvitationsService {
         description: r.club_description,
         logoUrl: toAbsoluteMediaUrl(r.club_logo_url),
         bannerUrl: toAbsoluteMediaUrl(r.club_banner_url),
+        logoThumbUrl: toAbsoluteMediaUrl(r.club_logo_thumb_url || r.club_logo_url),
+        bannerThumbUrl: toAbsoluteMediaUrl(r.club_banner_thumb_url || r.club_banner_url),
         primaryColor: r.club_primary_color,
         secondaryColor: r.club_secondary_color,
       },

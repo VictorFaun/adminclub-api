@@ -16,6 +16,11 @@ const update = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, form, 'Ficha actualizada correctamente.');
 });
 
+const reorder = asyncHandler(async (req, res) => {
+  const forms = await memberFormsService.reorder(req.club.id, req.body.formIds, req.user.id);
+  return ApiResponse.ok(res, forms, 'Orden de las fichas actualizado.');
+});
+
 const remove = asyncHandler(async (req, res) => {
   await memberFormsService.remove(req.club.id, id(req), req.user.id);
   return ApiResponse.ok(res, null, 'Ficha eliminada correctamente.');
@@ -38,4 +43,4 @@ const unassign = asyncHandler(async (req, res) => {
   return ApiResponse.ok(res, data, 'Ficha quitada correctamente.');
 });
 
-module.exports = { list, create, update, remove, setFields, members, assign, unassign };
+module.exports = { list, create, update, reorder, remove, setFields, members, assign, unassign };

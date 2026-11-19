@@ -22,6 +22,8 @@ const FORM_READERS = [
 router.get('/', requireFunction(...FORM_READERS), controller.list);
 
 router.post('/', requireFunction(FUNCTIONS.VIEW_MEMBER_FIELDS), requireFunction(FUNCTIONS.CREATE_MEMBER_FIELDS), sanitizeBody, validation.createForm, handleValidation, controller.create);
+// Orden de las fichas (antes de '/:id' para que "order" no se lea como id).
+router.put('/order', requireFunction(FUNCTIONS.VIEW_MEMBER_FIELDS), requireFunction(FUNCTIONS.EDIT_MEMBER_FIELDS), sanitizeBody, validation.reorder, handleValidation, controller.reorder);
 router.put('/:id', requireFunction(FUNCTIONS.VIEW_MEMBER_FIELDS), requireFunction(FUNCTIONS.EDIT_MEMBER_FIELDS), sanitizeBody, validation.updateForm, handleValidation, controller.update);
 router.put('/:id/fields', requireFunction(FUNCTIONS.VIEW_MEMBER_FIELDS), requireFunction(FUNCTIONS.EDIT_MEMBER_FIELDS), sanitizeBody, validation.setFields, handleValidation, controller.setFields);
 router.delete('/:id', requireFunction(FUNCTIONS.VIEW_MEMBER_FIELDS), requireFunction(FUNCTIONS.DELETE_MEMBER_FIELDS), validation.formId, handleValidation, controller.remove);

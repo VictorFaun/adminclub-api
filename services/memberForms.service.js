@@ -178,6 +178,22 @@ class MemberFormsService {
   }
 
   /**
+   * Orden de las fichas (`formIds` = todas las del club, en el orden final). Es el que se usa al
+   * listarlas en todas partes y, sin prioridad elegida en la invitación, para decidir de qué ficha
+   * sale un dato especial repetido (nombre, identificador…; vista member_profiles).
+   */
+  async reorder(clubId, formIds, actorId) {
+    const forms = await memberFormsRepository.findByClub(clubId);
+    const ids = [...new Set((formIds || []).map(Number))];
+    const current = new Set(forms.map((f) => f.id));
+    if (ids.length !== current.size || ids.some((id) => !current.has(id))) throw AppError.badRequest('Indica todas las fichas del club, cada una una vez.');
+    await withTransaction((conn) => memberFormsRepository.setOrder(clubId, ids, conn));
+    const name = new Map(forms.map((f) => [f.id, f.name]));
+    await auditRepository.logAction({ userId: actorId, clubId, action: 'MEMBER_FORM_UPDATED', entityType: 'member_form', entityId: ids[0], changes: { order: ids.map((id) => name.get(id)) } });
+    return this.list(clubId);
+  }
+
+  /**
    * Elimina la ficha. Los campos que SOLO estaban en ella se eliminan también (con sus valores):
    * un campo que no está en ninguna ficha no se le pediría a nadie. El club conserva al menos una.
    */

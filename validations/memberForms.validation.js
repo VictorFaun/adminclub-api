@@ -18,6 +18,8 @@ const updateForm = [...formId, body('name').optional().trim().isLength({ min: 1,
 
 const setFields = [...formId, body('fieldIds').isArray({ max: 500 }).withMessage('Indica los campos de la ficha.'), body('fieldIds.*').isInt({ min: 1 })];
 
+const reorder = [body('formIds').isArray({ min: 1, max: 200 }).withMessage('Indica el orden de las fichas.'), body('formIds.*').isInt({ min: 1 })];
+
 const assign = [
   ...formId,
   body('all').optional().isBoolean().toBoolean(),
@@ -29,4 +31,4 @@ const assign = [
 
 const unassign = [...formId, body('memberIds').isArray({ min: 1, max: 2000 }).withMessage('Indica los miembros.'), body('memberIds.*').isInt({ min: 1 })];
 
-module.exports = { formId, createForm, updateForm, setFields, assign, unassign };
+module.exports = { formId, createForm, updateForm, reorder, setFields, assign, unassign };

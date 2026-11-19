@@ -196,6 +196,7 @@ Prefijo base: `/api/v1`. Salvo que se indique "público", todos los endpoints re
 | `DELETE /members/:id/form-versions/:versionId` | Elimina una versión (queda al menos una; si era la principal vuelve la anterior) | `DELETE_MEMBER_FORM_VERSIONS` |
 | `GET /members/forms` | Fichas del club (`fieldIds` en orden, `isDefault`, `memberCount`) | lectura de campos, `CREATE_/EDIT_INVITATIONS` |
 | `POST /members/forms` · `PUT /members/forms/:id` · `DELETE /members/forms/:id` | Crear / editar (nombre, descripción, por defecto) / eliminar (los campos que solo estaban en ella se eliminan; el club conserva al menos una) | `VIEW_MEMBER_FIELDS` + `CREATE_/EDIT_/DELETE_MEMBER_FIELDS` |
+| `PUT /members/forms/order` | Orden de las fichas (`{ formIds }`, todas las del club): el de los listados y, sin prioridad en la invitación, el que decide de qué ficha sale un dato especial repetido | `VIEW_MEMBER_FIELDS` + `EDIT_MEMBER_FIELDS` |
 | `PUT /members/forms/:id/fields` | Campos de la ficha y su orden (`{ fieldIds }`); no permite quitar un campo que no está en otra ficha | `VIEW_MEMBER_FIELDS` + `EDIT_MEMBER_FIELDS` |
 | `GET /members/forms/:id/members` · `POST .../assign` (`{ all, groupIds, memberIds }`) · `POST .../unassign` (`{ memberIds }`) | A quiénes se les pide la ficha | `VIEW_MEMBERS` (+ `EDIT_MEMBERS` para cambiarlo) |
 | `GET /members/:id/wards` | Miembros de los que es apoderado | `VIEW_MEMBERS` / `VIEW_MEMBERS_SCOPED` |

@@ -49,6 +49,11 @@ class MemberFormsRepository extends BaseRepository {
     return row.next;
   }
 
+  /** Orden de las fichas del club: `ids` en el orden final (1, 2, 3…). */
+  async setOrder(clubId, ids, conn = pool) {
+    for (const [i, id] of ids.entries()) await conn.query('UPDATE member_forms SET sort_order = ? WHERE id = ? AND club_id = ?', [i + 1, id, clubId]);
+  }
+
   async createForm({ clubId, name, description = null, isDefault = 0, sortOrder }, conn = pool) {
     const [result] = await conn.query(
       'INSERT INTO member_forms (uuid, club_id, name, description, is_default, sort_order) VALUES (UUID(), ?, ?, ?, ?, ?)',

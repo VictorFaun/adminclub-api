@@ -18,6 +18,8 @@ const FORMS_COL = 'Fichas';
 const STATUS_COL = 'Estado';
 const GROUPS_COL = 'Grupos';
 const JOINED_COL = 'Fecha de ingreso';
+/** ID interno del miembro (opcional): identifica a quien no tiene RUT al exportar/importar. */
+const ID_COL = 'ID';
 const MAX_IMPORT_ROWS = 2000;
 
 /** Normaliza un encabezado para compararlo: minúsculas, sin tildes, sin "*" ni espacios extra. */
@@ -224,7 +226,9 @@ class MemberSpreadsheetService {
     const { fields, groups } = await this._groupByForms(clubId, ordered, shownForms);
     const seeGroups = permissionService.hasAnyFunction(authContext, [FUNCTIONS.VIEW_MEMBER_GROUPS, FUNCTIONS.MANAGE_MEMBER_GROUPS]);
     const seeJoined = permissionService.hasAnyFunction(authContext, [FUNCTIONS.VIEW_MEMBER_MEMBERSHIP, FUNCTIONS.EDIT_MEMBER_MEMBERSHIP]);
+    const withId = ['1', 'true'].includes(String(query.withId ?? ''));
     const columns = [
+      ...(withId ? [{ header: ID_COL, width: 8 }] : []),
       { header: 'Nombre completo', width: 30 },
       ...fields.map((f) => ({ header: f.label, type: f.field_type === 'date' ? 'date' : undefined })),
       { header: STATUS_COL, width: 10 },
@@ -235,6 +239,7 @@ class MemberSpreadsheetService {
       const byField = new Map((valuesByMember[m.id] || []).map((v) => [v.field_id, v.value]));
       const joined = memberships.get(m.id)?.[0]?.startedOn ?? null;
       return [
+        ...(withId ? [m.id] : []),
         membersService._fullName(m),
         ...fields.map((f) => this._cellValue(f, byField.get(f.id))),
         m.status === 'active' ? 'Activo' : 'Inactivo',
@@ -244,8 +249,8 @@ class MemberSpreadsheetService {
     });
     const sheetName = formId && formName.has(formId) ? formName.get(formId).slice(0, 31) : 'Miembros';
     // Fila de grupos: a qué ficha(s) pertenece cada columna de datos.
-    const sheetGroups = groups ? [{ label: '', span: 1 }, ...groups, { label: '', span: 1 + (seeGroups ? 1 : 0) + (seeJoined ? 1 : 0) }] : null;
-    return { name: sheetName, columns, rows: data, groups: sheetGroups, freezeColumns: 1 };
+    const sheetGroups = groups ? [{ label: '', span: 1 + (withId ? 1 : 0) }, ...groups, { label: '', span: 1 + (seeGroups ? 1 : 0) + (seeJoined ? 1 : 0) }] : null;
+    return { name: sheetName, columns, rows: data, groups: sheetGroups, freezeColumns: 1 + (withId ? 1 : 0) };
   }
 
   /**
@@ -253,7 +258,7 @@ class MemberSpreadsheetService {
    * `formIds`: planilla para esas fichas (sus campos y sus obligatorios con "*"); vacío = las
    * fichas por defecto del club (lo que recibe una fila sin la columna "Fichas").
    */
-  async templateSheets(clubId, authContext, formIds = []) {
+  async templateSheets(clubId, authContext, formIds = [], { withId = false } = {}) {
     const forms = await memberFormsRepository.findByClub(clubId);
     // Las fichas elegidas o, sin elegir, todas (no hay fichas por defecto, sql/086).
     const chosen = formIds.length ? forms.filter((f) => formIds.includes(f.id)) : [];
@@ -264,7 +269,7 @@ class MemberSpreadsheetService {
     const formsByField = await this._formsByField(clubId);
     const groups = await memberGroupsRepository.findOptions(clubId);
     const formNames = target.map((f) => f.name).join(', ');
-    const headers = [...fields.map((f) => (f.is_required ? `${f.label} *` : f.label)), STATUS_COL, GROUPS_COL, JOINED_COL];
+    const headers = [...(withId ? [ID_COL] : []), ...fields.map((f) => (f.is_required ? `${f.label} *` : f.label)), STATUS_COL, GROUPS_COL, JOINED_COL];
     const typeText = (f) =>
       ({
         text: 'Texto',
@@ -285,12 +290,13 @@ class MemberSpreadsheetService {
         name: 'Miembros',
         columns: headers.map((h) => ({ header: h })),
         rows: [],
-        groups: formGroups ? [...formGroups, { label: '', span: 3 }] : null,
+        groups: formGroups ? [...(withId ? [{ label: '', span: 1 }] : []), ...formGroups, { label: '', span: 3 }] : null,
       },
       {
         name: 'Instrucciones',
         columns: [{ header: 'Columna', width: 30 }, { header: 'Qué poner', width: 40 }, { header: 'Fichas', width: 30 }, { header: 'Opciones válidas', width: 60 }],
         rows: [
+          ...(withId ? [[ID_COL, 'ID del miembro en Mi Club (sale al exportar con ID). Vacío = persona nueva o se busca por el identificador (ej. RUT)', '', '']] : []),
           ...fields.map((f) => [f.label + (f.is_required ? ' (obligatorio)' : ''), typeText(f), (formsByField[f.id] || []).join(', '), parseOptions(f).join(', ')]),
           [STATUS_COL, 'Activo o Inactivo (vacío = Activo)', '', 'Activo, Inactivo'],
           [GROUPS_COL, 'Nombres de los grupos separados por coma', '', (groups || []).map((g) => g.name).join(', ')],
@@ -302,6 +308,7 @@ class MemberSpreadsheetService {
           'La fila de colores sobre los encabezados indica a qué ficha(s) pertenece cada columna; no hace falta borrarla.',
           'Las imágenes y documentos se suben después, desde cada ficha.',
           'El identificador (ej. el RUT) solo es obligatorio si la ficha lo marca así. Si viene y ya es de un miembro, al revisar se elige si sus datos se guardan como versión nueva de sus fichas.',
+          ...(withId ? ['Columna ID: si la fila trae el ID de un miembro, manda el ID y se actualiza ese miembro (aunque no tenga RUT o el RUT sea otro). Si no trae ID o el ID no se encuentra, se busca por el identificador (ej. RUT) como siempre. Al importar, activa "Usar el ID de los miembros".'] : []),
         ],
       },
     ];
@@ -322,10 +329,10 @@ class MemberSpreadsheetService {
    * alguien que ya es miembro se guarda solo si su número viene en `updateRows` (versión nueva de
    * las fichas que tenía; las que no tenía se le agregan).
    */
-  async importFile(clubId, buffer, { dryRun, formIds = [], updateRows = [] }, actorId, authContext) {
+  async importFile(clubId, buffer, { dryRun, formIds = [], updateRows = [], useId = false }, actorId, authContext) {
     const canUpdate = permissionService.hasFunction(authContext, FUNCTIONS.EDIT_MEMBERS);
     // El encabezado es la fila con "Fichas" o algún campo; la de grupos (si viene) se salta.
-    const knownHeaders = new Set([FORMS_COL, STATUS_COL, GROUPS_COL, JOINED_COL].map(norm));
+    const knownHeaders = new Set([FORMS_COL, STATUS_COL, GROUPS_COL, JOINED_COL, ...(useId ? [ID_COL] : [])].map(norm));
     const catalogForHeaders = await memberFieldsRepository.findByClub(clubId);
     for (const f of catalogForHeaders) knownHeaders.add(norm(f.label)).add(norm(f.code));
     const isHeaderRow = (texts) => texts.some((t) => t && knownHeaders.has(norm(t)));
@@ -361,6 +368,7 @@ class MemberSpreadsheetService {
       if (n === norm(STATUS_COL)) return { kind: 'status' };
       if (n === norm(GROUPS_COL)) return { kind: 'groups' };
       if (n === norm(JOINED_COL)) return { kind: 'joined' };
+      if (useId && n === norm(ID_COL)) return { kind: 'id' };
       const groupForm = groupRow?.[i] ? forms.find((f) => norm(f.name) === norm(groupRow[i])) : null;
       const pool = groupForm ? candidates.filter((f) => formOfField.get(f.id) === groupForm.id) : candidates;
       // En el orden de prioridad (fichas elegidas primero), por nombre o código.
@@ -380,17 +388,21 @@ class MemberSpreadsheetService {
       return own.map((x) => rowFields[x.code]).find(Boolean) || catalog.filter((x) => !x.role && labels.has(norm(x.label))).map((x) => rowFields[x.code]).find(Boolean) || null;
     };
     const seenIdentifiers = new Map();
+    const seenIds = new Map();
     const formName = new Map(forms.map((f) => [f.id, f.name]));
     const results = [];
     for (const { rowNumber, values } of rows) {
       const data = { fields: {}, status: 'active', groupIds: [], joinedOn: null, formIds: null };
+      let rawId = '';
       rowFields = data.fields;
       const problems = [];
       mapping.forEach((m, i) => {
         if (!m) return;
         const raw = values[i];
         const text = raw === null || raw === undefined ? '' : raw instanceof Date ? raw : String(raw).trim();
-        if (m.kind === 'forms') {
+        if (m.kind === 'id') {
+          rawId = text instanceof Date ? '' : String(text);
+        } else if (m.kind === 'forms') {
           const names = String(text || '').split(/[,;]/).map((x) => x.trim()).filter(Boolean);
           if (!names.length) return;
           data.formIds = [];
@@ -438,12 +450,34 @@ class MemberSpreadsheetService {
       // versión nueva de sus fichas (se elige en la revisión).
       const { value: identifier, field: idField } = await membersService.identifierFrom(clubId, data.fields);
       let existing = null;
+      // Avisos que no impiden subir la fila (se muestran en la revisión).
+      const warnings = [];
+      // Con "Usar el ID": si el ID es de un miembro del club, manda el ID (aunque el RUT diga otra
+      // cosa o no venga); si no hay ID o no se encuentra, se busca por el RUT / identificador.
+      let byId = null;
+      if (rawId) {
+        const memberId = Number(rawId);
+        if (!Number.isInteger(memberId) || memberId <= 0) warnings.push(`El ID "${rawId}" no es válido: se busca por ${idField?.label ?? 'el identificador'}.`);
+        else if (seenIds.has(memberId)) problems.push(`ID ${memberId} repetido (también en la fila ${seenIds.get(memberId)}).`);
+        else {
+          seenIds.set(memberId, rowNumber);
+          const found = await membersRepository.findActiveById(memberId);
+          if (!found || Number(found.club_id) !== Number(clubId)) warnings.push(`No hay un miembro con el ID ${memberId} en este club: se busca por ${idField?.label ?? 'el identificador'}.`);
+          else byId = found;
+        }
+      }
       if (identifier) {
         if (seenIdentifiers.has(identifier)) problems.push(`${idField?.label ?? 'Identificador'} repetido (también en la fila ${seenIdentifiers.get(identifier)}).`);
         else seenIdentifiers.set(identifier, rowNumber);
-        existing = await membersService.findByIdentifier(clubId, data.fields);
-        if (existing && !canUpdate) problems.push(`Ya es miembro (${membersService._fullName(existing)}) y no tienes permiso para editar miembros.`);
+        const byIdentifier = await membersService.findByIdentifier(clubId, data.fields);
+        if (!byId) existing = byIdentifier;
+        else if (byIdentifier && byIdentifier.id !== byId.id) {
+          // Manda el ID, pero dos miembros no pueden tener el mismo RUT.
+          problems.push(`Se usa el ID ${byId.id} (${membersService._fullName(byId)}), pero ${idField?.label ?? 'el identificador'} ${identifier} ya es de ${membersService._fullName(byIdentifier)}: corrígelo en la planilla o deja la celda vacía.`);
+        }
       }
+      if (byId) existing = byId;
+      if (existing && !canUpdate) problems.push(`Ya es miembro (${membersService._fullName(existing)}) y no tienes permiso para editar miembros.`);
 
       // Datos que tiene hoy (si ya es miembro): para ver qué cambia y qué obligatorio sigue faltando.
       const current = existing ? Object.fromEntries((await membersRepository.getFieldValues(existing.id)).map((v) => [v.field_id, v.value])) : {};
@@ -496,7 +530,7 @@ class MemberSpreadsheetService {
           forms: rowFormIds.map((id) => ({ formId: id, name: formName.get(id), hasForm: has.includes(id), nextVersion: has.includes(id) ? (counts[existing.id]?.[id] ?? 1) + 1 : 1 })),
         };
       }
-      const detail = { values: newValues, changes, missing };
+      const detail = { values: newValues, changes, missing, warnings };
       if (problems.length || missing.length) {
         results.push({ row: rowNumber, name, forms: formsText, ok: false, errors: problems, existing: match, ...detail });
         continue;

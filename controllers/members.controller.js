@@ -62,7 +62,9 @@ const exportMembers = asyncHandler(async (req, res) => {
 const importTemplate = asyncHandler(async (req, res) => {
   // `formIds` (opcional, '1,2'): planilla para esas fichas (sus campos y obligatorios).
   const formIds = String(req.query.formIds || '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
-  const sheets = await memberSpreadsheetService.templateSheets(req.club.id, req.authContext, formIds);
+  // `withId`: agrega la columna "ID" (para quienes no tienen RUT).
+  const withId = ['1', 'true'].includes(String(req.query.withId ?? ''));
+  const sheets = await memberSpreadsheetService.templateSheets(req.club.id, req.authContext, formIds, { withId });
   return sendWorkbook(res, 'planilla-miembros.xlsx', sheets);
 });
 
@@ -73,7 +75,9 @@ const importMembers = asyncHandler(async (req, res) => {
   const formIds = String(req.body.formIds || '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
   // `updateRows` ('3,7'): filas de personas que ya son miembros que se guardan como versión nueva.
   const updateRows = String(req.body.updateRows || '').split(',').map(Number).filter((n) => Number.isInteger(n) && n > 0);
-  const data = await memberSpreadsheetService.importFile(req.club.id, req.file.buffer, { dryRun, formIds, updateRows }, req.user.id, req.authContext);
+  // `useId`: la columna "ID" identifica al miembro (para quienes no tienen RUT).
+  const useId = String(req.body.useId ?? 'false') === 'true';
+  const data = await memberSpreadsheetService.importFile(req.club.id, req.file.buffer, { dryRun, formIds, updateRows, useId }, req.user.id, req.authContext);
   return ApiResponse.ok(res, data, dryRun ? 'Planilla revisada.' : `Se importaron ${data.valid} miembros y se actualizaron ${data.updated}.`);
 });
 
